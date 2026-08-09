@@ -1,0 +1,54 @@
+-- ============================================================================
+-- map_sql_sample.txt — fixture for tests/test_map_sql.py
+--
+-- REAL lines: verbatim (byte-for-byte) from
+--   https://cw.x2.international.travian.com/map.sql
+-- fetched live 2026-08-09 (the plan's 2026-08-08 snapshot era; the server
+-- snapshot file, 6576 INSERT lines total, contains the same snapshot data).
+-- Original 1-based line numbers within the downloaded file are kept in the
+-- `-- line N:` comments. Real data notes:
+--   * is_capital is TRUE/FALSE; is_city/is_harbor are NULL on this server
+--     (parser maps NULL->False for the three boolean fields, see map_sql.py)
+--   * names carry HTML entities (&#39;), unicode (Polish, Arabic, Cyrillic,
+--     U+2019 curly apostrophe) and ')' characters; alliance_tag '' occurs
+--   * region is always a real name here (never NULL / '')
+--
+-- SYNTHETIC lines: same format, added because the real cw.x2 snapshot never
+-- emits these cases; they lock parser behavior the plan requires ('' quoting,
+-- NULL region, TRUE/FALSE is_city/is_harbor, comma inside a string, duplicate
+-- village_id, malformed line). Village ids 900000+ are synthetic.
+-- ============================================================================
+
+-- line 1 (Natars, TRUE capital, empty alliance_tag ''):
+INSERT INTO `x_world` VALUES (1,-200,200,5,1,'Natars',1,'Natars',0,'',95,'Caledonia',TRUE,NULL,NULL,0);
+-- line 2 (FALSE capital):
+INSERT INTO `x_world` VALUES (2374,168,195,6,22992,'EA07',169,'sok0612',3,'-FoE-',237,'Hyperborea',FALSE,NULL,NULL,0);
+-- line 5 (VP>0, FALSE capital):
+INSERT INTO `x_world` VALUES (2977,-31,193,1,23174,'New village',1983,'BattleScout',11,'PR-U',118,'Cimbri',FALSE,NULL,NULL,10);
+-- line 28 (King's Landing — HTML entity &#39;, TRUE capital, VP=331):
+INSERT INTO `x_world` VALUES (6380,164,185,8,20989,'King&#39;s Landing',601,'Kingslayer',19,'NULL1',500,'Hyperborea',TRUE,NULL,NULL,331);
+-- line 79 (')' inside a name):
+INSERT INTO `x_world` VALUES (14479,-158,164,3,20602,':)',591,'Ice Storm',21,'AAA',441,'Caledonia',FALSE,NULL,NULL,0);
+-- line 172 (Polish unicode name with ą/ę/ś, VP=93):
+INSERT INTO `x_world` VALUES (26536,-131,134,1,22444,'06',189,'Poruś',24,'UFO',429,'Caledonia',FALSE,NULL,NULL,93);
+-- line 181 (Polish unicode name PłockiePolis):
+INSERT INTO `x_world` VALUES (26943,-125,133,8,15109,'01.PłockiePolis',337,'ryzoweklechdy',24,'UFO',714,'Eburacum',FALSE,NULL,NULL,19);
+-- line 288 (Arabic unicode name):
+INSERT INTO `x_world` VALUES (30720,43,124,8,23305,'قرية جديدة',601,'Kingslayer',19,'NULL1',2,'Burgundi',FALSE,NULL,NULL,0);
+-- line 854 (U+2019 curly apostrophe inside a name):
+INSERT INTO `x_world` VALUES (38791,94,104,6,6256,'MPTrav’s landsby (i)',18,'MPTrav',19,'NULL1',647,'Venedae',FALSE,NULL,NULL,0);
+
+-- synthetic: SQL doubled-quote '' inside a string ('O''Brien' -> O'Brien),
+-- TRUE is_harbor:
+INSERT INTO `x_world` VALUES (900001,-50,50,1,900001,'O''Brien',42,'Tester',7,'TAG',10,'Syntheticia',FALSE,FALSE,TRUE,5);
+-- synthetic: NULL region -> None, TRUE is_capital:
+INSERT INTO `x_world` VALUES (900002,-49,49,1,900002,'Null Region',43,'Tester',7,'TAG',11,NULL,TRUE,FALSE,FALSE,0);
+-- synthetic: '' region -> None, TRUE is_city:
+INSERT INTO `x_world` VALUES (900003,-48,48,1,900003,'Empty Region',44,'Tester',7,'TAG',12,'',FALSE,TRUE,FALSE,1);
+-- synthetic: comma inside a quoted string (quote-aware splitting):
+INSERT INTO `x_world` VALUES (900004,-47,47,1,900004,'Village, 12',45,'Tester',7,'TAG',13,'Syntheticia',FALSE,FALSE,FALSE,2);
+-- synthetic: duplicate of village_id 1 (real line above) — LAST occurrence wins:
+INSERT INTO `x_world` VALUES (999999,0,0,1,1,'Natars Last',46,'Tester',7,'TAG',14,'Syntheticia',FALSE,TRUE,TRUE,3);
+
+-- synthetic: malformed line (wrong field count) — must warn + skip:
+INSERT INTO `x_world` VALUES (1,2,3,4,5);
