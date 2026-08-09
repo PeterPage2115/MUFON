@@ -12,6 +12,13 @@ locked by these tests:
 - ``lost_deleted`` = was ours in prev, absent from curr entirely.
 - ``prev_rows=None`` (no previous snapshot) → deltas None / no events.
 - Events are sorted by village_id for stable embeds.
+- ``region_stats``: regions of interest = ours in curr OR prev (lost regions
+  stay listed with zeros); ``None`` region groups as ``""``; share guards
+  division-by-zero → 0.0; delta None only when prev is None; sorted by
+  ``our_pop`` desc, region name asc.
+- ``top_players``: three separate rankings capped at n; player universe =
+  curr-ours ∪ prev-ours; growth None only when prev is None; strict-gained
+  for ``new_villages``; ties break by ``player_id``.
 """
 
 import logging
@@ -19,8 +26,15 @@ from typing import Any
 
 import pytest
 
-from travian.metrics import compute_deltas, resolve_alliance_ids, village_events
-from travian.models import VillageRow
+from travian.metrics import (
+    compute_deltas,
+    region_alliance_totals,
+    region_stats,
+    resolve_alliance_ids,
+    top_players,
+    village_events,
+)
+from travian.models import PlayerStat, RegionStat, VillageRow
 from travian.store import connect, init_schema, recent_logs
 
 
@@ -54,6 +68,7 @@ def _row(
     *,
     population: int = 100,
     victory_points: int = 300,
+    region: str | None = None,
 ) -> VillageRow:
     """Concise row builder for delta/event scenarios (tag derived from alliance)."""
     return make_village_row(
@@ -64,6 +79,7 @@ def _row(
         player_name=f"P{player_id}",
         population=population,
         victory_points=victory_points,
+        region=region,
         name=f"Village {village_id}",
     )
 
@@ -385,3 +401,302 @@ class TestVillageEvents:
         assert [e.village_id for e in gained] == [4]
         assert [e.event for e in lost] == ["lost_deleted"]
         assert lost[0].village_id == 3
+
+
+class TestRegionStats:
+    def test_aggregates_our_region_with_share_and_delta(self):
+        prev = [
+            _row(1, 7, 1, population=100, region="North"),
+            _row(2, 7, 2, population=50, region="North"),
+        ]
+        curr = [
+            _row(1, 7, 1, population=110, region="North"),
+            _row(2, 7, 2, population=50, region="North"),
+            _row(3, 8, 5, population=900, region="North"),
+        ]
+
+        stats = region_stats(prev, curr, {7})
+
+        assert len(stats) == 1
+        region = stats[0]
+        assert isinstance(region, RegionStat)
+        assert region.region == "North"
+        assert region.our_villages == 2
+        assert region.our_pop == 160
+        assert region.region_total_pop == 1060
+        assert region.share == pytest.approx(160 / 1060)
+        assert region.delta == 10
+
+    def test_multiple_regions_aggregated_independently(self):
+        curr = [
+            _row(1, 7, 1, population=100, region="North"),
+            _row(2, 7, 1, population=200, region="South"),
+            _row(3, 8, 5, population=700, region="North"),
+        ]
+
+        stats = region_stats(None, curr, {7})
+
+        by_name = {s.region: s for s in stats}
+        assert set(by_name) == {"North", "South"}
+        north = by_name["North"]
+        assert (north.our_villages, north.our_pop, north.region_total_pop) == (1, 100, 800)
+        assert north.share == pytest.approx(100 / 800)
+        assert north.delta is None
+        south = by_name["South"]
+        assert (south.our_villages, south.our_pop, south.region_total_pop) == (1, 200, 200)
+        assert south.share == pytest.approx(1.0)
+        assert south.delta is None
+
+    def test_enemy_only_region_in_curr_not_included(self):
+        curr = [_row(9, 8, 5, population=900, region="EnemyLand")]
+
+        stats = region_stats(None, curr, {7})
+
+        assert stats == []
+
+    def test_enemy_only_region_in_prev_not_included(self):
+        prev = [_row(9, 8, 5, population=900, region="EnemyLand")]
+        curr = [_row(1, 7, 1, population=100, region="Home")]
+
+        stats = region_stats(prev, curr, {7})
+
+        assert [s.region for s in stats] == ["Home"]
+
+    def test_lost_region_still_listed_with_zero_values(self):
+        prev = [_row(1, 7, 1, population=300, region="Ghost")]
+
+        stats = region_stats(prev, [], {7})
+
+        assert len(stats) == 1
+        ghost = stats[0]
+        assert ghost.region == "Ghost"
+        assert ghost.our_villages == 0
+        assert ghost.our_pop == 0
+        assert ghost.region_total_pop == 0
+        assert ghost.share == 0.0
+        assert ghost.delta == -300
+
+    def test_lost_region_with_enemies_share_zero_delta_negative(self):
+        prev = [_row(1, 7, 1, population=300, region="Ghost")]
+        curr = [_row(9, 8, 5, population=500, region="Ghost")]
+
+        stats = region_stats(prev, curr, {7})
+
+        ghost = stats[0]
+        assert ghost.our_pop == 0
+        assert ghost.region_total_pop == 500
+        assert ghost.share == 0.0
+        assert ghost.delta == -300
+
+    def test_share_zero_when_region_total_pop_is_zero(self):
+        curr = [_row(1, 7, 1, population=0, region="Empty")]
+
+        stats = region_stats(None, curr, {7})
+
+        assert stats[0].region_total_pop == 0
+        assert stats[0].share == 0.0
+
+    def test_none_region_grouped_as_empty_string(self):
+        curr = [
+            make_village_row(village_id=1, alliance_id=7, player_id=1, population=100, region=None),
+            make_village_row(village_id=2, alliance_id=7, player_id=1, population=50, region=""),
+        ]
+
+        stats = region_stats(None, curr, {7})
+
+        assert len(stats) == 1
+        assert stats[0].region == ""
+        assert stats[0].our_villages == 2
+        assert stats[0].our_pop == 150
+
+    def test_delta_curr_minus_zero_when_region_absent_in_prev(self):
+        prev = [_row(9, 8, 5, population=500, region="North")]
+        curr = [_row(1, 7, 1, population=100, region="North")]
+
+        stats = region_stats(prev, curr, {7})
+
+        assert stats[0].our_pop == 100
+        assert stats[0].delta == 100
+
+    def test_sorted_by_our_pop_desc_then_region_name(self):
+        curr = [
+            _row(1, 7, 1, population=50, region="Alpha"),
+            _row(2, 7, 1, population=300, region="Beta"),
+            _row(3, 7, 1, population=50, region="Gamma"),
+        ]
+
+        stats = region_stats(None, curr, {7})
+
+        assert [s.region for s in stats] == ["Beta", "Alpha", "Gamma"]
+
+
+class TestRegionAllianceTotals:
+    def test_top5_alliances_by_population_per_region(self):
+        rows = [
+            _row(1, 7, 1, population=100, region="North"),
+            _row(2, 7, 2, population=200, region="North"),
+            _row(3, 8, 5, population=900, region="North"),
+            _row(4, 9, 6, population=50, region="North"),
+            _row(5, 10, 7, population=40, region="North"),
+            _row(6, 11, 8, population=30, region="North"),
+            _row(7, 12, 9, population=20, region="North"),
+            _row(8, 13, 10, population=10, region="North"),
+        ]
+
+        totals = region_alliance_totals(rows)
+
+        assert totals["North"] == [
+            ("A8", 900),
+            ("A7", 300),
+            ("A9", 50),
+            ("A10", 40),
+            ("A11", 30),
+        ]
+
+    def test_tiebreak_by_tag_ascending(self):
+        rows = [
+            _row(1, 7, 1, population=100, region="North"),
+            _row(2, 8, 5, population=100, region="North"),
+        ]
+
+        totals = region_alliance_totals(rows)
+
+        assert totals["North"] == [("A7", 100), ("A8", 100)]
+
+    def test_none_region_grouped_as_empty_string(self):
+        rows = [make_village_row(village_id=1, alliance_id=7, player_id=1, population=100, region=None)]
+
+        totals = region_alliance_totals(rows)
+
+        assert totals == {"": [("WOLF", 100)]}
+
+    def test_empty_curr_returns_empty(self):
+        assert region_alliance_totals([]) == {}
+
+
+class TestTopPlayers:
+    def test_population_ranking_with_stats_and_growth(self):
+        prev = [
+            _row(1, 7, 1, population=90),
+            _row(2, 7, 1, population=150),
+            _row(3, 7, 2, population=500),
+        ]
+        curr = [
+            _row(1, 7, 1, population=100),
+            _row(2, 7, 1, population=150),
+            _row(3, 7, 2, population=400),
+            _row(4, 7, 3, population=300),
+            _row(5, 8, 9, population=9999),
+        ]
+
+        result = top_players(curr, prev, {7})
+
+        ranking = result["population"]
+        assert [p.player_id for p in ranking] == [2, 3, 1]
+        assert isinstance(ranking[0], PlayerStat)
+        assert ranking[0].player_name == "P2"
+        assert ranking[0].population == 400
+        assert ranking[0].villages == 1
+        assert ranking[0].growth == -100
+        assert ranking[1].growth == 300
+        assert ranking[2].growth == 10
+        assert [p.player_id for p in result["growth"]] == [3, 1, 2]
+        assert [p.player_id for p in result["new_villages"]] == [3, 1, 2]
+
+    def test_rankings_respect_cap(self):
+        curr = [_row(i, 7, i, population=100 + i) for i in range(1, 8)]
+        prev = [_row(i, 7, i, population=100) for i in range(1, 8)]
+
+        default = top_players(curr, prev, {7})
+        assert len(default["population"]) == 5
+        assert len(default["growth"]) == 5
+        assert len(default["new_villages"]) == 5
+        assert [p.player_id for p in default["growth"]] == [7, 6, 5, 4, 3]
+
+        small = top_players(curr, prev, {7}, n=3)
+        assert [p.player_id for p in small["population"]] == [7, 6, 5]
+
+    def test_only_our_alliance_players_and_key_order(self):
+        curr = [
+            _row(1, 7, 1, population=100),
+            _row(2, 8, 5, population=9000),
+        ]
+
+        result = top_players(curr, None, {7})
+
+        assert list(result) == ["population", "growth", "new_villages"]
+        for key in ("population", "growth", "new_villages"):
+            assert [p.player_id for p in result[key]] == [1]
+
+    def test_growth_ranking_by_delta_including_negative(self):
+        prev = [
+            _row(1, 7, 1, population=100),
+            _row(2, 7, 2, population=100),
+            _row(3, 7, 3, population=100),
+        ]
+        curr = [
+            _row(1, 7, 1, population=200),
+            _row(2, 7, 2, population=50),
+            _row(3, 7, 3, population=150),
+        ]
+
+        ranking = top_players(curr, prev, {7})["growth"]
+
+        assert [p.player_id for p in ranking] == [1, 3, 2]
+        assert [p.growth for p in ranking] == [100, 50, -50]
+
+    def test_growth_and_gains_degenerate_when_prev_none(self):
+        curr = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=300)]
+
+        result = top_players(curr, None, {7})
+
+        assert [p.player_id for p in result["growth"]] == [2, 1]
+        assert all(p.growth is None for p in result["growth"])
+        assert [p.player_id for p in result["new_villages"]] == [2, 1]
+
+    def test_growth_int_when_prev_snapshot_empty(self):
+        curr = [_row(1, 7, 1, population=100)]
+
+        result = top_players(curr, [], {7})
+
+        assert result["population"][0].growth == 100
+        assert result["growth"][0].growth == 100
+        assert [p.player_id for p in result["new_villages"]] == [1]
+
+    def test_new_villages_ranking_uses_strict_gained(self):
+        prev = [_row(1, 7, 1), _row(9, 8, 5), _row(5, 8, 5)]
+        curr = [
+            _row(1, 7, 1),
+            _row(2, 7, 1),
+            _row(3, 7, 2),
+            _row(9, 7, 2),
+            _row(4, 7, 3),
+            _row(6, 7, 3),
+            _row(5, 8, 5),
+        ]
+
+        ranking = top_players(curr, prev, {7})["new_villages"]
+
+        assert [p.player_id for p in ranking] == [3, 1, 2]
+
+    def test_tiebreak_by_player_id(self):
+        prev = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=100)]
+        curr = [_row(1, 7, 1, population=200), _row(2, 7, 2, population=200)]
+
+        result = top_players(curr, prev, {7})
+
+        assert [p.player_id for p in result["population"]] == [1, 2]
+        assert [p.player_id for p in result["growth"]] == [1, 2]
+
+    def test_departed_player_in_growth_ranking_with_negative_growth(self):
+        prev = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=500)]
+        curr = [_row(1, 7, 1, population=110)]
+
+        result = top_players(curr, prev, {7})
+
+        ranking = result["growth"]
+        assert [p.player_id for p in ranking] == [1, 2]
+        assert ranking[1].population == 0
+        assert ranking[1].villages == 0
+        assert ranking[1].growth == -500
+        assert [p.player_id for p in result["population"]] == [1, 2]
