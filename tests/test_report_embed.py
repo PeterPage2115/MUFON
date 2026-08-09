@@ -16,7 +16,13 @@ Decisions locked by these tests (all wording lives in ``travian.strings``):
 - Region activity rule (game rule): a region is ACTIVE with total population
   ≥ 4,000; control = active AND strictly > 50% of the total (exactly 50% is
   NOT controlled — "+1" cell). Inactive regions sit after a divider with
-  "—" in To 50%.
+  "—" in To 50%. The Δ % column (our control-share change vs yesterday,
+  "—" on baseline days, "±0.0%" below 0.05 pp) sits between Pop and VP Δ;
+  the legend below the fence explains every symbol.
+- Village event lines carry the region; new lines show the founder
+  ("by <player>"), lost lines the conqueror ("conquered by <tag>" /
+  "deleted") — the metrics layer pre-sorts gained by region and lost by
+  conqueror with deleted last.
 - Table headers are computed with the same cell widths as the data rows:
   every row is exactly as long as the header and every column starts at the
   same index.
@@ -52,6 +58,7 @@ def make_event(
     event: Literal["gained", "lost_conquered", "lost_deleted"] = "gained",
     tag: str | None = None,
     player: str | None = None,
+    region: str | None = None,
 ) -> VillageEvent:
     """Fixture: one village event (defaults to a plain gained event)."""
     return VillageEvent(
@@ -63,6 +70,7 @@ def make_event(
         new_owner_tag=tag,
         new_owner_player=player,
         old_player=None,
+        region=region,
     )
 
 
@@ -93,6 +101,7 @@ def make_region(
     delta: int | None,
     our_vp: int = 0,
     vp_delta: int | None = None,
+    share_delta: float | None = None,
 ) -> RegionStat:
     return RegionStat(
         region=region,
@@ -103,6 +112,7 @@ def make_region(
         delta=delta,
         our_vp=our_vp,
         vp_delta=vp_delta,
+        share_delta=share_delta,
     )
 
 
@@ -353,7 +363,7 @@ class TestSummaryKpi:
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         kpi = next(f for f in embeds[0].fields if f.name == strings.KPI_REGIONS)
-        assert field_value(kpi) == "1 of 3 controlled (2 active)"
+        assert field_value(kpi) == "1 of 2 active regions controlled"
 
     def test_kpi_regions_omitted_when_no_regions(self):
         embeds = build_report_embed(make_report(), ["WOLF"], "2026-08-08")
@@ -378,21 +388,21 @@ class TestSummaryKpi:
 class TestRegionTable:
     def test_active_first_inactive_after_divider(self):
         regions = [
-            make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, our_vp=5000, vp_delta=1814),
-            make_region("Borders", 5, 2500, 18000, 0.25, 100, our_vp=600, vp_delta=-25),
-            make_region("Segestica", 1, 126, 2333, 0.054, 0, our_vp=10, vp_delta=0),
+            make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, our_vp=5000, vp_delta=1814, share_delta=0.021),
+            make_region("Borders", 5, 2500, 18000, 0.25, 100, our_vp=600, vp_delta=-25, share_delta=-0.005),
+            make_region("Segestica", 1, 126, 2333, 0.054, 0, our_vp=10, vp_delta=0, share_delta=0.0),
         ]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         assert desc(embeds[1]) == (
             f"# Regions\n\n```\n{strings.REGION_TABLE_HEADER}\n"
             f"{strings.REGION_TABLE_DIVIDER}\n"
-            "Eburacum     ▓▓▓░░░  54.6%  39,221  +1,814       ✓\n"
-            "Borders      ▓▓░░░░  25.0%   2,500     −25  +6,501\n"
+            "Eburacum     ▓▓▓░░░  54.6%  39,221   +2.1%  +1,814       ✓\n"
+            "Borders      ▓▓░░░░  25.0%   2,500   −0.5%     −25  +6,501\n"
             f"{strings.REGION_TABLE_DIVIDER}\n"
-            "Segestica    ░░░░░░   5.4%     126      ±0       —\n"
+            "Segestica    ░░░░░░   5.4%     126   ±0.0%      ±0       —\n"
             "```\n\n"
-            f"{strings.REGION_INACTIVE_NOTE}"
+            f"{strings.REGION_LEGEND}"
         )
 
     def test_strict_more_than_half_is_not_controlled(self):
@@ -402,34 +412,37 @@ class TestRegionTable:
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         line = table_lines(desc(embeds[1]))[2]
-        assert line == "Half         ▓▓▓░░░  50.0%   4,000       —      +1"
+        assert line == "Half         ▓▓▓░░░  50.0%   4,000       —       —      +1"
 
     def test_zero_pop_region_is_inactive(self):
         regions = [make_region("Empty", 1, 0, 0, 0.0, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         line = next(l for l in table_lines(desc(embeds[1])) if l.startswith("Empty"))
-        assert line == "Empty        ░░░░░░   0.0%       0       —       —"
+        assert line == "Empty        ░░░░░░   0.0%       0       —       —       —"
 
     def test_rows_aligned_with_header(self):
         regions = [
-            make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, vp_delta=1814),
-            make_region("Borders", 5, 2500, 18000, 0.25, 100, vp_delta=-25),
+            make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, vp_delta=1814, share_delta=0.021),
+            make_region("Borders", 5, 2500, 18000, 0.25, 100, vp_delta=-25, share_delta=-0.005),
         ]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         lines = table_lines(desc(embeds[1]))
         header = lines[0]
         rows = [l for l in lines[1:] if l != strings.REGION_TABLE_DIVIDER]
-        assert len(header) == 50
+        assert len(header) == 58
         assert all(len(l) == len(header) for l in rows)
-        # Column starts (pinned): pop cell 27 (digits 28), VP Δ 35, To 50% 43;
-        # the header labels sit flush-right over their data cells.
+        # Column starts (pinned): pop cell 27 (digits 28), Δ % 35 (digits 37),
+        # VP Δ 43 (digits 44), To 50% 51 (✓ at 57); the header labels sit
+        # flush-right over their data cells.
         ebura = rows[0]
         assert ebura.index("39,221") == 28
-        assert ebura.index("+1,814") == 36
-        assert ebura.index("✓") == 49  # right-aligned in the To-50% cell (43-49)
+        assert ebura.index("+2.1%") == 37
+        assert ebura.index("+1,814") == 44
+        assert ebura.index("✓") == 57  # right-aligned in the To-50% cell (51-57)
         assert header.index("Pop") + len("Pop") == ebura.index("39,221") + len("39,221")
+        assert header.index("Δ %") + len("Δ %") == ebura.index("+2.1%") + len("+2.1%")
         assert header.index("VP Δ") + len("VP Δ") == ebura.index("+1,814") + len("+1,814")
         assert header.index("To 50%") + len("To 50%") == ebura.index("✓") + 1
 
@@ -439,15 +452,16 @@ class TestRegionTable:
 
         line = next(l for l in table_lines(desc(embeds[1])) if l.startswith("Durnonovari"))
         assert line.startswith("Durnonovari… ")
-        assert len(line) == 50
+        assert len(line) == 58
 
     def test_vp_delta_dash_on_baseline(self):
         regions = [make_region("A", 1, 1000, 5000, 0.2, None, vp_delta=None)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
         line = next(l for l in table_lines(desc(embeds[1])) if l.startswith("A"))
-        assert line[35:42] == "      —"
-        assert line == "A            ▓░░░░░  20.0%   1,000       —  +1,501"
+        assert line[35:42] == "      —"  # Δ % cell (no previous snapshot)
+        assert line[43:50] == "      —"  # VP Δ cell
+        assert line == "A            ▓░░░░░  20.0%   1,000       —       —  +1,501"
 
     def test_more_line_on_pathological_overflow(self):
         regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(90)]
@@ -546,21 +560,40 @@ class TestStandingsTable:
 
 class TestVillageEvents:
     def test_new_village_section(self):
-        data = make_report(new_villages=[make_event(1, "King's Landing", 45, -23)])
+        data = make_report(
+            new_villages=[make_event(1, "King's Landing", 45, -23, region="Eboracum", player="Tyrion Lannister")]
+        )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
-        assert desc(villages) == "# New Villages\n\n**King's Landing** (45|-23)"
+        assert desc(villages) == "# New Villages\n\n**King's Landing** (45|-23) — Eboracum — by Tyrion Lannister"
 
-    def test_lost_conquered_with_bold_owner(self):
+    def test_new_village_no_region_founder_fallbacks(self):
+        # Region-absent snapshots: founder-only line; unknown founder → "unknown".
         data = make_report(
-            lost_villages=[make_event(2, "Winterfell", 2, -5, event="lost_conquered", tag="ENEMY")]
+            new_villages=[
+                make_event(1, "Village 1"),
+                make_event(2, "Village 2", player="Tyrion Lannister"),
+            ]
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
         assert desc(villages) == (
-            "# Lost Villages\n\n**Winterfell** (2|-5) — conquered by **ENEMY**"
+            "# New Villages\n\n"
+            "**Village 1** (1|-1) — by unknown\n"
+            "**Village 2** (1|-1) — by Tyrion Lannister"
+        )
+
+    def test_lost_conquered_with_bold_owner(self):
+        data = make_report(
+            lost_villages=[make_event(2, "Winterfell", 2, -5, event="lost_conquered", tag="ENEMY", region="North")]
+        )
+        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
+
+        villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
+        assert desc(villages) == (
+            "# Lost Villages\n\n**Winterfell** (2|-5) — North — conquered by **ENEMY**"
         )
 
     def test_lost_conquered_player_fallback(self):
@@ -588,15 +621,15 @@ class TestVillageEvents:
 
     def test_both_sections_in_one_description(self):
         data = make_report(
-            new_villages=[make_event(1, "King's Landing", 45, -23)],
-            lost_villages=[make_event(2, "Winterfell", 2, -5, event="lost_conquered", tag="ENEMY")],
+            new_villages=[make_event(1, "King's Landing", 45, -23, region="Eboracum", player="Tyrion Lannister")],
+            lost_villages=[make_event(2, "Winterfell", 2, -5, event="lost_conquered", tag="ENEMY", region="North")],
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
         assert desc(villages) == (
-            "# New Villages\n\n**King's Landing** (45|-23)\n\n"
-            "# Lost Villages\n\n**Winterfell** (2|-5) — conquered by **ENEMY**"
+            "# New Villages\n\n**King's Landing** (45|-23) — Eboracum — by Tyrion Lannister\n\n"
+            "# Lost Villages\n\n**Winterfell** (2|-5) — North — conquered by **ENEMY**"
         )
 
     def test_cap_15_with_more_line(self):
@@ -606,7 +639,7 @@ class TestVillageEvents:
         villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
         lines = desc(villages).split("\n")
         assert lines[0] == "# New Villages"
-        assert lines[2] == "**Village 0** (1|-1)"
+        assert lines[2] == "**Village 0** (1|-1) — by unknown"
         assert lines[-1] == strings.MORE_LINE.format(n=2)
 
     def test_lost_cap_15_with_more_line(self):
@@ -617,11 +650,13 @@ class TestVillageEvents:
         assert desc(villages).split("\n")[-1] == strings.MORE_LINE.format(n=2)
 
     def test_name_truncated_at_24(self):
-        events = [make_event(1, "A" * 30)]
+        events = [make_event(1, "A" * 30, region="Eboracum", player="Tyrion Lannister")]
         embeds = build_report_embed(make_report(new_villages=events), ["WOLF"], "2026-08-08")
 
         villages = next(e for e in embeds if e.title == strings.EMBED_TITLE_VILLAGES)
-        assert desc(villages) == f"# New Villages\n\n**{'A' * 23}…** (1|-1)"
+        assert desc(villages) == (
+            f"# New Villages\n\n**{'A' * 23}…** (1|-1) — Eboracum — by Tyrion Lannister"
+        )
 
     def test_embed_omitted_when_both_empty(self):
         embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
@@ -827,9 +862,9 @@ class TestBaseline:
             "Report for cw.x2.international — snapshot 2026-08-08 — WOLF (baseline)\n\n# Summary"
         )
         assert [field_value(f) for f in embeds[0].fields[:4]] == ["42", "5,000", "11", "340"]
-        # Regions row: VP Δ renders "—"; exactly 50% is NOT controlled → "+1".
+        # Regions row: Δ % and VP Δ render "—"; exactly 50% is NOT controlled → "+1".
         regions_line = table_lines(desc(embeds[1]))[2]
-        assert regions_line == "A            ▓▓▓░░░  50.0%   4,000       —      +1"
+        assert regions_line == "A            ▓▓▓░░░  50.0%   4,000       —       —      +1"
         # Standings row: both Δ columns render "—".
         standings_line = table_lines(desc(embeds[2]))[2]
         assert standings_line == "★WOLF     1,000       —     900       —"
@@ -846,7 +881,7 @@ class TestLimits:
             assert embed_total(e) <= 6000
 
     def test_worst_case_regions_all_fit_no_more_line(self):
-        # 30 regions × 50 chars ≈ 1,550 — the 4096-char description holds all
+        # 30 regions × 58 chars ≈ 1,740 — the 4096-char description holds all
         # of them (the old 20-row field cap is gone by design).
         embeds = build_report_embed(worst_case_report(), ["WOLF"], "2026-08-08")
 

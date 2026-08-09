@@ -11,15 +11,19 @@ locked by these tests:
   event.
 - ``lost_deleted`` = was ours in prev, absent from curr entirely.
 - ``prev_rows=None`` (no previous snapshot) → deltas None / no events.
-- Events are sorted by village_id for stable embeds.
+- Events carry the village's region (and the founder for ``gained``); gained
+  sorted by region then coords, lost conquered-before-deleted then conqueror
+  tag, region, coords (stable — equal keys keep snapshot order).
 - ``region_stats``: regions of interest = ours in curr OR prev (lost regions
   stay listed with zeros); ``None`` region groups as ``""``; share guards
-  division-by-zero → 0.0; delta/vp_delta None only when prev is None (a
-  region absent from prev yields curr − 0); sorted by ``share`` desc,
-  region name asc.
+  division-by-zero → 0.0; delta/vp_delta/share_delta None only when prev is
+  None (a region absent from prev yields curr − 0; share_delta = curr share
+  − prev share, prev share computed from ALL prev alliances); sorted by
+  ``share`` desc, region name asc.
 - ``top_players``: three separate rankings capped at n; player universe =
   curr-ours ∪ prev-ours; growth None only when prev is None; strict-gained
-  for ``new_villages``; ties break by ``player_id``.
+  for ``new_villages``; ties break by ``player_name`` ascending (growth and
+  gains add population before name).
 """
 
 import logging
@@ -267,7 +271,7 @@ class TestComputeDeltas:
 class TestVillageEvents:
     def test_gained_only_in_curr(self):
         prev = [_row(1, 7, 1)]
-        curr = [_row(1, 7, 1), _row(2, 7, 1)]
+        curr = [_row(1, 7, 1), _row(2, 7, 1, region="Eboracum")]
 
         gained, lost = village_events(prev, curr, {7})
 
@@ -278,8 +282,9 @@ class TestVillageEvents:
         assert event.village_name == "Village 2"
         assert event.x == 45
         assert event.y == -23
+        assert event.region == "Eboracum"
         assert event.new_owner_tag is None
-        assert event.new_owner_player is None
+        assert event.new_owner_player == "P1"  # the founder (curr owner)
         assert event.old_player is None
         assert lost == []
 
@@ -294,8 +299,8 @@ class TestVillageEvents:
         assert lost == []
 
     def test_lost_conquered_new_owner(self):
-        prev = [_row(1, 7, 1)]
-        curr = [_row(1, 8, 5)]
+        prev = [_row(1, 7, 1, region="Eboracum")]
+        curr = [_row(1, 8, 5, region="Eboracum")]
 
         gained, lost = village_events(prev, curr, {7})
 
@@ -305,6 +310,7 @@ class TestVillageEvents:
         assert event.event == "lost_conquered"
         assert event.village_id == 1
         assert event.village_name == "Village 1"
+        assert event.region == "Eboracum"
         assert event.new_owner_tag == "A8"
         assert event.new_owner_player == "P5"
         assert event.old_player == "P1"
@@ -319,7 +325,7 @@ class TestVillageEvents:
         assert lost == []
 
     def test_lost_deleted_absent_from_curr(self):
-        prev = [_row(1, 7, 1), _row(2, 7, 1)]
+        prev = [_row(1, 7, 1), _row(2, 7, 1, region="Eboracum")]
         curr = [_row(1, 7, 1)]
 
         gained, lost = village_events(prev, curr, {7})
@@ -330,19 +336,37 @@ class TestVillageEvents:
         assert event.event == "lost_deleted"
         assert event.village_id == 2
         assert event.village_name == "Village 2"
+        assert event.region == "Eboracum"
         assert event.old_player == "P1"
         assert event.new_owner_tag is None
         assert event.new_owner_player is None
 
-    def test_events_sorted_by_village_id(self):
-        prev = [_row(3, 7, 1), _row(1, 7, 1)]
-        curr = [_row(1, 8, 5), _row(2, 7, 1), _row(3, 8, 5), _row(4, 7, 1)]
+    def test_gained_sorted_by_region_then_coords(self):
+        prev = [_row(9, 7, 1)]
+        curr = [
+            make_village_row(village_id=1, alliance_id=7, player_id=1, region="B", x=1, y=1),
+            make_village_row(village_id=2, alliance_id=7, player_id=1, region="A", x=10, y=5),
+            make_village_row(village_id=3, alliance_id=7, player_id=1, region="A", x=2, y=5),
+            _row(9, 7, 1),
+        ]
 
-        gained, lost = village_events(prev, curr, {7})
+        gained, _ = village_events(prev, curr, {7})
 
-        assert [e.village_id for e in gained] == [2, 4]
-        assert [e.event for e in lost] == ["lost_conquered", "lost_conquered"]
-        assert [e.village_id for e in lost] == [1, 3]
+        # A(x=2) before A(x=10) before B — region, then x, then y.
+        assert [e.village_id for e in gained] == [3, 2, 1]
+
+    def test_lost_sorted_conqueror_grouped_deleted_last(self):
+        prev = [_row(1, 7, 1), _row(2, 7, 1), _row(3, 7, 1)]
+        curr = [
+            make_village_row(village_id=1, alliance_id=8, alliance_tag="ZETA", player_id=5),
+            make_village_row(village_id=2, alliance_id=8, alliance_tag="AAA", player_id=5),
+        ]
+
+        _, lost = village_events(prev, curr, {7})
+
+        # Conquered before deleted; conquered grouped by owner tag asc.
+        assert [e.village_id for e in lost] == [2, 1, 3]
+        assert [e.event for e in lost] == ["lost_conquered", "lost_conquered", "lost_deleted"]
 
     def test_none_prev_returns_no_events(self):
         curr = [_row(1, 7, 1)]
@@ -430,6 +454,7 @@ class TestRegionStats:
         assert region.delta == 10
         assert region.our_vp == 710  # 310 + 400
         assert region.vp_delta == 10  # 710 − (300 + 400)
+        assert region.share_delta == pytest.approx(160 / 1060 - 1.0)  # prev North was ours-only
 
     def test_multiple_regions_aggregated_independently(self):
         curr = [
@@ -448,12 +473,14 @@ class TestRegionStats:
         assert north.delta is None
         assert north.our_vp == 300
         assert north.vp_delta is None
+        assert north.share_delta is None  # no previous snapshot
         south = by_name["South"]
         assert (south.our_villages, south.our_pop, south.region_total_pop) == (1, 200, 200)
         assert south.share == pytest.approx(1.0)
         assert south.delta is None
         assert south.our_vp == 300
         assert south.vp_delta is None
+        assert south.share_delta is None
 
     def test_enemy_only_region_in_curr_not_included(self):
         curr = [_row(9, 8, 5, population=900, region="EnemyLand")]
@@ -485,6 +512,7 @@ class TestRegionStats:
         assert ghost.delta == -300
         assert ghost.our_vp == 0
         assert ghost.vp_delta == -500  # curr 0 − prev 500
+        assert ghost.share_delta == pytest.approx(-1.0)  # 0.0 − prev 300/300
 
     def test_lost_region_with_enemies_share_zero_delta_negative(self):
         prev = [_row(1, 7, 1, population=300, victory_points=500, region="Ghost")]
@@ -499,6 +527,7 @@ class TestRegionStats:
         assert ghost.delta == -300
         assert ghost.our_vp == 0
         assert ghost.vp_delta == -500
+        assert ghost.share_delta == pytest.approx(-1.0)
 
     def test_share_zero_when_region_total_pop_is_zero(self):
         curr = [_row(1, 7, 1, population=0, region="Empty")]
@@ -533,6 +562,30 @@ class TestRegionStats:
         assert stats[0].delta == 100
         assert stats[0].our_vp == 300
         assert stats[0].vp_delta == 300  # curr 300 − prev 0
+        # prev had only the enemy (prev_share 0.0) → curr share 100/100 − 0
+        assert stats[0].share_delta == pytest.approx(1.0)
+
+    def test_share_delta_tracks_progress(self):
+        prev = [
+            _row(1, 7, 1, population=300, region="Alpha"),
+            _row(2, 8, 5, population=300, region="Alpha"),
+            _row(3, 7, 1, population=100, region="Beta"),
+            _row(4, 8, 5, population=400, region="Beta"),
+        ]
+        curr = [
+            _row(1, 7, 1, population=400, region="Alpha"),
+            _row(2, 8, 5, population=400, region="Alpha"),
+            _row(3, 7, 1, population=150, region="Beta"),
+            _row(4, 8, 5, population=350, region="Beta"),
+        ]
+
+        stats = region_stats(prev, curr, {7})
+
+        by_name = {s.region: s for s in stats}
+        # Alpha: 400/800 − 300/600 = 0.5 − 0.5 = 0.0
+        assert by_name["Alpha"].share_delta == pytest.approx(0.0)
+        # Beta: 150/500 − 100/500 = 0.3 − 0.2 = +0.1
+        assert by_name["Beta"].share_delta == pytest.approx(0.1)
 
     def test_sorted_by_share_desc_then_region_name(self):
         curr = [
@@ -623,7 +676,8 @@ class TestTopPlayers:
         assert ranking[1].growth == 300
         assert ranking[2].growth == 10
         assert [p.player_id for p in result["growth"]] == [3, 1, 2]
-        assert [p.player_id for p in result["new_villages"]] == [3, 1, 2]
+        # gains tie (P1/P2 both 0) breaks by population desc: P2 400 > P1 250
+        assert [p.player_id for p in result["new_villages"]] == [3, 2, 1]
         # gains carried in every ranking: P3 gained village 4, P1/P2 none
         assert [p.gains for p in result["population"]] == [0, 1, 0]
         assert [p.gains for p in result["growth"]] == [1, 0, 0]
@@ -708,14 +762,59 @@ class TestTopPlayers:
         assert [p.player_id for p in ranking] == [3, 1, 2]
         assert [p.gains for p in ranking] == [2, 1, 1]  # P3 gained 4+6, P1 gained 2, P2 gained 3
 
-    def test_tiebreak_by_player_id(self):
-        prev = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=100)]
-        curr = [_row(1, 7, 1, population=200), _row(2, 7, 2, population=200)]
+    def test_tiebreak_by_player_name(self):
+        # Equal population and growth: name asc wins over player_id order.
+        prev = [
+            make_village_row(village_id=1, alliance_id=7, player_id=1, player_name="Zed", population=100),
+            make_village_row(village_id=2, alliance_id=7, player_id=2, player_name="Aaron", population=100),
+        ]
+        curr = [
+            make_village_row(village_id=1, alliance_id=7, player_id=1, player_name="Zed", population=200),
+            make_village_row(village_id=2, alliance_id=7, player_id=2, player_name="Aaron", population=200),
+        ]
 
         result = top_players(curr, prev, {7})
 
-        assert [p.player_id for p in result["population"]] == [1, 2]
-        assert [p.player_id for p in result["growth"]] == [1, 2]
+        assert [p.player_id for p in result["population"]] == [2, 1]
+        assert [p.player_id for p in result["growth"]] == [2, 1]
+
+    def test_growth_tie_break_by_population_then_name(self):
+        # Growth all +100; P2 and P3 tie on population 500 → name asc.
+        prev = [
+            _row(1, 7, 1, population=200),
+            _row(2, 7, 2, population=400),
+            _row(3, 7, 3, population=400),
+        ]
+        curr = [
+            _row(1, 7, 1, population=300),
+            _row(2, 7, 2, population=500),
+            _row(3, 7, 3, population=500),
+        ]
+
+        ranking = top_players(curr, prev, {7})["growth"]
+
+        assert [p.player_id for p in ranking] == [2, 3, 1]
+        assert [p.growth for p in ranking] == [100, 100, 100]
+
+    def test_gains_tie_break_by_population_then_name(self):
+        # P2 and P3 both gained one village; higher population first.
+        prev = [
+            _row(1, 7, 1, population=100),
+            _row(2, 7, 2, population=100),
+            _row(3, 7, 3, population=100),
+        ]
+        curr = [
+            _row(1, 7, 1, population=100),
+            _row(2, 7, 2, population=100),
+            _row(3, 7, 3, population=100),
+            _row(4, 7, 2, population=200),
+            _row(5, 7, 3, population=100),
+        ]
+
+        ranking = top_players(curr, prev, {7})["new_villages"]
+
+        assert [p.player_id for p in ranking] == [2, 3, 1]
+        assert [p.gains for p in ranking] == [1, 1, 0]
 
     def test_departed_player_in_growth_ranking_with_negative_growth(self):
         prev = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=500)]

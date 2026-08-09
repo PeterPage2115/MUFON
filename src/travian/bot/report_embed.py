@@ -12,15 +12,23 @@ Pinned structure: ONE message with up to 5 embeds, in order —
    Regions, New / Lost), 3 per row on desktop.
 2. ``🗺️ Regions`` (only when ``data.regions`` is non-empty): fenced control
    table in the description — ACTIVE regions first (total population ≥
-   4,000, the game rule), then the inactive ones after a divider. To 50%:
-   ✓ when the region is controlled (active AND strictly > 50% of the total
-   population), ``+N`` when active and short, ``—`` when inactive. The
-   ``…and N more`` guard fits the table to the 4096-char description.
+   4,000, the game rule), then the inactive ones after a divider. Columns:
+   region (0), control bar (13), share (20), pop (27), Δ % (35), VP Δ (43),
+   To 50% (51); 58-char rows. To 50%: ✓ when the region is controlled
+   (active AND strictly > 50% of the total population), ``+N`` when active
+   and short, ``—`` when inactive. Δ % is our control-share change vs
+   yesterday ("—" on baseline days); the legend below the fence explains
+   every symbol. The ``…and N more`` guard fits the table to the 4096-char
+   description.
 3. ``⚔️ Standings`` (only when ``data.standings`` is non-empty): fenced
    table, OUR tags first (config order within the two groups), ★ marker +
    footnote (Markdown bold does not render inside code fences).
 4. ``🏗️ New & Lost Villages`` (only when either list is non-empty): bold
-   event lines under ``#`` headings, cap 15 per list.
+   event lines under ``#`` headings, cap 15 per list. New lines show the
+   region and founder (``by <player>``), lost lines the region and conqueror
+   (``conquered by <tag>`` / ``deleted``); the metrics layer pre-sorts so
+   new villages group by region and lost villages by conqueror with deleted
+   last.
 5. ``🏆 Top Players`` (title ``🏆 Victory Points`` when every top list is
    omitted; never omitted): ranked subsections (cap 5; Growth omitted when
    every delta is None, New Villages when every gain is 0) + the VP total.
@@ -132,6 +140,18 @@ def _render_table_delta(delta: int | None) -> str:
     return strings.DELTA_ZERO
 
 
+def _render_share_delta(delta: float | None) -> str:
+    """Δ % cell: None → "—", |d| < 0.05 pp → "±0.0%", else "+2.1%" / "−0.5%"
+    (U+2212 MINUS SIGN) — the legend explains the column."""
+    if delta is None:
+        return strings.DELTA_NONE
+    if abs(delta) < 0.0005:
+        return strings.DELTA_ZERO + ".0%"
+    if delta > 0:
+        return f"{strings.DELTA_PLUS}{delta:.1%}"
+    return f"{strings.DELTA_MINUS}{-delta:.1%}"
+
+
 def _summary_embed(data: ReportData, description: str, footer: str, color: int) -> discord.Embed:
     """Embed 1: context description + ``# Summary`` + inline KPI fields."""
     embed = discord.Embed(
@@ -157,7 +177,6 @@ def _summary_embed(data: ReportData, description: str, footer: str, color: int) 
             name=strings.KPI_REGIONS,
             value=strings.KPI_REGIONS_VALUE.format(
                 controlled=sum(1 for r in data.regions if _region_controlled(r)),
-                total=len(data.regions),
                 active=sum(1 for r in data.regions if _region_active(r)),
             ),
             inline=True,
@@ -210,6 +229,7 @@ def _region_line(r: RegionStat) -> str:
         bar=bar,
         share=r.share,
         pop=r.our_pop,
+        share_delta=_render_share_delta(r.share_delta),
         vp_delta=_render_table_delta(r.vp_delta),
         to50=to50,
     )
@@ -225,7 +245,7 @@ def _regions_embed(regions: list[RegionStat], footer: str) -> discord.Embed:
         lines.append(strings.REGION_TABLE_DIVIDER)
         lines.extend(_region_line(r) for r in inactive)
     prefix = f"{strings.HEADING_REGIONS}\n\n```\n"
-    suffix = f"\n```\n\n{strings.REGION_INACTIVE_NOTE}"
+    suffix = f"\n```\n\n{strings.REGION_LEGEND}"
     budget = _DESCRIPTION_MAX - len(prefix) - len(suffix)
     table = "\n".join(_fit_lines(lines, budget=budget))
     embed = discord.Embed(
@@ -277,14 +297,28 @@ def _truncate(text: str, max_len: int) -> str:
     return text[: max_len - 1] + "…"
 
 
+def _new_village_line(ev: VillageEvent) -> str:
+    name = _truncate(ev.village_name, 24)
+    founder = ev.new_owner_player or strings.OWNER_UNKNOWN
+    if ev.region is None:
+        return strings.VILLAGE_FOUNDED_NO_REGION_LINE.format(name=name, x=ev.x, y=ev.y, founder=founder)
+    return strings.VILLAGE_FOUNDED_LINE.format(name=name, x=ev.x, y=ev.y, region=ev.region, founder=founder)
+
+
 def _lost_village_line(ev: VillageEvent) -> str:
     name = _truncate(ev.village_name, 24)
     match ev.event:
         case "lost_conquered":
             owner = ev.new_owner_tag or ev.new_owner_player or strings.OWNER_UNKNOWN
-            return strings.LOST_CONQUERED_LINE.format(name=name, x=ev.x, y=ev.y, owner=owner)
+            if ev.region is None:
+                return strings.LOST_CONQUERED_LINE.format(name=name, x=ev.x, y=ev.y, owner=owner)
+            return strings.LOST_CONQUERED_REGION_LINE.format(
+                name=name, x=ev.x, y=ev.y, region=ev.region, owner=owner
+            )
         case "lost_deleted":
-            return strings.LOST_DELETED_LINE.format(name=name, x=ev.x, y=ev.y)
+            if ev.region is None:
+                return strings.LOST_DELETED_LINE.format(name=name, x=ev.x, y=ev.y)
+            return strings.LOST_DELETED_REGION_LINE.format(name=name, x=ev.x, y=ev.y, region=ev.region)
         case "gained":
             # Not expected in the lost list; render the bare identity.
             return strings.VILLAGE_LINE.format(name=name, x=ev.x, y=ev.y)
@@ -294,10 +328,7 @@ def _villages_embed(data: ReportData, footer: str) -> discord.Embed:
     """Embed 4: new/lost village events under ``#`` headings, cap 15 each."""
     parts: list[str] = []
     if data.new_villages:
-        lines = [
-            strings.VILLAGE_LINE.format(name=_truncate(ev.village_name, 24), x=ev.x, y=ev.y)
-            for ev in data.new_villages[:_ITEM_CAP_NEW_LOST]
-        ]
+        lines = [_new_village_line(ev) for ev in data.new_villages[:_ITEM_CAP_NEW_LOST]]
         if len(data.new_villages) > _ITEM_CAP_NEW_LOST:
             lines.append(strings.MORE_LINE.format(n=len(data.new_villages) - _ITEM_CAP_NEW_LOST))
         parts.append(strings.HEADING_NEW_VILLAGES)

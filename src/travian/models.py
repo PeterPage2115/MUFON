@@ -69,7 +69,10 @@ class VillageEvent(BaseModel):
 
     ``gained``: only in current snapshot. ``lost_conquered``: was ours, now has
     a new owner (``new_owner_tag``/``new_owner_player``). ``lost_deleted``: was
-    ours, gone from the map (no new owner).
+    ours, gone from the map (no new owner). ``region`` is the village's region
+    from the snapshot where it still exists; ``None`` only when the source
+    region was NULL. For ``gained`` events ``new_owner_player`` is the founder
+    (the village appeared this day, so its current owner founded it).
     """
 
     village_id: int
@@ -80,6 +83,7 @@ class VillageEvent(BaseModel):
     new_owner_tag: str | None
     new_owner_player: str | None
     old_player: str | None
+    region: str | None = None
 
 
 class PlayerStat(BaseModel):
@@ -106,6 +110,9 @@ class RegionStat(BaseModel):
     ``our_vp`` is the sum of our villages' victory_points in the current
     snapshot and ``vp_delta`` is ``our_vp`` minus the previous day's, ``None``
     when no previous snapshot (a region absent from prev yields curr − 0).
+    ``share_delta`` is our share minus the previous day's share as a fraction
+    (e.g. 0.021), following ``delta``'s semantics — ``None`` only when there
+    is no previous snapshot; a region absent from prev yields curr share − 0.
     """
 
     region: str
@@ -116,6 +123,7 @@ class RegionStat(BaseModel):
     delta: int | None
     our_vp: int = 0
     vp_delta: int | None = None
+    share_delta: float | None = None
 
 
 class AllianceStat(BaseModel):

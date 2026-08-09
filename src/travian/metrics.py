@@ -245,10 +245,13 @@ def village_events(
     curr_rows: list[VillageRow],
     alliance_ids: set[int],
 ) -> tuple[list[VillageEvent], list[VillageEvent]]:
-    """(gained, lost) village events between two snapshots, sorted by village_id.
+    """(gained, lost) village events between two snapshots.
 
     ``prev_rows=None`` (no previous snapshot) yields no events at all. Names
     and coordinates come from the snapshot where the village still exists.
+    Every event carries ``region`` from that snapshot. Sort order: gained by
+    region then coords; lost conquered-before-deleted, then conqueror tag,
+    region, coords (stable: equal keys keep snapshot order).
     """
     if prev_rows is None:
         return [], []
@@ -264,8 +267,9 @@ def village_events(
             y=row.y,
             event="gained",
             new_owner_tag=None,
-            new_owner_player=None,
+            new_owner_player=row.player_name,
             old_player=None,
+            region=row.region,
         )
         for row in curr_ours.values()
         if row.village_id not in prev_all
@@ -286,6 +290,7 @@ def village_events(
                     new_owner_tag=None,
                     new_owner_player=None,
                     old_player=prev_row.player_name,
+                    region=prev_row.region,
                 )
             )
         elif curr_row.alliance_id not in alliance_ids:
@@ -299,11 +304,12 @@ def village_events(
                     new_owner_tag=curr_row.alliance_tag,
                     new_owner_player=curr_row.player_name,
                     old_player=prev_row.player_name,
+                    region=curr_row.region,
                 )
             )
 
-    gained.sort(key=lambda event: event.village_id)
-    lost.sort(key=lambda event: event.village_id)
+    gained.sort(key=lambda e: ((e.region or ""), e.x, e.y))
+    lost.sort(key=lambda e: (e.event == "lost_deleted", (e.new_owner_tag or ""), (e.region or ""), e.x, e.y))
     return gained, lost
 
 
@@ -344,7 +350,11 @@ def region_stats(
     (same semantics as ``compute_deltas``). ``our_vp`` is the sum of our
     villages' victory_points in curr; ``vp_delta`` follows ``delta``'s
     semantics (None only when ``prev_rows`` is ``None``, else curr − prev).
-    Sort: share desc, region name asc as tiebreak (game-leaderboard order).
+    ``share_delta`` is our share minus the previous day's share (prev share =
+    prev our_pop / prev region total of ALL alliances; division-by-zero guard
+    → 0.0), None only when ``prev_rows`` is ``None``; a region absent from
+    prev yields curr share − 0. Sort: share desc, region name asc as tiebreak
+    (game-leaderboard order).
     """
     curr_ours: dict[str, list[VillageRow]] = {}
     region_total: dict[str, int] = {}
@@ -355,10 +365,13 @@ def region_stats(
         region_total[region] = region_total.get(region, 0) + row.population
 
     prev_ours: dict[str, list[VillageRow]] = {}
+    region_total_prev: dict[str, int] = {}
     if prev_rows is not None:
         for row in prev_rows:
+            region = row.region or ""
             if row.alliance_id in alliance_ids:
-                prev_ours.setdefault(row.region or "", []).append(row)
+                prev_ours.setdefault(region, []).append(row)
+            region_total_prev[region] = region_total_prev.get(region, 0) + row.population
 
     stats: list[RegionStat] = []
     for region in curr_ours.keys() | prev_ours.keys():
@@ -370,11 +383,15 @@ def region_stats(
         if prev_rows is None:
             delta: int | None = None
             vp_delta: int | None = None
+            share_delta: float | None = None
         else:
             prev_our_pop = sum(row.population for row in prev_ours.get(region, []))
             prev_our_vp = sum(row.victory_points for row in prev_ours.get(region, []))
+            prev_total = region_total_prev.get(region, 0)
+            prev_share = prev_our_pop / prev_total if prev_total else 0.0
             delta = our_pop - prev_our_pop
             vp_delta = our_vp - prev_our_vp
+            share_delta = share - prev_share
         stats.append(
             RegionStat(
                 region=region,
@@ -385,6 +402,7 @@ def region_stats(
                 delta=delta,
                 our_vp=our_vp,
                 vp_delta=vp_delta,
+                share_delta=share_delta,
             )
         )
     stats.sort(key=lambda s: (-s.share, s.region))
@@ -411,8 +429,9 @@ def top_players(
     village counts as gained. With no previous snapshot all three rankings
     degenerate to population-desc order (growth ``None``, zero gains). Every
     stat carries ``gains`` (the strict-gained count — 0 when there is no
-    previous snapshot) regardless of which ranking it appears in. Ties
-    break by ``player_id`` ascending; order is fully deterministic.
+    snapshot) regardless of which ranking it appears in. Ties break by
+    ``player_name`` ascending (case-sensitive plain compare; growth/gains add
+    population before name) — fully deterministic ranking order.
     """
     curr_ours = [row for row in curr_rows if row.alliance_id in alliance_ids]
     prev_ours = [row for row in prev_rows if row.alliance_id in alliance_ids] if prev_rows is not None else []
@@ -450,13 +469,13 @@ def top_players(
         for player in names
     ]
 
-    by_pop = sorted(stats, key=lambda s: (-s.population, s.player_id))[:n]
+    by_pop = sorted(stats, key=lambda s: (-s.population, s.player_name))[:n]
     if prev_rows is None:
         # No previous snapshot: growth is None and gains are 0 for everyone,
         # so the growth/new_villages rankings degenerate to population order.
         by_growth = by_pop
         by_gains = by_pop
     else:
-        by_growth = sorted(stats, key=lambda s: (-(s.growth or 0), s.player_id))[:n]
-        by_gains = sorted(stats, key=lambda s: (-gains[s.player_id], s.player_id))[:n]
+        by_growth = sorted(stats, key=lambda s: (-(s.growth or 0), -s.population, s.player_name))[:n]
+        by_gains = sorted(stats, key=lambda s: (-gains[s.player_id], -s.population, s.player_name))[:n]
     return {"population": by_pop, "growth": by_growth, "new_villages": by_gains}
