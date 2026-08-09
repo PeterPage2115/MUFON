@@ -1,0 +1,23 @@
+# Secrets and local state (never part of a build context)
+.env
+data/
+*.db
+
+# VCS / tooling
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.basedpyright*
+.codegraph/
+.playwright-mcp/
+.omo/
+.idea/
+.vscode/
+
+# Tests and dev docs are not needed in the image
+tests/
+DESIGN.md

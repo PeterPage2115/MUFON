@@ -274,11 +274,18 @@ def validate_config(cfg: MergedConfig) -> None:
 
 
 def _pick(env: Mapping[str, str], db: dict[str, store.JsonValue], key: str, default: object = None) -> object:
-    """Settings-table value for ``key``, falling back to env, then ``default``."""
+    """Settings-table value for ``key``, falling back to env, then ``default``.
+
+    An EMPTY-string env value counts as unset (e.g. ``CHANNEL_ID=`` in
+    ``.env.example``): it falls through to the settings table / default
+    instead of failing to parse — so a container configured via the dashboard
+    starts even when the env placeholder is empty.
+    """
     if key in db:
         return db[key]
-    if key in env:
-        return env[key]
+    value = env.get(key)
+    if value is not None and value != "":
+        return value
     return default
 
 

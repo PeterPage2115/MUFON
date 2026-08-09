@@ -1,0 +1,30 @@
+# travian-discord-report-bot — container deployment.
+# Setup: `cp .env.example .env`, fill in DISCORD_TOKEN/CHANNEL_ID, then
+# `docker compose up -d`. The image is published to GHCR by CI (T15);
+# `build: .` lets you build locally for development.
+services:
+  bot:
+    image: ghcr.io/peterpage2115/mufon:latest
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Bind INSIDE the container: must be 0.0.0.0 for the port publish to
+      # work. Access control is the HOST-side loopback-only publish below.
+      DASHBOARD_BIND: "0.0.0.0"
+      # With DASHBOARD_BIND=0.0.0.0 this disables the API token requirement —
+      # the loopback-only host publish is the security boundary.
+      DASHBOARD_LOOPBACK_ONLY: "true"
+      # Container system time (tools like `date`). Python timezones come from
+      # the pip tzdata package — FETCH_TZ/REPORT_TZ are independent of this.
+      TZ: Europe/Warsaw
+    ports:
+      # Loopback-only on the HOST: the dashboard is unreachable from the
+      # network even though the container binds 0.0.0.0.
+      - "127.0.0.1:8090:8090"
+    volumes:
+      # SQLite data survives container recreation.
+      - travian-data:/data
+
+volumes:
+  travian-data:

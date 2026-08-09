@@ -258,6 +258,25 @@ class TestLoadMergedConfig:
         assert cfg.alliance_tags == ["DBTAG"]
         assert cfg.report_embed_color == 12345
 
+    def test_empty_env_values_are_unset(self) -> None:
+        """Empty-string env values (e.g. `.env.example` placeholders) fall through
+        to the settings table / defaults instead of failing to parse."""
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"CHANNEL_ID": 999})
+        try:
+            cfg = bot_main.load_merged_config(
+                conn,
+                {"CHANNEL_ID": "", "FETCH_HOUR": "", "FETCH_TZ": "", "ADMIN_ROLE_ID": "", "ALLIANCE_TAGS": ""},
+            )
+        finally:
+            conn.close()
+        assert cfg.channel_id == 999  # settings table wins over an empty env value
+        assert cfg.fetch_hour == 0
+        assert cfg.fetch_tz == "Europe/London"
+        assert cfg.admin_role_id is None
+        assert cfg.alliance_tags == []
+
     def test_token_never_from_db(self) -> None:
         conn = store.connect(":memory:")
         store.init_schema(conn)
