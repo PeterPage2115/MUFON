@@ -1,8 +1,11 @@
-"""All user-facing English strings for the Discord report embed (task 8).
+"""All user-facing English strings for the Discord report embed (task 8) and
+the /raport command (task 11).
 
-Centralized here so no user-facing text is inlined in ``report_embed.py`` —
-the embed builder (and only the builder) consumes these. Wording decisions
-(locked by tests, documented in learnings):
+Centralized here so no user-facing text is inlined in ``report_embed.py`` or
+``commands.py`` — the embed builder and the slash command consume these. The
+command NAME/description are Discord API surface rather than embed text, but
+they follow the same centralization convention (decision, task 11).
+Wording decisions (locked by tests, documented in learnings):
 
 - delta rendering: "—" (no data), "±0" (no change), "+N", "−N" (U+2212 MINUS
   SIGN — typographically consistent with the em-dash separators).
@@ -67,3 +70,9 @@ NO_NEW_VILLAGES = "No new villages."
 NO_LOST_VILLAGES = "No lost villages."
 NO_DATA_YET = "No data yet."
 NO_REGIONS = "No regions."
+
+# --- /raport command (task 11) ------------------------------------------------------
+COMMAND_RAPORT_DESCRIPTION = "Send the daily report now (admin only)"
+RAPORT_NO_PERMISSION = "No permission: /raport is restricted to admins."
+RAPORT_SENT = "Report sent"
+RAPORT_ERROR = "Something went wrong while sending the report."

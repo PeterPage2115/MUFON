@@ -62,6 +62,13 @@ DECISIONS (documented for the plan):
   report``) → tags resolve against the latest snapshot. Any failure =
   ``append_log`` warning + return WITHOUT calling ``run_report``;
   ``run_report`` itself always builds from the resolved subset.
+- **/raport registration (T11)**: ``register_commands`` (commands.py) is
+  called in ``TravianBot.__init__`` with this module's ``run_report`` and
+  ``_current_config``. The admin role id is read from a FRESH merged config
+  per command invocation, so dashboard changes apply immediately. The module
+  graph is single-direction (commands.py imports nothing from this module —
+  its config getter is typed against a minimal protocol), so no import cycle
+  exists.
 - **Logging**: ``main()`` configures the root logger at INFO
   (``logging.basicConfig``); module loggers inherit. All job errors are also
   recorded in the ``job_log`` table via ``append_log`` (job names
@@ -97,6 +104,7 @@ from discord import app_commands
 from discord.abc import Messageable
 
 from travian import store
+from travian.bot.commands import register_commands
 from travian.bot.report_embed import build_report_embed
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
@@ -652,6 +660,11 @@ class TravianBot(discord.Client):
         self.cfg: MergedConfig = cfg
         self.tree: app_commands.CommandTree[TravianBot] = app_commands.CommandTree(self)
         self.scheduler: _Scheduler | None = None
+        # /raport registration (T11): the command closes over this module's
+        # run_report and _current_config; config is re-read per invocation, so
+        # dashboard changes apply immediately. on_ready's tree.sync() picks
+        # the command up.
+        register_commands(self.tree, run_report, _current_config)
 
     async def on_ready(self) -> None:
         global bot_loop
