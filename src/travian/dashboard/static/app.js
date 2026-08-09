@@ -35,6 +35,12 @@
   var knownLogKeys = new Set();
   var logEls = {}; // logKey -> <li> element (avoids attribute-selector escaping issues)
   var actionInFlight = false;
+  var SETTINGS_KEYS = [
+    "ALLIANCE_TAGS", "CHANNEL_ID", "ADMIN_ROLE_ID",
+    "FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ",
+    "REPORT_HOUR", "REPORT_MINUTE", "REPORT_TZ",
+    "REPORT_EMBED_COLOR",
+  ];
 
   /* --- tiny helpers ------------------------------------------------------- */
 
@@ -372,17 +378,30 @@
     return { errors: errors, tags: unique };
   }
 
+  // The API accepts only JSON ints (dashboard/app.py `_int_setting`). Send a
+  // real Number when the digits fit JS's safe-integer range; Discord snowflakes
+  // can exceed Number.MAX_SAFE_INTEGER (2^53), where Number() silently rounds
+  // (111111111111111111 -> 111111111111111100), so those keep their exact digit
+  // string — stringifyPayload emits strings as unquoted digit literals, so the
+  // API still receives the exact int.
+  function intSetting(value) {
+    if (value === "" || value === null || value === undefined) return null;
+    var digits = String(value).trim();
+    var num = Number(digits);
+    return Number.isSafeInteger(num) ? num : digits;
+  }
+
   function payloadFromValues(values, tags) {
     return {
       ALLIANCE_TAGS: tags,
-      CHANNEL_ID: values.CHANNEL_ID === "" ? null : String(values.CHANNEL_ID).trim(),
+      CHANNEL_ID: intSetting(values.CHANNEL_ID),
       FETCH_HOUR: Number(values.FETCH_HOUR),
       FETCH_MINUTE: Number(values.FETCH_MINUTE),
       FETCH_TZ: String(values.FETCH_TZ).trim(),
       REPORT_HOUR: Number(values.REPORT_HOUR),
       REPORT_MINUTE: Number(values.REPORT_MINUTE),
       REPORT_TZ: String(values.REPORT_TZ).trim(),
-      ADMIN_ROLE_ID: values.ADMIN_ROLE_ID === "" ? null : String(values.ADMIN_ROLE_ID).trim(),
+      ADMIN_ROLE_ID: intSetting(values.ADMIN_ROLE_ID),
       REPORT_EMBED_COLOR: hexToInt(values.REPORT_EMBED_COLOR),
     };
   }
@@ -421,7 +440,7 @@
     }
 
     // Clear stale validation state after a successful reload.
-    ["ALLIANCE_TAGS", "CHANNEL_ID", "ADMIN_ROLE_ID", "FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ", "REPORT_HOUR", "REPORT_MINUTE", "REPORT_TZ", "REPORT_EMBED_COLOR"].forEach(function (key) {
+    SETTINGS_KEYS.forEach(function (key) {
       setFieldError(key, "");
     });
     setFeedback("", "");
@@ -436,6 +455,12 @@
 
   function submitSettings(event) {
     event.preventDefault();
+
+    // Clear stale validation state first: a field corrected since the last
+    // submit must not keep its old error message when another field blocks.
+    SETTINGS_KEYS.forEach(function (key) {
+      setFieldError(key, "");
+    });
 
     var values = settingsFromForm();
     var checked = validateSettings(values);
