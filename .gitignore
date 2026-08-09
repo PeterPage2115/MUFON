@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Runtime data
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+.basedpyright*
+.mypy_cache/
+
+# Editor
+.idea/
+.vscode/
+
+# Agent tooling (never commit)
+.codegraph/
+.playwright-mcp/
+.omo/boulder.json
+.omo/start-work/
+.omo/run-continuation/
+.omo/notepads/
