@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#090b09">
+    <meta name="description" content="Travian Discord report bot operations dashboard">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='8' y='8' width='16' height='16' fill='none' stroke='%23d1a84a' stroke-width='2' transform='rotate(45 16 16)'/%3E%3Crect x='13' y='13' width='6' height='6' fill='%23d1a84a' transform='rotate(45 16 16)'/%3E%3C/svg%3E">
+    <title>Travian Report Bot · Command Center</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+
+    <header class="topbar">
+      <div class="topbar__inner content-limiter">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span></span></div>
+          <div>
+            <p class="overline">Travian / operations</p>
+            <p class="brand-name">Report command center</p>
+          </div>
+        </div>
+
+        <div class="topbar__meta" aria-label="Snapshot metadata">
+          <div class="snapshot-meta">
+            <span class="meta-label">Latest snapshot</span>
+            <strong data-header-snapshot>Loading…</strong>
+          </div>
+          <span class="meta-divider" aria-hidden="true"></span>
+          <div class="snapshot-meta">
+            <span class="meta-label">Source</span>
+            <strong data-header-source>—</strong>
+          </div>
+          <span class="connection-state"><span class="status-dot" aria-hidden="true"></span>Local service</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" class="content-limiter dashboard-shell" aria-labelledby="page-title">
+      <section class="page-intro" aria-labelledby="page-title">
+        <div>
+          <p class="overline">Daily server pulse</p>
+          <h1 id="page-title">Keep the alliance report ready.</h1>
+          <p class="page-intro__copy">Watch the latest map snapshot, tune the schedule, and run a report without leaving the command line behind.</p>
+        </div>
+        <div class="page-intro__signal" aria-label="Dashboard refresh status">
+          <span class="signal-line" aria-hidden="true"></span>
+          <span>Synced from the bot process</span>
+        </div>
+      </section>
+
+      <div class="dashboard-grid">
+        <article class="card card--status" aria-labelledby="status-title" data-card="status">
+          <header class="card__header">
+            <div>
+              <p class="overline">Snapshot overview</p>
+              <h2 id="status-title">Status</h2>
+            </div>
+            <span class="card-state card-state--healthy"><span class="status-dot" aria-hidden="true"></span>Watching</span>
+          </header>
+
+          <div class="metric-grid" aria-live="polite" aria-busy="true">
+            <div class="metric-tile metric-tile--accent">
+              <span class="metric-label">Villages</span>
+              <strong class="metric-value" data-status-value="villages">—</strong>
+              <span class="metric-note">in latest snapshot</span>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">Players</span>
+              <strong class="metric-value" data-status-value="players">—</strong>
+              <span class="metric-note">represented in map data</span>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">Alliances</span>
+              <strong class="metric-value" data-status-value="alliances">—</strong>
+              <span class="metric-note">with a registered presence</span>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">Population</span>
+              <strong class="metric-value" data-status-value="total_population">—</strong>
+              <span class="metric-note">total across the map</span>
+            </div>
+          </div>
+
+          <div class="schedule-grid">
+            <div class="schedule-row">
+              <span class="metric-label">Next fetch</span>
+              <strong data-status-value="next_fetch">—</strong>
+              <span class="schedule-zone" data-status-value="fetch_tz">—</span>
+            </div>
+            <div class="schedule-row">
+              <span class="metric-label">Next report</span>
+              <strong data-status-value="next_report">—</strong>
+              <span class="schedule-zone" data-status-value="report_tz">—</span>
+            </div>
+          </div>
+
+          <footer class="card__footer status-footer">
+            <span><span class="metric-label">Snapshot date</span> <strong data-status-value="snapshot_date">—</strong></span>
+            <span><span class="metric-label">Source</span> <strong data-status-value="snapshot_source">—</strong></span>
+          </footer>
+          <div class="status-alert is-hidden" data-status-errors role="status" aria-live="polite"></div>
+        </article>
+
+        <article class="card card--settings" aria-labelledby="settings-title">
+          <header class="card__header">
+            <div>
+              <p class="overline">Bot configuration</p>
+              <h2 id="settings-title">Settings</h2>
+            </div>
+            <span class="card-caption">Saved to SQLite</span>
+          </header>
+
+          <form id="settings-form" novalidate>
+            <div class="form-grid">
+              <div class="field field--wide" data-field="ALLIANCE_TAGS">
+                <label for="ALLIANCE_TAGS">Alliance tags</label>
+                <textarea id="ALLIANCE_TAGS" name="ALLIANCE_TAGS" rows="2" autocomplete="off" aria-describedby="ALLIANCE_TAGS-help ALLIANCE_TAGS-error" data-setting-key="ALLIANCE_TAGS"></textarea>
+                <p class="field-help" id="ALLIANCE_TAGS-help">Separate tags with commas or one tag per line.</p>
+                <p class="field-error" id="ALLIANCE_TAGS-error" role="alert"></p>
+              </div>
+
+              <div class="field" data-field="CHANNEL_ID">
+                <label for="CHANNEL_ID">Channel ID</label>
+                <input id="CHANNEL_ID" name="CHANNEL_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="CHANNEL_ID-help CHANNEL_ID-error" data-setting-key="CHANNEL_ID">
+                <p class="field-help" id="CHANNEL_ID-help">Discord channel used for daily reports.</p>
+                <p class="field-error" id="CHANNEL_ID-error" role="alert"></p>
+              </div>
+
+              <div class="field" data-field="ADMIN_ROLE_ID">
+                <label for="ADMIN_ROLE_ID">Admin role ID <span class="optional">Optional</span></label>
+                <input id="ADMIN_ROLE_ID" name="ADMIN_ROLE_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="ADMIN_ROLE_ID-help ADMIN_ROLE_ID-error" data-setting-key="ADMIN_ROLE_ID">
+                <p class="field-help" id="ADMIN_ROLE_ID-help">Allows the <code>/raport</code> command.</p>
+                <p class="field-error" id="ADMIN_ROLE_ID-error" role="alert"></p>
+              </div>
+
+              <fieldset class="schedule-fieldset field--wide">
+                <legend>Fetch schedule</legend>
+                <div class="schedule-controls">
+                  <div class="field" data-field="FETCH_HOUR">
+                    <label for="FETCH_HOUR">Hour</label>
+                    <input id="FETCH_HOUR" name="FETCH_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="FETCH_HOUR-error" data-setting-key="FETCH_HOUR">
+                    <p class="field-error" id="FETCH_HOUR-error" role="alert"></p>
+                  </div>
+                  <div class="field" data-field="FETCH_MINUTE">
+                    <label for="FETCH_MINUTE">Minute</label>
+                    <input id="FETCH_MINUTE" name="FETCH_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="FETCH_MINUTE-error" data-setting-key="FETCH_MINUTE">
+                    <p class="field-error" id="FETCH_MINUTE-error" role="alert"></p>
+                  </div>
+                  <div class="field field--zone" data-field="FETCH_TZ">
+                    <label for="FETCH_TZ">Timezone</label>
+                    <input id="FETCH_TZ" name="FETCH_TZ" type="text" autocomplete="off" placeholder="Europe/London" aria-describedby="FETCH_TZ-error" data-setting-key="FETCH_TZ">
+                    <p class="field-error" id="FETCH_TZ-error" role="alert"></p>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="schedule-fieldset field--wide">
+                <legend>Report schedule</legend>
+                <div class="schedule-controls">
+                  <div class="field" data-field="REPORT_HOUR">
+                    <label for="REPORT_HOUR">Hour</label>
+                    <input id="REPORT_HOUR" name="REPORT_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="REPORT_HOUR-error" data-setting-key="REPORT_HOUR">
+                    <p class="field-error" id="REPORT_HOUR-error" role="alert"></p>
+                  </div>
+                  <div class="field" data-field="REPORT_MINUTE">
+                    <label for="REPORT_MINUTE">Minute</label>
+                    <input id="REPORT_MINUTE" name="REPORT_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="REPORT_MINUTE-error" data-setting-key="REPORT_MINUTE">
+                    <p class="field-error" id="REPORT_MINUTE-error" role="alert"></p>
+                  </div>
+                  <div class="field field--zone" data-field="REPORT_TZ">
+                    <label for="REPORT_TZ">Timezone</label>
+                    <input id="REPORT_TZ" name="REPORT_TZ" type="text" autocomplete="off" placeholder="Europe/Warsaw" aria-describedby="REPORT_TZ-error" data-setting-key="REPORT_TZ">
+                    <p class="field-error" id="REPORT_TZ-error" role="alert"></p>
+                  </div>
+                </div>
+              </fieldset>
+
+              <div class="field field--wide" data-field="REPORT_EMBED_COLOR">
+                <label for="REPORT_EMBED_COLOR_TEXT">Report embed color</label>
+                <div class="color-control">
+                  <input id="REPORT_EMBED_COLOR" name="REPORT_EMBED_COLOR" type="color" value="#d1a84a" aria-label="Choose report embed color" data-setting-key="REPORT_EMBED_COLOR">
+                  <input id="REPORT_EMBED_COLOR_TEXT" name="REPORT_EMBED_COLOR_TEXT" type="text" value="#D1A84A" inputmode="text" autocomplete="off" spellcheck="false" aria-describedby="REPORT_EMBED_COLOR-help REPORT_EMBED_COLOR-error">
+                </div>
+                <p class="field-help" id="REPORT_EMBED_COLOR-help">Six-digit hexadecimal color, for example #D1A84A.</p>
+                <p class="field-error" id="REPORT_EMBED_COLOR-error" role="alert"></p>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button class="button button--primary" type="submit" id="save-settings" data-label="Save settings">
+                <span class="button-label">Save settings</span>
+                <span class="button-spinner" aria-hidden="true"></span>
+              </button>
+              <p class="form-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+            </div>
+          </form>
+        </article>
+
+        <article class="card card--actions" aria-labelledby="actions-title">
+          <header class="card__header">
+            <div>
+              <p class="overline">Manual controls</p>
+              <h2 id="actions-title">Actions</h2>
+            </div>
+            <span class="card-caption">Runs on bot loop</span>
+          </header>
+          <p class="card-intro">Trigger the same jobs used by the scheduler. Buttons stay locked while a run is in flight.</p>
+          <div class="action-stack">
+            <button class="button button--primary button--wide" type="button" id="fetch-action" data-action="fetch" data-label="Fetch now">
+              <span class="button-label">Fetch now</span>
+              <span class="button-spinner" aria-hidden="true"></span>
+            </button>
+            <button class="button button--outline button--wide" type="button" id="report-action" data-action="report" data-label="Send report now">
+              <span class="button-label">Send report now</span>
+              <span class="button-spinner" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div class="action-feedback" id="action-feedback" role="status" aria-live="polite">
+            <span class="feedback-marker" aria-hidden="true"></span>
+            <span>Ready when you are.</span>
+          </div>
+        </article>
+
+        <article class="card card--logs" aria-labelledby="logs-title">
+          <header class="card__header">
+            <div>
+              <p class="overline">Recent activity</p>
+              <h2 id="logs-title">Job log</h2>
+            </div>
+            <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s</span>
+          </header>
+          <ol class="log-list" id="job-log" aria-live="polite" aria-busy="true">
+            <li class="log-empty">Loading recent activity…</li>
+          </ol>
+          <footer class="card__footer log-footer">
+            <span id="log-count">Waiting for the first refresh</span>
+            <span class="mono" id="log-updated">—</span>
+          </footer>
+        </article>
+      </div>
+    </main>
+
+    <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

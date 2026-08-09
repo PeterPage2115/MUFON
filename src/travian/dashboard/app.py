@@ -64,6 +64,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from travian import store
 
@@ -497,6 +498,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     _ = app.get("/api/status")(status)
     _ = app.get("/api/settings")(get_settings)
     _ = app.put("/api/settings")(put_settings)
