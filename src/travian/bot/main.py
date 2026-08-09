@@ -76,6 +76,18 @@ DECISIONS (documented for the plan):
 - **append_log persistence (fixed at the root, T4-fix)**: ``store.append_log``
   commits its own transaction (``with conn:``) — the T9 workaround (explicit
   commits in the run functions) was removed.
+- **Run status returns (T12, decision (a))**: ``run_fetch``/``run_report``
+  RETURN a short status string (see the ``*_STATUS_*`` constants below) in
+  addition to their existing logging — the dashboard's ``POST /api/actions/*``
+  surfaces it in the response body for the UI toast. Nothing about logging or
+  check order changed; ``job_*`` and ``/raport`` ignore the return value.
+- **Dashboard bootstrap (T12)**: ``main()`` starts ``start_dashboard`` — a
+  daemon thread running ``uvicorn.Server`` in factory mode: the app is created
+  at serve start INSIDE the thread (a factory failure kills only the
+  dashboard, never the bot). The app dispatches ``run_fetch``/``run_report``
+  onto ``bot_loop`` (set by ``on_ready``) via
+  ``asyncio.run_coroutine_threadsafe``; actions before ``on_ready`` → 409
+  "bot not ready".
 
 allow: SIZE_OK — the plan pins ``bot/main.py`` as the single bot module
 (tasks 9-11 reference only this file plus ``commands.py``), so config merge,
@@ -89,6 +101,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -96,16 +109,19 @@ from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
+import uvicorn
 from apscheduler.schedulers.asyncio import (  # pyright: ignore[reportMissingTypeStubs]  # apscheduler 3.x ships no stubs
     AsyncIOScheduler,
 )
 from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingTypeStubs]
 from discord import app_commands
 from discord.abc import Messageable
+from fastapi import FastAPI
 
 from travian import store
 from travian.bot.commands import register_commands
 from travian.bot.report_embed import build_report_embed
+from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
     compute_deltas,
@@ -129,6 +145,36 @@ DEFAULT_REPORT_TZ = "Europe/Warsaw"
 DEFAULT_EMBED_COLOR = 0x2ECC71
 SERVER: Final = "cw.x2.international.travian.com"
 MAP_SQL_URL: Final = "https://cw.x2.international.travian.com/map.sql"
+
+# --- run status strings (T12, decision (a)) ------------------------------------
+#
+# Short outcome strings RETURNED by run_fetch/run_report (their logging is
+# unchanged) — surfaced by the dashboard's POST /api/actions/* responses.
+# The Literal aliases let basedpyright verify every return site; the Final
+# constants give callers/tests stable names.
+
+type RunFetchStatus = Literal["completed", "skipped (already running)", "empty parse", "failed"]
+type RunReportStatus = Literal[
+    "sent",
+    "skipped (already running)",
+    "no snapshot for today",
+    "no data yet",
+    "no alliance",
+    "channel not found",
+    "failed",
+]
+
+FETCH_STATUS_SKIPPED: Final[RunFetchStatus] = "skipped (already running)"
+FETCH_STATUS_COMPLETED: Final[RunFetchStatus] = "completed"
+FETCH_STATUS_EMPTY_PARSE: Final[RunFetchStatus] = "empty parse"
+FETCH_STATUS_FAILED: Final[RunFetchStatus] = "failed"
+REPORT_STATUS_SKIPPED: Final[RunReportStatus] = "skipped (already running)"
+REPORT_STATUS_SENT: Final[RunReportStatus] = "sent"
+REPORT_STATUS_NO_SNAPSHOT_TODAY: Final[RunReportStatus] = "no snapshot for today"
+REPORT_STATUS_NO_DATA: Final[RunReportStatus] = "no data yet"
+REPORT_STATUS_NO_ALLIANCE: Final[RunReportStatus] = "no alliance"
+REPORT_STATUS_CHANNEL_NOT_FOUND: Final[RunReportStatus] = "channel not found"
+REPORT_STATUS_FAILED: Final[RunReportStatus] = "failed"
 
 #: The bot's running event loop, set by ``on_ready`` — task 12 dispatches the
 #: dashboard's actions onto it via ``asyncio.run_coroutine_threadsafe``.
@@ -372,7 +418,7 @@ def _record_failure_blocking(job: str, exc: Exception) -> None:
 # --- shared run functions (jobs, dashboard, /raport) ------------------------------
 
 
-async def run_fetch() -> None:
+async def run_fetch() -> RunFetchStatus:
     """Fetch → parse → save today's map.sql snapshot (in ``FETCH_TZ``).
 
     All blocking work runs off the bot loop: ``fetch_map_sql`` (sync httpx,
@@ -381,25 +427,30 @@ async def run_fetch() -> None:
     connection. An empty parse (0 rows — empty/truncated 200 body) logs an
     error and does NOT save a snapshot. Any failure is logged via
     ``append_log('fetch', 'error', ...)`` and never crashes the loop.
+
+    Returns a short status string (task 12, decision (a)): ``completed``,
+    ``skipped (already running)``, ``empty parse`` or ``failed``.
     """
     if not await _acquire("fetch"):
-        return
+        return FETCH_STATUS_SKIPPED
     try:
         text = await asyncio.to_thread(fetch_map_sql, MAP_SQL_URL)
-        await asyncio.to_thread(_fetch_snapshot_phase, text)
+        result = await asyncio.to_thread(_fetch_snapshot_phase, text)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "fetch", exc)
+        return FETCH_STATUS_FAILED
     finally:
         _release()
+    return result
 
 
-def _fetch_snapshot_phase(text: str) -> None:
+def _fetch_snapshot_phase(text: str) -> RunFetchStatus:
     """Sqlite phase of ``run_fetch``, in a worker thread (own connection).
 
     Config + parse + save + log. The EMPTY-PARSE GUARD lives here: 0 rows
     (empty/truncated 200 body) → ``append_log`` error and NO ``save_snapshot``
     — ``run_report``'s date guard then skips the day instead of reporting a
-    misleading "0 villages".
+    misleading "0 villages". Returns the outcome status string.
     """
     conn: sqlite3.Connection | None = None
     try:
@@ -408,12 +459,14 @@ def _fetch_snapshot_phase(text: str) -> None:
         rows = parse_map_sql(text)
         if not rows:
             store.append_log(conn, "fetch", "error", "empty parse (0 villages) from map.sql, snapshot not saved")
-            return
+            return FETCH_STATUS_EMPTY_PARSE
         snapshot_date = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
         store.save_snapshot(conn, snapshot_date, rows)
         store.append_log(conn, "fetch", "info", f"snapshot saved for {snapshot_date} ({len(rows)} villages)")
+        return FETCH_STATUS_COMPLETED
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         _record_failure("fetch", exc, conn)
+        return FETCH_STATUS_FAILED
     finally:
         if conn is not None:
             conn.close()
@@ -481,7 +534,7 @@ def _report_phase(require_today: bool) -> _ReportPhase:
             conn.close()
 
 
-async def run_report(channel_id: int, require_today: bool = True) -> None:
+async def run_report(channel_id: int, require_today: bool = True) -> RunReportStatus:
     """Send the daily report embed to ``channel_id``.
 
     Order of checks: (1) ``load_latest``; (2) no snapshot at all → "no data
@@ -494,29 +547,40 @@ async def run_report(channel_id: int, require_today: bool = True) -> None:
     ``asyncio.to_thread``; ``channel.send`` stays on the bot loop. Exceptions
     are logged via ``append_log('report', 'error', ...)`` and never crash the
     loop.
+
+    Returns a short status string (task 12, decision (a)): ``sent``,
+    ``skipped (already running)``, ``no snapshot for today``, ``no data yet``
+    (the no-data placeholder embed WAS sent), ``no alliance``,
+    ``channel not found`` or ``failed``.
     """
     if not await _acquire("report"):
-        return
+        return REPORT_STATUS_SKIPPED
     try:
         phase = await asyncio.to_thread(_report_phase, require_today)
         match phase.action:
-            case "stale" | "no_alliance" | "failed":
-                return
+            case "stale":
+                return REPORT_STATUS_NO_SNAPSHOT_TODAY
+            case "no_alliance":
+                return REPORT_STATUS_NO_ALLIANCE
+            case "failed":
+                return REPORT_STATUS_FAILED
             case "send":
                 message = f"report sent to channel {channel_id} (snapshot {phase.snapshot_date})"
             case "no_data":
                 message = f"no snapshots yet, sent no-data embed to channel {channel_id}"
         channel = await _get_channel_on_loop(channel_id)
         if channel is None:
-            return
+            return REPORT_STATUS_CHANNEL_NOT_FOUND
         embed = phase.embed
         assert embed is not None  # send/no_data always carry the embed (see _ReportPhase)
         _ = await channel.send(embed=embed)
         await asyncio.to_thread(_log_entry, "report", "info", message)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "report", exc)
+        return REPORT_STATUS_FAILED
     finally:
         _release()
+    return REPORT_STATUS_SENT if phase.action == "send" else REPORT_STATUS_NO_DATA
 
 
 async def _get_channel_on_loop(channel_id: int) -> Messageable | None:
@@ -576,7 +640,7 @@ def _build_report_data(
 
 async def job_fetch() -> None:
     """APScheduler job: daily snapshot fetch (thin wrapper over ``run_fetch``)."""
-    await run_fetch()
+    _ = await run_fetch()
 
 
 async def job_report() -> None:
@@ -597,7 +661,7 @@ async def job_report() -> None:
         return
     if not await asyncio.to_thread(_job_report_precheck, cfg):
         return
-    await run_report(cfg.channel_id, require_today=True)
+    _ = await run_report(cfg.channel_id, require_today=True)
 
 
 def _job_report_precheck(cfg: MergedConfig) -> bool:
@@ -716,11 +780,74 @@ class TravianBot(discord.Client):
         self.scheduler = scheduler
 
 
+# --- dashboard bootstrap (task 12) ------------------------------------------------
+
+
+class _DashboardThread(threading.Thread):
+    """Daemon thread running the dashboard's uvicorn server.
+
+    Exposes ``server`` so tests (and shutdown paths) can stop it via
+    ``server.should_exit = True``.
+    """
+
+    def __init__(self, server: uvicorn.Server) -> None:
+        super().__init__(target=server.run, name="dashboard-uvicorn", daemon=True)
+        self.server: uvicorn.Server = server
+
+
+def _dashboard_app_factory(env: Mapping[str, str]) -> Callable[[], FastAPI]:
+    """Factory wiring the REAL functions into the dashboard app.
+
+    ``get_config``/``get_status`` reuse ``_current_config`` (the shared config
+    getter of the run functions — it reads ``os.environ``, which IS ``env`` in
+    production); ``bot_loop_getter`` reads the module global set by
+    ``on_ready`` — actions before login → 409 "bot not ready".
+    """
+
+    def factory() -> FastAPI:
+        return create_app(
+            DashboardDeps(
+                get_status=make_status_provider(_sqlite_path(env), _current_config),
+                run_fetch_fn=run_fetch,
+                run_report_fn=run_report,
+                bot_loop_getter=lambda: bot_loop,
+                get_config=_current_config,
+                env=env,
+            )
+        )
+
+    return factory
+
+
+def start_dashboard(app_factory: Callable[[], FastAPI], env: Mapping[str, str]) -> threading.Thread:
+    """Start the dashboard (FastAPI app from ``app_factory``) in a daemon thread.
+
+    The thread runs ``uvicorn.Server`` in factory mode: the app is created
+    lazily at serve start inside the thread, so a factory failure kills only
+    the dashboard, never the bot loop. The thread is a daemon — process exit
+    stops it. Bind/port come from ``DASHBOARD_BIND`` (default 127.0.0.1) and
+    ``DASHBOARD_PORT`` (default 8090); an unparseable port exits 1.
+    """
+    host = env.get("DASHBOARD_BIND", "127.0.0.1")
+    port_raw = env.get("DASHBOARD_PORT", "8090")
+    try:
+        port = int(port_raw)
+    except ValueError:
+        logger.error("invalid DASHBOARD_PORT %r", port_raw)
+        raise SystemExit(1) from None
+    config = uvicorn.Config(app=app_factory, factory=True, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = _DashboardThread(server)
+    thread.start()
+    logger.info("dashboard starting on %s:%d", host, port)
+    return thread
+
+
 # --- entry point ----------------------------------------------------------------------
 
 
 def main() -> None:
-    """Entry point: schema → merged config → validation → bot loop.
+    """Entry point: schema → merged config → validation → dashboard → bot loop.
 
     Configures the root logger at INFO (module loggers inherit). Exits 1 with
     a readable message on any startup validation failure (token, channel,
@@ -743,11 +870,12 @@ def main() -> None:
 
     global current_bot
     current_bot = TravianBot(cfg)
-    # T12 dashboard bootstrap plugs in here: uvicorn in a background thread
-    # (with lifespan) serving the FastAPI app; POST /api/actions/* dispatches
-    # run_fetch/run_report onto this loop via
+    # T12 dashboard bootstrap: uvicorn in a daemon thread (factory mode — the
+    # app is created at serve start inside the thread). POST /api/actions/*
+    # dispatches run_fetch/run_report onto this loop via
     # asyncio.run_coroutine_threadsafe(coro, bot_loop) — bot_loop is set by
-    # on_ready once the loop is running.
+    # on_ready once the loop is running; actions before that → 409.
+    _ = start_dashboard(_dashboard_app_factory(env), env)
     current_bot.run(cfg.discord_token)
 
 

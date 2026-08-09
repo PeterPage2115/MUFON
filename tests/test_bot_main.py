@@ -522,9 +522,10 @@ class TestRunLock:
         async def scenario() -> None:
             first = asyncio.create_task(bot_main.run_report(CHANNEL_ID))
             await started.wait()  # first run holds the lock inside channel.send
-            await bot_main.run_report(CHANNEL_ID)  # must skip, not queue
+            status = await bot_main.run_report(CHANNEL_ID)  # must skip, not queue
             gate.set()
             await first
+            assert status == bot_main.REPORT_STATUS_SKIPPED
 
         asyncio.run(scenario())
         assert len(channel.sent) == 1  # only the first run sent
@@ -533,6 +534,75 @@ class TestRunLock:
             entry["job"] == "report" and entry["level"] == "warning" and "already running" in entry["message"]
             for entry in logs
         )
+
+
+# --- run status returns (T12, decision (a)) -----------------------------------
+
+
+class TestRunStatusReturns:
+    def test_run_fetch_completed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: FIXTURE_PATH.read_text())
+        assert asyncio.run(bot_main.run_fetch()) == bot_main.FETCH_STATUS_COMPLETED
+
+    def test_run_fetch_empty_parse(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: "")
+        assert asyncio.run(bot_main.run_fetch()) == bot_main.FETCH_STATUS_EMPTY_PARSE
+
+    def test_run_fetch_failed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+        assert asyncio.run(bot_main.run_fetch()) == bot_main.FETCH_STATUS_FAILED
+
+    def test_run_report_sent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_SENT
+
+    def test_run_report_no_data(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        _install_bot({CHANNEL_ID: FakeChannel()})
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_NO_DATA
+
+    def test_run_report_no_snapshot_for_today(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()) - timedelta(days=1), [_row(1)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_NO_SNAPSHOT_TODAY
+
+    def test_run_report_no_alliance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOPE")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_NO_ALLIANCE
+
+    def test_run_report_channel_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        bot_main.current_bot = cast(bot_main.TravianBot, FakeBot({}))  # get_channel -> None
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_CHANNEL_NOT_FOUND
 
 
 # --- bot class: on_ready + scheduler -------------------------------------------

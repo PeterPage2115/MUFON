@@ -49,9 +49,14 @@ logger = logging.getLogger(__name__)
 
 
 class ReportRunner(Protocol):
-    """The ``run_report`` surface the command needs (injected by main.py)."""
+    """The ``run_report`` surface the command needs (injected by main.py).
 
-    async def __call__(self, channel_id: int, require_today: bool = True) -> None: ...
+    The return value is a status string (task 12, decision (a)) that the
+    command ignores — declared as ``str`` so both the None-returning and the
+    status-returning shapes satisfy the protocol.
+    """
+
+    async def __call__(self, channel_id: int, require_today: bool = True) -> str: ...
 
 
 class AdminConfig(Protocol):
@@ -107,7 +112,7 @@ async def _raport(
         _ = await interaction.followup.send(RAPORT_ERROR, ephemeral=True)
         return
     try:
-        await run_report(channel.id, require_today=False)
+        _ = await run_report(channel.id, require_today=False)
     except Exception:
         # Defensive: run_report never raises by contract (logs internally) —
         # a bug must surface a visible error ack, never a false "Report sent".
