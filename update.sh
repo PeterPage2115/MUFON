@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # update.sh — idempotent update of the travian-discord-report-bot container.
 #
-# The image ghcr.io/peterpage2115/mufon:latest is PRIVATE, so docker must be
-# logged in to GHCR before the pull succeeds. Do this once per server:
+# The image ghcr.io/peterpage2115/mufon:latest is PUBLIC (the GHCR package
+# visibility is public), so no `docker login` is needed — the manifest check
+# below and the pull both work anonymously. If the package is ever made
+# private again, log in once per server first:
 #
 #   echo <PAT> | docker login ghcr.io -u PeterPage2115 --password-stdin
 #
-# where <PAT> is a GitHub Personal Access Token with the read:packages scope.
-# Without the login, both the manifest check below and the pull fail with
-# "denied"/"unauthorized" — the check catches that first and exits with a
-# readable message instead of a raw docker error.
+# (PAT = GitHub Personal Access Token with the read:packages scope).
 #
 # Idempotent: safe to run repeatedly. If the image check fails, the script
 # exits BEFORE touching compose — nothing is pulled or restarted.
@@ -17,11 +16,14 @@ set -euo pipefail
 
 IMAGE="ghcr.io/peterpage2115/mufon:latest"
 
-# Step 1 — verify the image exists AND we are authenticated, BEFORE pulling.
+# Step 1 — verify the image exists, BEFORE pulling. Fails with a readable
+# message when the package is missing (CI hasn't pushed) or was made private
+# without a login.
 if ! manifest_err="$(docker manifest inspect "${IMAGE}" 2>&1)"; then
   if grep -Eqi 'unauthorized|denied' <<< "${manifest_err}"; then
     echo "ERROR: cannot access ${IMAGE} — not logged in to GHCR." >&2
-    echo "The image is private; log in once per server:" >&2
+    echo "The package is private; either make it public (GitHub → package" >&2
+    echo "settings → Change visibility) or log in once per server:" >&2
     echo "  echo <PAT> | docker login ghcr.io -u PeterPage2115 --password-stdin" >&2
     echo "  (PAT = GitHub Personal Access Token with the read:packages scope)" >&2
   else

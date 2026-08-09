@@ -114,17 +114,12 @@ docker compose logs -f    # watch startup
 ./update.sh    # docker compose pull && docker compose up -d
 ```
 
-The image is **private** (the repo and its GHCR package are private), so
-`docker compose pull` returns `unauthorized` unless the server is logged in
-to GHCR first — do this once per server:
-
-```bash
-echo <PAT> | docker login ghcr.io -u PeterPage2115 --password-stdin
-```
-
-where `<PAT>` is a GitHub Personal Access Token with the `read:packages`
-scope. `./update.sh` runs `docker manifest inspect` before pulling and fails
-with a readable message if the image is missing or the login is missing.
+The GHCR package is **public**, so `docker compose pull` works anonymously —
+no `docker login` needed. `./update.sh` runs `docker manifest inspect` before
+pulling and fails with a readable message if the image is missing (CI hasn't
+pushed) or the package was made private again (then log in once per server:
+`echo <PAT> | docker login ghcr.io -u PeterPage2115 --password-stdin`, where
+`<PAT>` is a GitHub Personal Access Token with the `read:packages` scope).
 
 ## Dashboard access
 
@@ -185,8 +180,9 @@ compute deltas against.
 - **Container reports `unhealthy`**: `docker compose ps` shows unhealthy —
   the healthcheck only passes once the process is up with a real
   `DISCORD_TOKEN`. Check `docker compose logs` for the startup error.
-- **`unauthorized` when pulling**: the image is private — log in to GHCR
-  first (see Updating).
+- **`unauthorized`/`denied` when pulling**: the image was never published
+  (CI builds only from `main` — check Actions) or the GHCR package was made
+  private — log in to GHCR first (see Updating).
 - **A day is missing from the report**: an empty/truncated map.sql response
   is treated as a fetch failure — no snapshot is saved that day (look for
   `empty parse` in the logs).

@@ -3,10 +3,9 @@
 # Two jobs:
 #   (a) build-push — builds the image and pushes it to GHCR
 #       (ghcr.io/peterpage2115/mufon) on every push to `main`; tags:
-#       `latest` + the 40-char commit sha. The repository is PRIVATE, so
-#       the published image is private too — the server needs `docker
-#       login ghcr.io` (PAT with read:packages) before `docker compose
-#       pull` (see README "Updating").
+#       `latest` + the 40-char commit sha. The GHCR package is PUBLIC —
+#       the server pulls it anonymously, no `docker login` needed
+#       (see README "Updating").
 #   (b) secret-scan — runs on EVERY push and pull request, unconditionally.
 #       Gitleaks is the primary scanner; a plain grep for a
 #       DISCORD_TOKEN-shaped value (20+ chars, so the EMPTY placeholder in
