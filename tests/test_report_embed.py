@@ -2,10 +2,12 @@
 
 Decisions locked by these tests (all wording lives in ``travian.strings``):
 
-- Pinned structure (plan): Summary, New Villages (cap 15), Lost Villages
-  (cap 15), Top Players × 3 SEPARATE fields (Population / Growth /
-  New Villages, cap 5), Regions, Victory Points — in that order, ≤ 25 fields
-  total, every field value ≤ 1024 chars.
+- Pinned structure (plan): Summary, Standings (only when
+  ``data.standings`` is non-empty — one line per tracked alliance, OUR tags
+  bold), New Villages (cap 15), Lost Villages (cap 15), Top Players × 3
+  SEPARATE fields (Population / Growth / New Villages, cap 5), Regions,
+  Victory Points — in that order, ≤ 25 fields total, every field value ≤
+  1024 chars.
 - Fixed blocks split at 1024 chars; each split reduces the Regions cap by 1:
   ``regions_cap = 25 − fixed_after_splits``. Region lines additionally stop
   at a char budget of ``6000 − fixed_len − description − footer − 512``.
@@ -35,7 +37,14 @@ from travian.bot.report_embed import (
     _split_into_fields,
     build_report_embed,
 )
-from travian.models import DeltaSummary, PlayerStat, RegionStat, ReportData, VillageEvent
+from travian.models import (
+    AllianceStat,
+    DeltaSummary,
+    PlayerStat,
+    RegionStat,
+    ReportData,
+    VillageEvent,
+)
 
 
 def make_event(
@@ -107,6 +116,30 @@ def make_summary(
     vp_delta: int | None = 10,
 ) -> DeltaSummary:
     return DeltaSummary(
+        villages=villages,
+        population=population,
+        players=players,
+        vp=vp,
+        villages_delta=villages_delta,
+        population_delta=population_delta,
+        players_delta=players_delta,
+        vp_delta=vp_delta,
+    )
+
+
+def make_standings(
+    tag: str,
+    villages: int = 10,
+    population: int = 1000,
+    players: int = 5,
+    vp: int = 900,
+    villages_delta: int | None = 1,
+    population_delta: int | None = 50,
+    players_delta: int | None = 0,
+    vp_delta: int | None = 10,
+) -> AllianceStat:
+    return AllianceStat(
+        tag=tag,
         villages=villages,
         population=population,
         players=players,
@@ -344,6 +377,57 @@ class TestContentFormatting:
         embed = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
 
         assert field_value(embed.fields[-1]) == "Total: 340 (+10)"
+
+
+class TestStandings:
+    """The Standings comparison field (TRACKED_ALLIANCES)."""
+
+    def test_field_position_after_summary_and_line_format(self):
+        data = make_report(
+            standings=[
+                make_standings("WOLF", population=5000, vp=900, population_delta=120, vp_delta=10),
+                make_standings("AAA", population=3000, vp=800, population_delta=-50, vp_delta=0),
+                make_standings("BBB", population=1000, vp=700, population_delta=None, vp_delta=None),
+            ]
+        )
+
+        embed = build_report_embed(data, ["WOLF"], "2026-08-08")
+
+        names = [f.name for f in embed.fields]
+        assert names[0] == strings.FIELD_SUMMARY
+        assert names[1] == strings.FIELD_STANDINGS
+        assert names[2] == strings.FIELD_NEW_VILLAGES
+        lines = field_value(embed.fields[1]).split("\n")
+        assert lines[0] == "**WOLF** — 5000 pop (+120) · 10 vil · 5 pl · 900 VP (+10)"
+        assert lines[1] == "AAA — 3000 pop (−50) · 10 vil · 5 pl · 800 VP (±0)"
+        assert lines[2] == "BBB — 1000 pop (—) · 10 vil · 5 pl · 700 VP (—)"
+
+    def test_our_tags_bold_only(self):
+        data = make_report(standings=[make_standings("WOLF"), make_standings("WOLF2"), make_standings("AAA")])
+
+        embed = build_report_embed(data, ["WOLF", "WOLF2"], "2026-08-08")
+
+        lines = field_value(next(f for f in embed.fields if f.name == strings.FIELD_STANDINGS)).split("\n")
+        assert lines[0].startswith("**WOLF** —")
+        assert lines[1].startswith("**WOLF2** —")
+        assert lines[2].startswith("AAA —")
+
+    def test_empty_standings_hides_field(self):
+        embed = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
+
+        assert strings.FIELD_STANDINGS not in [f.name for f in embed.fields]
+
+    def test_standings_field_respects_field_cap(self):
+        # 30 tracked alliances: must not exceed the 25-field cap or 1024 chars.
+        standings = [make_standings(f"T{i}", population=100 + i, vp=1) for i in range(30)]
+        data = make_report(standings=standings)
+
+        embed = build_report_embed(data, ["WOLF"], "2026-08-08")
+
+        standings_fields = [f for f in embed.fields if f.name == strings.FIELD_STANDINGS]
+        assert len(embed.fields) <= 25
+        assert all(len(field_value(f)) <= 1024 for f in standings_fields)
+        assert standings_fields  # capped lines survive
 
 
 class TestEmptyStates:

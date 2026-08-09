@@ -113,6 +113,26 @@ class RegionStat(BaseModel):
     delta: int | None
 
 
+class AllianceStat(BaseModel):
+    """One tracked alliance's row in the report's Standings comparison.
+
+    ``tag`` is the configured tag the row was resolved from (a tag matching
+    several alliances unions them, per the metrics resolution semantics).
+    Deltas are ``None`` when there is no previous snapshot (first day); a
+    tracked alliance absent from the previous snapshot yields curr − 0.
+    """
+
+    tag: str
+    villages: int
+    population: int
+    players: int
+    vp: int
+    villages_delta: int | None
+    population_delta: int | None
+    players_delta: int | None
+    vp_delta: int | None
+
+
 class ReportData(BaseModel):
     """Everything the daily report embed needs — one block per embed field.
 
@@ -126,6 +146,7 @@ class ReportData(BaseModel):
     server: str
     alliance_tags: list[str]
     summary: DeltaSummary
+    standings: list[AllianceStat] = []
     new_villages: list[VillageEvent]
     lost_villages: list[VillageEvent]
     top_players: dict[str, list[PlayerStat]]

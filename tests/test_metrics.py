@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from travian.metrics import (
+    alliance_standings,
     compute_deltas,
     region_alliance_totals,
     region_stats,
@@ -707,3 +708,92 @@ class TestTopPlayers:
         assert ranking[1].villages == 0
         assert ranking[1].growth == -500
         assert [p.player_id for p in result["population"]] == [1, 2]
+
+
+class TestAllianceStandings:
+    """Per-tag comparison rows for the report's Standings field."""
+
+    def test_aggregates_per_tag_in_config_order(self):
+        curr = [
+            _row(1, 7, 1, population=100, victory_points=300),
+            _row(2, 7, 1, population=200, victory_points=600),
+            _row(3, 8, 2, population=50, victory_points=100),
+            _row(4, 8, 3, population=50, victory_points=100),
+        ]
+
+        standings = alliance_standings(None, curr, ["A7", "A8"])
+
+        assert [s.tag for s in standings] == ["A7", "A8"]  # config order, not a sort
+        a7, a8 = standings
+        assert (a7.villages, a7.population, a7.players, a7.vp) == (2, 300, 1, 900)
+        assert (a8.villages, a8.population, a8.players, a8.vp) == (2, 100, 2, 200)
+        assert all(d is None for d in (a7.villages_delta, a7.population_delta, a7.players_delta, a7.vp_delta))
+
+    def test_deltas_from_previous_snapshot(self):
+        prev = [
+            _row(1, 7, 1, population=100, victory_points=300),
+            _row(2, 7, 1, population=200, victory_points=600),
+        ]
+        curr = [
+            _row(1, 7, 1, population=150, victory_points=350),
+            _row(2, 7, 1, population=200, victory_points=600),
+            _row(3, 7, 2, population=50, victory_points=100),
+        ]
+
+        standings = alliance_standings(prev, curr, ["A7"])
+
+        assert len(standings) == 1
+        s = standings[0]
+        assert (s.villages_delta, s.population_delta, s.players_delta, s.vp_delta) == (1, 100, 1, 150)
+
+    def test_prev_matched_by_curr_ids_survives_tag_rename(self):
+        # Same alliance_id, renamed tag: deltas are real, not curr - 0.
+        prev = [_row(1, 7, 1, population=100)]
+        prev[0].alliance_tag = "OLD"
+        curr = [_row(1, 7, 1, population=130)]
+
+        standings = alliance_standings(prev, curr, ["A7"])
+
+        assert standings[0].population_delta == 30
+
+    def test_tag_absent_from_prev_yields_curr_minus_zero(self):
+        prev = [_row(1, 7, 1, population=100)]
+        curr = [_row(1, 7, 1, population=100), _row(2, 8, 2, population=60)]
+
+        standings = alliance_standings(prev, curr, ["A8"])
+
+        assert standings[0].population_delta == 60
+        assert standings[0].villages_delta == 1
+
+    def test_unresolved_tag_skipped_with_warning(self, caplog):
+        curr = [_row(1, 7, 1)]
+
+        with caplog.at_level(logging.WARNING):
+            standings = alliance_standings(None, curr, ["A7", "NOPE"])
+
+        assert [s.tag for s in standings] == ["A7"]
+        assert any("NOPE" in r.message for r in caplog.records)
+
+    def test_normalization_strip_dedupe(self):
+        curr = [_row(1, 7, 1), _row(2, 8, 2)]
+
+        standings = alliance_standings(None, curr, [" A7 ", "A7", "a7", "A8", ""])
+
+        assert [s.tag for s in standings] == ["A7", "A8"]  # first occurrence, case-sensitive
+
+    def test_tag_matching_multiple_ids_unions(self):
+        curr = [
+            _row(1, 7, 1, population=100),
+            _row(2, 9, 2, population=50),
+            _row(3, 9, 3, population=25),
+        ]
+        # A7 + A9 share the tag "A7"? No — give both ids the SAME tag.
+        curr[1].alliance_tag = "A7"
+        curr[2].alliance_tag = "A7"
+
+        standings = alliance_standings(None, curr, ["A7"])
+
+        assert (standings[0].villages, standings[0].population, standings[0].players) == (3, 175, 3)
+
+    def test_empty_tags_yields_empty_standings(self):
+        assert alliance_standings(None, [_row(1, 7, 1)], []) == []

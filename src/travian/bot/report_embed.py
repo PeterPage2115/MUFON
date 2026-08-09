@@ -6,15 +6,17 @@ All user-facing text lives in ``travian.strings``.
 
 Pinned structure: description ``Report for <server> — snapshot <date> —
 <tags>`` (+ `` (baseline)`` with no previous snapshot); fields in order
-Summary, New Villages (cap 15), Lost Villages (cap 15), Top Players × 3
-separate fields (cap 5), Regions, Victory Points — ≤ 25 fields, values
-≤ 1024. ``_split_into_fields`` packs lines in order into values (≤ 1024
-each, ≤ ``max_fields`` values, total ≤ ``budget``); fixed blocks split at
-1024 only, Regions additionally get ``6000 − fixed_len − description −
-footer − 512`` (``_CHAR_MARGIN`` covers region field names). Unpacked
-lines become a ``…and N more`` line when it fits, else are omitted with a
-warning. The Regions field cap ``25 − fixed_after_splits`` is enforced
-via ``max_fields`` — the char budget always binds first in practice.
+Summary, Standings (only when ``data.standings`` is non-empty; one line
+per tracked alliance, OUR tags bold), New Villages (cap 15), Lost
+Villages (cap 15), Top Players × 3 separate fields (cap 5), Regions,
+Victory Points — ≤ 25 fields, values ≤ 1024. ``_split_into_fields`` packs
+lines in order into values (≤ 1024 each, ≤ ``max_fields`` values, total ≤
+``budget``); fixed blocks split at 1024 only, Regions additionally get
+``6000 − fixed_len − description − footer − 512`` (``_CHAR_MARGIN``
+covers region field names). Unpacked lines become a ``…and N more`` line
+when it fits, else are omitted with a warning. The Regions field cap
+``25 − fixed_after_splits`` is enforced via ``max_fields`` — the char
+budget always binds first in practice.
 
 Delta rendering: None → "—", 0 → "±0", >0 → "+N", <0 → "−N" (U+2212).
 Top Players — New Villages renders the strict-gained count carried by
@@ -26,7 +28,14 @@ import logging
 import discord
 
 from travian import strings
-from travian.models import DeltaSummary, PlayerStat, RegionStat, ReportData, VillageEvent
+from travian.models import (
+    AllianceStat,
+    DeltaSummary,
+    PlayerStat,
+    RegionStat,
+    ReportData,
+    VillageEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +80,8 @@ def build_report_embed(
         remaining -= len(values)
 
     pack(strings.FIELD_SUMMARY, _summary_lines(data.summary))
+    if data.standings:
+        pack(strings.FIELD_STANDINGS, _standings_lines(data.standings, alliance_tags))
     pack(strings.FIELD_NEW_VILLAGES, _new_village_lines(data.new_villages), item_cap=_ITEM_CAP_NEW_LOST)
     pack(strings.FIELD_LOST_VILLAGES, _lost_village_lines(data.lost_villages), item_cap=_ITEM_CAP_NEW_LOST)
     pack(
@@ -166,6 +177,27 @@ def _summary_lines(summary: DeltaSummary) -> list[str]:
             label=strings.SUMMARY_PLAYERS, value=summary.players, delta=_render_delta(summary.players_delta)
         ),
         strings.SUMMARY_LINE.format(label=strings.SUMMARY_VP, value=summary.vp, delta=_render_delta(summary.vp_delta)),
+    ]
+
+
+def _standings_lines(standings: list[AllianceStat], our_tags: list[str]) -> list[str]:
+    """One line per tracked alliance; OUR tags (``alliance_tags``) are bold.
+
+    Lines keep the config order (families stay grouped). The rendered delta
+    is the population delta; the VP delta follows the VP value.
+    """
+    ours = set(our_tags)
+    return [
+        strings.STANDINGS_LINE.format(
+            tag=f"**{s.tag}**" if s.tag in ours else s.tag,
+            population=s.population,
+            delta=_render_delta(s.population_delta),
+            villages=s.villages,
+            players=s.players,
+            vp=s.vp,
+            vp_delta=_render_delta(s.vp_delta),
+        )
+        for s in standings
     ]
 
 

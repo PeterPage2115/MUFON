@@ -301,7 +301,18 @@ class TestGetSettings:
         assert payload["REPORT_TZ"] == "Europe/Warsaw"
         assert payload["ADMIN_ROLE_ID"] is None
         assert payload["REPORT_EMBED_COLOR"] == 0x2ECC71
+        assert payload["TRACKED_ALLIANCES"] == []  # env fallback empty
         assert "DISCORD_TOKEN" not in payload  # secrets never leave the API
+
+    def test_tracked_alliances_in_payload(self, tmp_path: Path) -> None:
+        db = tmp_path / "s.db"
+        _seed_db(db)
+        conn = store.connect(db)
+        store.set_settings(conn, {"TRACKED_ALLIANCES": ["UFO", "PR-U"]})
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/settings").json()
+        assert payload["TRACKED_ALLIANCES"] == ["UFO", "PR-U"]
 
 
 # --- PUT /api/settings ---------------------------------------------------------
@@ -395,6 +406,31 @@ class TestPutSettings:
         with TestClient(_app(db, _env())) as client:
             assert client.put("/api/settings", json={"ALLIANCE_TAGS": "NOVA"}).status_code == 422
             assert client.put("/api/settings", json={"ALLIANCE_TAGS": [1, 2]}).status_code == 422
+
+    def test_tracked_alliances_saved_stripped_deduped(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"TRACKED_ALLIANCES": [" UFO ", "UFO", "AAA", "AAA"]})
+        assert resp.status_code == 200
+        assert resp.json()["TRACKED_ALLIANCES"] == ["UFO", "AAA"]
+        assert _db_settings(db)["TRACKED_ALLIANCES"] == ["UFO", "AAA"]
+
+    def test_tracked_alliances_empty_allowed(self, tmp_path: Path) -> None:
+        """Empty TRACKED_ALLIANCES is legal (hides Standings) — unlike ALLIANCE_TAGS."""
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"TRACKED_ALLIANCES": []})
+        assert resp.status_code == 200
+        assert resp.json()["TRACKED_ALLIANCES"] == []
+
+    def test_tracked_alliances_must_be_list_of_strings(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.put("/api/settings", json={"TRACKED_ALLIANCES": "UFO"}).status_code == 422
+            assert client.put("/api/settings", json={"TRACKED_ALLIANCES": [1, 2]}).status_code == 422
 
     def test_bad_color_422(self, tmp_path: Path) -> None:
         db = tmp_path / "p.db"

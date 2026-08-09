@@ -25,6 +25,7 @@ FOOTER_NO_DATE = "map.sql snapshot (midnight server time)"
 
 # --- Field names --------------------------------------------------------------
 FIELD_SUMMARY = "Summary"
+FIELD_STANDINGS = "Standings"
 FIELD_NEW_VILLAGES = "New Villages"
 FIELD_LOST_VILLAGES = "Lost Villages"
 FIELD_TOP_PLAYERS_POPULATION = "Top Players — Population"
@@ -54,6 +55,10 @@ TOP_PLAYER_NEW_VILLAGES_LINE = "{player} — +{gains} villages"
 # --- Regions ---------------------------------------------------------------------
 REGION_LINE = "{region} — {villages} vil · {population} pop ({share}%) · {delta}"
 SHARE_PERCENT_FORMAT = "{:.1f}"
+
+# --- Standings ---------------------------------------------------------------------
+# {delta} is the population delta, {vp_delta} the victory-point delta.
+STANDINGS_LINE = "{tag} — {population} pop ({delta}) · {villages} vil · {players} pl · {vp} VP ({vp_delta})"
 
 # --- Victory points ---------------------------------------------------------------
 VICTORY_POINTS_LINE = "Total: {value} ({delta})"

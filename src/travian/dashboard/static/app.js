@@ -36,7 +36,7 @@
   var logEls = {}; // logKey -> <li> element (avoids attribute-selector escaping issues)
   var actionInFlight = false;
   var SETTINGS_KEYS = [
-    "ALLIANCE_TAGS", "CHANNEL_ID", "ADMIN_ROLE_ID",
+    "ALLIANCE_TAGS", "TRACKED_ALLIANCES", "CHANNEL_ID", "ADMIN_ROLE_ID",
     "FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ",
     "REPORT_HOUR", "REPORT_MINUTE", "REPORT_TZ",
     "REPORT_EMBED_COLOR",
@@ -339,6 +339,18 @@
       errors.ALLIANCE_TAGS = "At least one alliance tag is required.";
     }
 
+    var tracked = (values.TRACKED_ALLIANCES || "")
+      .split(/[\n,]+/)
+      .map(function (t) {
+        return t.trim();
+      })
+      .filter(Boolean);
+    var trackedUnique = [];
+    tracked.forEach(function (t) {
+      if (trackedUnique.indexOf(t) === -1) trackedUnique.push(t);
+    });
+    // Empty is allowed: it just hides the Standings field.
+
     ["FETCH_HOUR", "REPORT_HOUR"].forEach(function (key) {
       var v = values[key] === "" ? NaN : Number(values[key]);
       if (isNaN(v) || v < 0 || v > 23) errors[key] = "Hour must be between 0 and 23.";
@@ -375,7 +387,7 @@
       errors.REPORT_EMBED_COLOR = "Color must be six hex digits, e.g. #D1A84A.";
     }
 
-    return { errors: errors, tags: unique };
+    return { errors: errors, tags: unique, trackedTags: trackedUnique };
   }
 
   // The API accepts only JSON ints (dashboard/app.py `_int_setting`). Send a
@@ -391,9 +403,10 @@
     return Number.isSafeInteger(num) ? num : digits;
   }
 
-  function payloadFromValues(values, tags) {
+  function payloadFromValues(values, tags, trackedTags) {
     return {
       ALLIANCE_TAGS: tags,
+      TRACKED_ALLIANCES: trackedTags,
       CHANNEL_ID: intSetting(values.CHANNEL_ID),
       FETCH_HOUR: Number(values.FETCH_HOUR),
       FETCH_MINUTE: Number(values.FETCH_MINUTE),
@@ -412,6 +425,11 @@
     var tagsEl = els.settingsForm.querySelector('[data-setting-key="ALLIANCE_TAGS"]');
     if (tagsEl && !tagsEl.dataset.userEdited) {
       tagsEl.value = (settings.ALLIANCE_TAGS || []).join("\n");
+    }
+
+    var trackedEl = els.settingsForm.querySelector('[data-setting-key="TRACKED_ALLIANCES"]');
+    if (trackedEl && !trackedEl.dataset.userEdited) {
+      trackedEl.value = (settings.TRACKED_ALLIANCES || []).join("\n");
     }
 
     var channelEl = els.settingsForm.querySelector('[data-setting-key="CHANNEL_ID"]');
@@ -472,7 +490,7 @@
       return;
     }
 
-    var payload = payloadFromValues(values, checked.tags);
+    var payload = payloadFromValues(values, checked.tags, checked.trackedTags);
     var saved = false;
     setBusy(els.saveButton, true, "Saving…");
 

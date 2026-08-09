@@ -124,6 +124,7 @@ from travian.bot.report_embed import build_report_embed
 from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
+    alliance_standings,
     compute_deltas,
     region_stats,
     resolve_alliance_ids,
@@ -201,6 +202,7 @@ class MergedConfig:
     sqlite_path: str = DEFAULT_SQLITE_PATH
     channel_id: int | None = None
     alliance_tags: list[str] = field(default_factory=list)
+    tracked_alliances: list[str] = field(default_factory=list)
     fetch_hour: int = DEFAULT_FETCH_HOUR
     fetch_minute: int = DEFAULT_FETCH_MINUTE
     fetch_tz: str = DEFAULT_FETCH_TZ
@@ -228,7 +230,8 @@ def load_merged_config(conn: sqlite3.Connection, env: Mapping[str, str]) -> Merg
         discord_token=env.get("DISCORD_TOKEN", ""),
         sqlite_path=env.get("SQLITE_PATH", DEFAULT_SQLITE_PATH),
         channel_id=None if channel_raw is None else _as_int("CHANNEL_ID", channel_raw),
-        alliance_tags=_as_tags(_pick(env, db, "ALLIANCE_TAGS")),
+        alliance_tags=_as_tags("ALLIANCE_TAGS", _pick(env, db, "ALLIANCE_TAGS")),
+        tracked_alliances=_as_tags("TRACKED_ALLIANCES", _pick(env, db, "TRACKED_ALLIANCES")),
         fetch_hour=_as_int("FETCH_HOUR", _pick(env, db, "FETCH_HOUR", DEFAULT_FETCH_HOUR)),
         fetch_minute=_as_int("FETCH_MINUTE", _pick(env, db, "FETCH_MINUTE", DEFAULT_FETCH_MINUTE)),
         fetch_tz=_as_str("FETCH_TZ", _pick(env, db, "FETCH_TZ", DEFAULT_FETCH_TZ)),
@@ -317,8 +320,9 @@ def _as_color(key: str, raw: object) -> int:
     raise ValueError(f"setting {key}: expected an integer color, got {raw!r}")
 
 
-def _as_tags(raw: object) -> list[str]:
-    """Coerce ALLIANCE_TAGS: env comma-separated string or settings list[str].
+def _as_tags(key: str, raw: object) -> list[str]:
+    """Coerce a tag-list setting (ALLIANCE_TAGS / TRACKED_ALLIANCES): env
+    comma-separated string or settings list[str].
 
     Tags are stripped, empties dropped, duplicates removed (first occurrence
     wins) — the tag-matching semantics of task 6.
@@ -330,10 +334,10 @@ def _as_tags(raw: object) -> list[str]:
     elif isinstance(raw, list):
         raw_items = cast(list[object], raw)
         if not all(isinstance(item, str) for item in raw_items):
-            raise TypeError("setting ALLIANCE_TAGS: list values must be strings")
+            raise TypeError(f"setting {key}: list values must be strings")
         parts = cast(list[str], raw_items)
     else:
-        raise TypeError(f"setting ALLIANCE_TAGS: expected comma-separated string or list, got {raw!r}")
+        raise TypeError(f"setting {key}: expected comma-separated string or list, got {raw!r}")
     tags: list[str] = []
     for part in parts:
         tag = part.strip()
@@ -633,6 +637,7 @@ def _build_report_data(
         server=SERVER,
         alliance_tags=cfg.alliance_tags,
         summary=summary,
+        standings=alliance_standings(prev_rows, curr_rows, cfg.tracked_alliances),
         new_villages=gained,
         lost_villages=lost,
         top_players=top_players(curr_rows, prev_rows, alliance_ids),

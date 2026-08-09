@@ -74,6 +74,7 @@ as unset.
 | `DISCORD_TOKEN` | *(required)* | Bot token — env only, never in the DB. |
 | `CHANNEL_ID` | *(required)* | Channel where the daily report is posted. |
 | `ALLIANCE_TAGS` | *(empty)* | Comma-separated alliance tags, e.g. `AAA,BBB`. Empty → daily report skipped with a warning. |
+| `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** field, e.g. `AAA,BBB,CCC`. OUR tags (`ALLIANCE_TAGS`) are bold; empty → no Standings field. |
 | `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server). |
 | `FETCH_HOUR` | `0` | Hour (24h) of the daily map.sql fetch. |
 | `FETCH_MINUTE` | `15` | Minute of the daily map.sql fetch. |
@@ -104,6 +105,10 @@ docker compose logs -f    # watch startup
 - On the very first run there is **no snapshot yet** — the daily report is
   skipped ("no data yet") until the first map.sql fetch completes. Use the
   dashboard **Fetch now** button (or wait for the scheduled fetch).
+- The report shows our summary (villages, population, players, VP),
+  new/lost villages, top players, regions and victory points — plus a
+  **Standings** field comparing every `TRACKED_ALLIANCES` alliance
+  (ours bold, population/VP day-over-day deltas) when configured.
 - The healthcheck (`/api/status`) only turns green with a **real**
   `DISCORD_TOKEN` in `.env` — the process exits with a clear error before the
   dashboard starts otherwise.

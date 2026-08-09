@@ -54,7 +54,14 @@ budget is exceeded by design — SIZE_OK, splitting deferred past T8.
 import logging
 import sqlite3
 
-from travian.models import DeltaSummary, PlayerStat, RegionStat, VillageEvent, VillageRow
+from travian.models import (
+    AllianceStat,
+    DeltaSummary,
+    PlayerStat,
+    RegionStat,
+    VillageEvent,
+    VillageRow,
+)
 from travian.store import append_log
 
 logger = logging.getLogger(__name__)
@@ -119,6 +126,82 @@ def _aggregate(rows: list[VillageRow], alliance_ids: set[int]) -> tuple[int, int
             vp += row.victory_points
             players.add(row.player_id)
     return villages, population, len(players), vp
+
+
+def alliance_standings(
+    prev_rows: list[VillageRow] | None,
+    curr_rows: list[VillageRow],
+    tags: list[str],
+) -> list[AllianceStat]:
+    """Per-tag aggregates + day-over-day deltas for the report's Standings field.
+
+    Tags are normalized (strip/dedupe, first occurrence wins) and matched
+    case-sensitively against ``alliance_tag`` in the CURRENT snapshot — the
+    same resolution semantics as ``resolve_alliance_ids``, including the union
+    of ids for a tag matching several alliances. Unresolved tags are skipped
+    with a ``logging.warning`` (the embed renders only the resolved subset,
+    like the rest of the report).
+
+    Deltas are ``None`` when ``prev_rows`` is ``None``; otherwise curr − prev,
+    where prev is aggregated by the CURRENT ids (tag-rename resilience,
+    consistent with ``compute_deltas``). A tracked alliance absent from prev
+    (founded yesterday) yields curr − 0.
+
+    The result preserves the config order (families stay grouped), not a sort.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in tags:
+        tag = raw.strip()
+        if tag and tag not in seen:
+            seen.add(tag)
+            normalized.append(tag)
+
+    tag_to_ids: dict[str, set[int]] = {}
+    for row in curr_rows:
+        ids = tag_to_ids.get(row.alliance_tag)
+        if ids is None:
+            tag_to_ids[row.alliance_tag] = {row.alliance_id}
+        else:
+            ids.add(row.alliance_id)
+
+    standings: list[AllianceStat] = []
+    for tag in normalized:
+        ids = tag_to_ids.get(tag)
+        if ids is None:
+            logger.warning("alliance tag %r from TRACKED_ALLIANCES not found in current snapshot", tag)
+            continue
+        curr = _aggregate(curr_rows, ids)
+        if prev_rows is None:
+            standings.append(
+                AllianceStat(
+                    tag=tag,
+                    villages=curr[0],
+                    population=curr[1],
+                    players=curr[2],
+                    vp=curr[3],
+                    villages_delta=None,
+                    population_delta=None,
+                    players_delta=None,
+                    vp_delta=None,
+                )
+            )
+            continue
+        prev = _aggregate(prev_rows, ids)
+        standings.append(
+            AllianceStat(
+                tag=tag,
+                villages=curr[0],
+                population=curr[1],
+                players=curr[2],
+                vp=curr[3],
+                villages_delta=curr[0] - prev[0],
+                population_delta=curr[1] - prev[1],
+                players_delta=curr[2] - prev[2],
+                vp_delta=curr[3] - prev[3],
+            )
+        )
+    return standings
 
 
 def compute_deltas(

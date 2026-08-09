@@ -77,6 +77,7 @@ STATIC_DIR: Final = Path(__file__).resolve().parent / "static"
 ALLOWED_SETTINGS_KEYS: Final = frozenset(
     {
         "ALLIANCE_TAGS",
+        "TRACKED_ALLIANCES",
         "CHANNEL_ID",
         "FETCH_HOUR",
         "FETCH_MINUTE",
@@ -119,6 +120,7 @@ class SettingsPayload(TypedDict):
     """The merged settings as the API exposes them (env + DB overrides)."""
 
     ALLIANCE_TAGS: list[str]
+    TRACKED_ALLIANCES: list[str]
     CHANNEL_ID: int | None
     FETCH_HOUR: int
     FETCH_MINUTE: int
@@ -158,6 +160,9 @@ class ConfigProtocol(Protocol):
 
     @property
     def alliance_tags(self) -> list[str]: ...
+
+    @property
+    def tracked_alliances(self) -> list[str]: ...
 
     @property
     def fetch_hour(self) -> int: ...
@@ -258,6 +263,7 @@ def _recent_errors(conn: sqlite3.Connection, n: int = 5) -> list[dict[str, str]]
 def _settings_payload(cfg: ConfigProtocol) -> SettingsPayload:
     return SettingsPayload(
         ALLIANCE_TAGS=cfg.alliance_tags,
+        TRACKED_ALLIANCES=cfg.tracked_alliances,
         CHANNEL_ID=cfg.channel_id,
         FETCH_HOUR=cfg.fetch_hour,
         FETCH_MINUTE=cfg.fetch_minute,
@@ -331,22 +337,28 @@ def _int_setting(key: str, value: object) -> int:
     raise HTTPException(status_code=422, detail=f"{key} must be an integer, got {value!r}")
 
 
+def _normalize_tags(key: str, value: object) -> list[str]:
+    """Strip + dedupe a tag-list setting value (list of strings). Empty → []."""
+    if not isinstance(value, list):
+        raise HTTPException(status_code=422, detail=f"{key} must be a list of strings")
+    items = cast(list[object], value)
+    if not all(isinstance(item, str) for item in items):
+        raise HTTPException(status_code=422, detail=f"{key} must be a list of strings")
+    tags: list[str] = []
+    for item in cast(list[str], items):
+        tag = item.strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
 def _validate_tags(value: object) -> list[str]:
     """ALLIANCE_TAGS: list of strings, stripped + deduped; empty after → 422.
 
     The empty state is env-only: clearing the tags via the dashboard is
     rejected, so a misclick can never silently disable the daily report.
     """
-    if not isinstance(value, list):
-        raise HTTPException(status_code=422, detail="ALLIANCE_TAGS must be a list of strings")
-    items = cast(list[object], value)
-    if not all(isinstance(item, str) for item in items):
-        raise HTTPException(status_code=422, detail="ALLIANCE_TAGS must be a list of strings")
-    tags: list[str] = []
-    for item in cast(list[str], items):
-        tag = item.strip()
-        if tag and tag not in tags:
-            tags.append(tag)
+    tags = _normalize_tags("ALLIANCE_TAGS", value)
     if not tags:
         raise HTTPException(
             status_code=422,
@@ -376,6 +388,9 @@ def _validate_payload(payload: dict[str, object]) -> dict[str, store.JsonValue]:
         match key:
             case "ALLIANCE_TAGS":
                 validated[key] = cast(store.JsonValue, _validate_tags(value))
+            case "TRACKED_ALLIANCES":
+                # Empty is allowed: it just hides the Standings field.
+                validated[key] = cast(store.JsonValue, _normalize_tags("TRACKED_ALLIANCES", value))
             case "CHANNEL_ID":
                 validated[key] = _int_setting(key, value)
             case "FETCH_HOUR" | "REPORT_HOUR":

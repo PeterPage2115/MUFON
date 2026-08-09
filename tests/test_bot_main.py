@@ -343,6 +343,74 @@ class TestLoadMergedConfig:
             conn.close()
         assert cfg.alliance_tags == ["A", "a", "b"]
 
+    def test_tracked_alliances_default_empty(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {})
+        finally:
+            conn.close()
+        assert cfg.tracked_alliances == []
+
+    def test_tracked_alliances_env_parsed(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {"TRACKED_ALLIANCES": "UFO, PR-U,,UFO, AAA"})
+        finally:
+            conn.close()
+        assert cfg.tracked_alliances == ["UFO", "PR-U", "AAA"]
+
+    def test_tracked_alliances_db_overrides_env(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"TRACKED_ALLIANCES": ["DB1", "DB2"]})
+        try:
+            cfg = bot_main.load_merged_config(conn, {"TRACKED_ALLIANCES": "ENV1"})
+        finally:
+            conn.close()
+        assert cfg.tracked_alliances == ["DB1", "DB2"]
+
+    def test_tracked_alliances_bad_type_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(TypeError, match="TRACKED_ALLIANCES"):
+                bot_main.load_merged_config(conn, {"TRACKED_ALLIANCES": 5})
+        finally:
+            conn.close()
+
+
+# --- _build_report_data ----------------------------------------------------------
+
+
+class TestBuildReportData:
+    def test_standings_wired_from_config(self) -> None:
+        cfg = _cfg(tracked_alliances=["NOVA", "ENEMY"])
+        curr = [
+            _row(1, alliance_tag="NOVA", alliance_id=7, population=100),
+            _row(2, alliance_tag="NOVA", alliance_id=7, population=200),
+            _row(3, alliance_tag="ENEMY", alliance_id=8, population=50),
+        ]
+        prev = [
+            _row(1, alliance_tag="NOVA", alliance_id=7, population=100),
+            _row(3, alliance_tag="ENEMY", alliance_id=8, population=50),
+        ]
+
+        data = bot_main._build_report_data(cfg, "2026-08-08", curr, prev, {7})
+
+        assert [s.tag for s in data.standings] == ["NOVA", "ENEMY"]
+        assert (data.standings[0].population, data.standings[0].population_delta) == (300, 200)
+        assert (data.standings[1].population, data.standings[1].population_delta) == (50, 0)
+
+    def test_standings_empty_without_tracked(self) -> None:
+        cfg = _cfg()
+        curr = [_row(1)]
+
+        data = bot_main._build_report_data(cfg, "2026-08-08", curr, None, {7})
+
+        assert data.standings == []
+
 
 # --- run_fetch ----------------------------------------------------------------
 
