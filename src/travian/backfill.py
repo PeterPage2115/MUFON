@@ -168,13 +168,18 @@ async def _distinct_dates(conn: SourceConnection, table: str) -> list[str]:
 async def _fetch_batch(
     conn: SourceConnection, table: str, date: str, offset: int, limit: int
 ) -> Sequence[SourceRow]:
-    """One page of ``limit`` rows for ``date`` (asyncpg ``$1`` placeholders)."""
+    """One page of ``limit`` rows for ``date`` (asyncpg ``$1`` placeholders).
+
+    The bound ``$1`` is a ``datetime.date``, NOT the ISO string: asyncpg
+    refuses to encode a ``str`` for a Postgres ``date`` column
+    ("str has no attribute 'toordinal'"), which is what the source stores.
+    """
     columns = ", ".join(_quote_ident(name) for name in REQUIRED_COLUMNS)
     query = (
         f"SELECT {columns} FROM public.{_quote_ident(table)}"
         " WHERE _date = $1 ORDER BY village_id LIMIT $2 OFFSET $3"
     )
-    return await conn.fetch(query, date, limit, offset)
+    return await conn.fetch(query, datetime.date.fromisoformat(date), limit, offset)
 
 
 def _quote_ident(name: str) -> str:

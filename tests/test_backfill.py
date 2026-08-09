@@ -102,6 +102,8 @@ class FakeConnection:
         if "DISTINCT" in query:
             return [{"_date": d} for d in self.dates]
         date, limit, offset = args
+        if isinstance(date, datetime.date):
+            date = date.isoformat()  # asyncpg binds real date objects (backfill fix)
         start, stop = int(cast(int, offset)), int(cast(int, offset)) + int(cast(int, limit))
         return [r for r in self.rows if r["_date"] == date][start:stop]
 
@@ -283,6 +285,19 @@ def test_real_run_streams_rows_in_batches_and_saves_to_sqlite(
     batch_calls = [query for query, _ in fake.calls if "LIMIT" in query]
     assert len(batch_calls) == 8  # 2 dates x (3 data batches + terminating empty batch)
     assert "saved 2026-08-08 (12 villages)" in capsys.readouterr().out
+
+
+def test_fetch_batch_binds_datetime_date_not_iso_string() -> None:
+    """Given: asyncpg rejects str for a Postgres date column, the batch query
+    must bind a real datetime.date (regression: 'str' has no attribute
+    'toordinal')."""
+    fake = FakeConnection(tables=["village_snapshot"], columns=list(REQUIRED), dates=["2026-08-09"], rows=[])
+
+    asyncio.run(backfill._fetch_batch(fake, "village_snapshot", "2026-08-09", 0, 5))
+
+    bound = next(args for query, args in fake.calls if "LIMIT" in query)
+    assert isinstance(bound[0], datetime.date)
+    assert bound[0].isoformat() == "2026-08-09"
 
 
 def test_real_run_records_a_date_with_zero_villages(
