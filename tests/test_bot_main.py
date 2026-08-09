@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -616,3 +617,209 @@ class TestMain:
             bot_main.main()
         assert exc.value.code == 1
         assert "unknown timezone" in caplog.text
+
+
+# --- run_fetch: T10 — empty-parse guard + off-loop blocking -------------------
+
+
+class TestRunFetchT10:
+    @pytest.mark.parametrize("body", ["", "garbage that is not map.sql"])
+    def test_empty_parse_guard_logs_error_and_skips_snapshot(
+        self, body: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: body)
+        asyncio.run(bot_main.run_fetch())
+        # 0 parsed rows (even with HTTP 200) → the guard must NOT call save_snapshot
+        assert store.list_dates(store.connect(_db_path(tmp_path))) == []
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "fetch"
+            and entry["level"] == "error"
+            and "empty parse" in entry["message"]
+            for entry in logs
+        )
+
+    def test_blocking_fetch_does_not_freeze_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+
+        def slow_fetch(url: str) -> str:
+            time.sleep(0.3)  # real blocking — runs in the to_thread worker
+            return FIXTURE_PATH.read_text()
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", slow_fetch)
+
+        async def scenario() -> None:
+            fetch_task = asyncio.create_task(bot_main.run_fetch())
+            await asyncio.sleep(0.05)
+            # The loop must stay alive while the fetch blocks in a worker
+            # thread. Against the pre-T10 code this line would only run AFTER
+            # the fetch finished → fetch_task.done() → assertion fails (red).
+            assert not fetch_task.done()
+            await fetch_task
+
+        asyncio.run(scenario())
+        assert store.list_dates(store.connect(_db_path(tmp_path))) == [_fetch_date()]
+
+    def test_fetch_and_sqlite_phase_run_via_to_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        fetch_mock = lambda url: FIXTURE_PATH.read_text()
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fetch_mock)
+
+        real_to_thread = asyncio.to_thread
+        calls: list[object] = []
+
+        def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append(func)
+            return real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", spy)
+        asyncio.run(bot_main.run_fetch())
+        # run_fetch makes exactly two to_thread calls: the fetch and the
+        # sqlite phase (own connection) — nothing blocking runs on the loop.
+        assert calls == [fetch_mock, bot_main._fetch_snapshot_phase]
+
+
+# --- run_report: T10 — off-loop read+compute phase, gap deltas ----------------
+
+
+class TestRunReportT10:
+    def test_gap_between_snapshots_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=3), [_row(1, population=100)])
+        _seed(conn, today, [_row(1, population=110)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        # deltas across the gap are computed (prev = 3 days back), not None
+        assert len(channel.sent) == 1
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report"
+            and entry["level"] == "info"
+            and entry["message"].startswith("deltas computed across gap: prev ")
+            and (today - timedelta(days=3)).isoformat() in entry["message"]
+            for entry in logs
+        )
+
+    def test_consecutive_days_no_gap_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100)])
+        _seed(conn, today, [_row(1, population=110)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        logs = _logs(_db_path(tmp_path))
+        assert not any("deltas computed across gap" in entry["message"] for entry in logs)
+
+    def test_read_compute_phase_runs_via_to_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+
+        real_to_thread = asyncio.to_thread
+        calls: list[str] = []
+
+        def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append(getattr(func, "__name__", str(func)))
+            return real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", spy)
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        assert "_report_phase" in calls
+
+
+# --- job_report: T10 — resolved-subset pre-check --------------------------------
+
+
+class TestJobReport:
+    @staticmethod
+    def _spy_run_report(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, bool]]:
+        calls: list[tuple[int, bool]] = []
+
+        async def spy(channel_id: int, require_today: bool = True) -> None:
+            calls.append((channel_id, require_today))
+
+        monkeypatch.setattr(bot_main, "run_report", spy)
+        return calls
+
+    def test_no_channel_skips(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        monkeypatch.delenv("CHANNEL_ID")
+        calls = self._spy_run_report(monkeypatch)
+        asyncio.run(bot_main.job_report())
+        assert calls == []
+        logs = _logs(_db_path(tmp_path))
+        assert any("CHANNEL_ID not set" in entry["message"] for entry in logs)
+
+    def test_empty_tags_skip_before_run_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="")
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        calls = self._spy_run_report(monkeypatch)
+        asyncio.run(bot_main.job_report())
+        assert calls == []
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report"
+            and entry["level"] == "warning"
+            and "no alliance configured, skipping daily report" in entry["message"]
+            for entry in logs
+        )
+
+    def test_no_snapshot_yet_skips(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        calls = self._spy_run_report(monkeypatch)
+        asyncio.run(bot_main.job_report())
+        assert calls == []
+        logs = _logs(_db_path(tmp_path))
+        assert any("no snapshot yet, skipping daily report" in entry["message"] for entry in logs)
+
+    def test_unresolvable_tags_skip(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1, alliance_tag="OTHER")])
+        conn.close()
+        calls = self._spy_run_report(monkeypatch)
+        asyncio.run(bot_main.job_report())
+        assert calls == []
+        logs = _logs(_db_path(tmp_path))
+        assert any("unresolved alliance tags, skipping daily report" in entry["message"] for entry in logs)
+
+    def test_resolvable_tags_call_run_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        calls = self._spy_run_report(monkeypatch)
+        asyncio.run(bot_main.job_report())
+        assert calls == [(CHANNEL_ID, True)]

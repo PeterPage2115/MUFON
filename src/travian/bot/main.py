@@ -25,7 +25,8 @@ DECISIONS (documented for the plan):
 - **Empty resolved subset**: ``run_report`` always builds the report from the
   RESOLVED subset; an empty subset (no tags configured, or none resolvable)
   makes the report meaningless → ``append_log`` warning + return without
-  sending (``job_report`` keeps its own pre-check in task 10).
+  sending (``job_report`` pre-checks first (T10) and skips without calling
+  ``run_report``; ``/raport`` keeps ``run_report``'s own no-data path).
 - **Shared run lock**: ``run_fetch``/``run_report`` are guarded by one
   ``asyncio.Lock`` (module state). A call while another run is in progress is
   SKIPPED and logged — never queued. The lock is bound per event loop
@@ -35,10 +36,32 @@ DECISIONS (documented for the plan):
 - **``bot_loop`` module state**: set at runtime by ``on_ready``; task 12's
   dashboard dispatches ``run_fetch``/``run_report`` onto this loop with
   ``asyncio.run_coroutine_threadsafe(coro, bot_loop)``.
-- **T9/T10 split**: T9 implements both run functions fully, but WITHOUT the
-  empty-parse guard and WITHOUT ``asyncio.to_thread`` wrapping of blocking
-  calls (fetch, sqlite) — those land in T10; the blocking calls are already
-  isolated in the obvious places so T10's change is a small edit.
+- **T9/T10 split**: T9 implemented both run functions fully; T10 finalized
+  them — the empty-parse guard, off-loop blocking and the ``job_report``
+  pre-checks below.
+- **Empty-parse guard (T10)**: a 0-row ``parse_map_sql`` result (empty or
+  truncated body with HTTP 200) is treated as a fetch failure:
+  ``append_log('fetch', 'error', 'empty parse (0 villages) from map.sql,
+  snapshot not saved')`` and NO ``save_snapshot`` — ``run_report``'s date
+  guard then skips the day instead of reporting a misleading "0 villages".
+- **Blocking off the bot loop (T10)**: ``fetch_map_sql`` (sync httpx, up to
+  ~190 s with retries) runs in its own ``asyncio.to_thread``; the sqlite
+  phase — connect + config + save + log — runs in a second
+  ``asyncio.to_thread`` whose helper opens its own connection. A sqlite
+  connection is never shared across threads and the loop never blocks
+  (heartbeat ~41 s ≪ fetch worst case). ``channel.send`` and
+  ``bot.get_channel`` stay ON the loop (discord.py is not thread-safe); the
+  log entries they trigger go through ``_log_entry`` in a worker thread.
+- **Gap deltas (T10)**: deltas across day gaps are computed normally
+  (``prev`` = max date strictly older than ``latest``, however far back);
+  when ``prev`` is more than one calendar day before ``latest`` an info
+  entry ``deltas computed across gap: prev <date>`` is logged.
+- **job_report pre-checks (T10)**: before calling ``run_report`` the daily
+  job verifies: merged config's channel_id present → ``ALLIANCE_TAGS``
+  non-empty → a snapshot exists (else ``no snapshot yet, skipping daily
+  report``) → tags resolve against the latest snapshot. Any failure =
+  ``append_log`` warning + return WITHOUT calling ``run_report``;
+  ``run_report`` itself always builds from the resolved subset.
 - **Logging**: ``main()`` configures the root logger at INFO
   (``logging.basicConfig``); module loggers inherit. All job errors are also
   recorded in the ``job_log`` table via ``append_log`` (job names
@@ -61,8 +84,8 @@ import os
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Final, Protocol, cast
+from datetime import date, datetime, timedelta
+from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -310,14 +333,32 @@ def _log_entry(job: str, level: str, message: str) -> None:
         conn.close()
 
 
-def _record_failure(job: str, exc: Exception, conn: sqlite3.Connection) -> None:
-    """Log a job failure (logger + job_log). Call only from inside the except
-    block so ``logger.exception`` picks up the active exception."""
-    logger.exception("job %s failed: %s", job, exc)
+def _record_failure(job: str, exc: Exception, conn: sqlite3.Connection | None) -> None:
+    """Log a job failure (logger + job_log).
+
+    ``exc`` is passed explicitly to ``logger.error`` so the traceback survives
+    worker-thread calls (``logger.exception`` would find no active exception
+    there); ``conn`` may be None when the failure happened before/during
+    connect — the logger entry is still recorded.
+    """
+    logger.error("job %s failed: %s", job, exc, exc_info=exc)
+    if conn is None:
+        return
     try:
         store.append_log(conn, job, "error", str(exc))
     except sqlite3.Error:
         logger.exception("could not append job_log entry for %s", job)
+
+
+def _record_failure_blocking(job: str, exc: Exception) -> None:
+    """``_record_failure`` from a worker thread (opens its own connection)."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        _record_failure(job, exc, conn)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # --- shared run functions (jobs, dashboard, /raport) ------------------------------
@@ -326,29 +367,110 @@ def _record_failure(job: str, exc: Exception, conn: sqlite3.Connection) -> None:
 async def run_fetch() -> None:
     """Fetch → parse → save today's map.sql snapshot (in ``FETCH_TZ``).
 
-    Any failure is logged via ``append_log('fetch', 'error', ...)`` and never
-    crashes the loop. NOTE (task 10 split): the empty-parse guard and
-    ``asyncio.to_thread`` wrapping of the blocking fetch/sqlite calls land in
-    task 10; here they are direct.
+    All blocking work runs off the bot loop: ``fetch_map_sql`` (sync httpx,
+    retries up to ~190 s) in its own ``asyncio.to_thread``, the sqlite phase
+    (connect + config + save + log) in a second one that opens its own
+    connection. An empty parse (0 rows — empty/truncated 200 body) logs an
+    error and does NOT save a snapshot. Any failure is logged via
+    ``append_log('fetch', 'error', ...)`` and never crashes the loop.
     """
     if not await _acquire("fetch"):
         return
+    try:
+        text = await asyncio.to_thread(fetch_map_sql, MAP_SQL_URL)
+        await asyncio.to_thread(_fetch_snapshot_phase, text)
+    except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
+        await asyncio.to_thread(_record_failure_blocking, "fetch", exc)
+    finally:
+        _release()
+
+
+def _fetch_snapshot_phase(text: str) -> None:
+    """Sqlite phase of ``run_fetch``, in a worker thread (own connection).
+
+    Config + parse + save + log. The EMPTY-PARSE GUARD lives here: 0 rows
+    (empty/truncated 200 body) → ``append_log`` error and NO ``save_snapshot``
+    — ``run_report``'s date guard then skips the day instead of reporting a
+    misleading "0 villages".
+    """
     conn: sqlite3.Connection | None = None
     try:
         conn = store.connect(_sqlite_path(os.environ))
-        try:
-            cfg = load_merged_config(conn, os.environ)
-            text = fetch_map_sql(MAP_SQL_URL)
-            rows = parse_map_sql(text)
-            date = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
-            store.save_snapshot(conn, date, rows)
-            store.append_log(conn, "fetch", "info", f"snapshot saved for {date} ({len(rows)} villages)")
-        except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
-            _record_failure("fetch", exc, conn)
+        cfg = load_merged_config(conn, os.environ)
+        rows = parse_map_sql(text)
+        if not rows:
+            store.append_log(conn, "fetch", "error", "empty parse (0 villages) from map.sql, snapshot not saved")
+            return
+        snapshot_date = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
+        store.save_snapshot(conn, snapshot_date, rows)
+        store.append_log(conn, "fetch", "info", f"snapshot saved for {snapshot_date} ({len(rows)} villages)")
+    except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
+        _record_failure("fetch", exc, conn)
     finally:
         if conn is not None:
             conn.close()
-        _release()
+
+
+@dataclass(frozen=True)
+class _ReportPhase:
+    """Outcome of ``run_report``'s blocking read+compute phase.
+
+    ``action``: ``send`` (embed + snapshot_date ready, send on the loop),
+    ``no_data`` (no snapshots — send the no-data embed), ``stale`` /
+    ``no_alliance`` / ``failed`` (already logged, nothing to send).
+    """
+
+    action: Literal["send", "no_data", "stale", "no_alliance", "failed"]
+    embed: discord.Embed | None = None
+    snapshot_date: str = ""
+
+
+def _report_phase(require_today: bool) -> _ReportPhase:
+    """The sqlite read + compute phase of ``run_report``, in a worker thread.
+
+    Opens its own connection (never shared with the loop thread) and decides
+    the outcome — send / no_data / stale / no_alliance / failed — logging the
+    warnings and failures itself. Deltas across day gaps are computed, not
+    None; a gap > 1 calendar day logs an info entry. ``channel.send`` is NOT
+    part of this phase (it must run on the bot loop).
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        cfg = load_merged_config(conn, os.environ)
+        latest = store.load_latest(conn)
+        if latest is None:
+            embed = discord.Embed(description=NO_DATA_YET, color=cfg.report_embed_color)
+            return _ReportPhase(action="no_data", embed=embed)
+        expected = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
+        if require_today and latest.snapshot_date != expected:
+            store.append_log(conn, "report", "warning", "no snapshot for today, skipping")
+            return _ReportPhase(action="stale")
+        previous = _previous_date(conn, latest.snapshot_date)
+        if previous is not None:
+            gap = date.fromisoformat(latest.snapshot_date) - date.fromisoformat(previous)
+            if gap > timedelta(days=1):
+                store.append_log(conn, "report", "info", f"deltas computed across gap: prev {previous}")
+        curr_rows = store.load_villages(conn, latest.snapshot_date)
+        prev_rows = store.load_villages(conn, previous) if previous is not None else None
+        resolved, unresolved = resolve_alliance_ids(curr_rows, cfg.alliance_tags, conn)
+        if not resolved:
+            store.append_log(conn, "report", "warning", "no alliance configured, skipping report")
+            return _ReportPhase(action="no_alliance")
+        data = _build_report_data(cfg, latest.snapshot_date, curr_rows, prev_rows, resolved)
+        embed = build_report_embed(
+            data,
+            _resolved_tags(cfg.alliance_tags, unresolved),
+            latest.snapshot_date,
+            color=cfg.report_embed_color,
+        )
+        return _ReportPhase(action="send", embed=embed, snapshot_date=latest.snapshot_date)
+    except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
+        _record_failure("report", exc, conn)
+        return _ReportPhase(action="failed")
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 async def run_report(channel_id: int, require_today: bool = True) -> None:
@@ -358,53 +480,53 @@ async def run_report(channel_id: int, require_today: bool = True) -> None:
     yet" embed; (3) ``require_today`` and the latest snapshot is not today
     (``FETCH_TZ``) → log + return without sending; (4) otherwise build the
     report from the latest + previous snapshots (deltas across day gaps are
-    computed, not None) and send. The report is always built from the
-    RESOLVED alliance subset — an empty subset logs a warning and skips.
-    Exceptions are logged via ``append_log('report', 'error', ...)`` and
-    never crash the loop.
+    computed, not None — a gap logs an info entry) and send. The report is
+    always built from the RESOLVED alliance subset — an empty subset logs a
+    warning and skips. The read+compute phase runs in a worker thread via
+    ``asyncio.to_thread``; ``channel.send`` stays on the bot loop. Exceptions
+    are logged via ``append_log('report', 'error', ...)`` and never crash the
+    loop.
     """
     if not await _acquire("report"):
         return
-    conn: sqlite3.Connection | None = None
     try:
-        conn = store.connect(_sqlite_path(os.environ))
-        try:
-            cfg = load_merged_config(conn, os.environ)
-            latest = store.load_latest(conn)
-            if latest is None:
-                await _send_no_data(conn, cfg, channel_id)
+        phase = await asyncio.to_thread(_report_phase, require_today)
+        match phase.action:
+            case "stale" | "no_alliance" | "failed":
                 return
-            expected = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
-            if require_today and latest.snapshot_date != expected:
-                store.append_log(conn, "report", "warning", "no snapshot for today, skipping")
-                return
-            previous = _previous_date(conn, latest.snapshot_date)
-            curr_rows = store.load_villages(conn, latest.snapshot_date)
-            prev_rows = store.load_villages(conn, previous) if previous is not None else None
-            resolved, unresolved = resolve_alliance_ids(curr_rows, cfg.alliance_tags, conn)
-            if not resolved:
-                store.append_log(conn, "report", "warning", "no alliance configured, skipping report")
-                return
-            data = _build_report_data(cfg, latest.snapshot_date, curr_rows, prev_rows, resolved)
-            embed = build_report_embed(
-                data,
-                _resolved_tags(cfg.alliance_tags, unresolved),
-                latest.snapshot_date,
-                color=cfg.report_embed_color,
-            )
-            channel = _get_channel_or_log(conn, channel_id)
-            if channel is None:
-                return
-            _ = await channel.send(embed=embed)
-            store.append_log(
-                conn, "report", "info", f"report sent to channel {channel_id} (snapshot {latest.snapshot_date})"
-            )
-        except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
-            _record_failure("report", exc, conn)
+            case "send":
+                message = f"report sent to channel {channel_id} (snapshot {phase.snapshot_date})"
+            case "no_data":
+                message = f"no snapshots yet, sent no-data embed to channel {channel_id}"
+        channel = await _get_channel_on_loop(channel_id)
+        if channel is None:
+            return
+        embed = phase.embed
+        assert embed is not None  # send/no_data always carry the embed (see _ReportPhase)
+        _ = await channel.send(embed=embed)
+        await asyncio.to_thread(_log_entry, "report", "info", message)
+    except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
+        await asyncio.to_thread(_record_failure_blocking, "report", exc)
     finally:
-        if conn is not None:
-            conn.close()
         _release()
+
+
+async def _get_channel_on_loop(channel_id: int) -> Messageable | None:
+    """Resolve the channel on the bot loop (discord.py is not thread-safe).
+
+    ``current_bot``/``get_channel`` are loop-owned state, so this runs on the
+    loop; the error logs (sqlite) go through ``_log_entry`` in a worker
+    thread.
+    """
+    bot = current_bot
+    if bot is None:
+        await asyncio.to_thread(_log_entry, "report", "error", "bot not initialized")
+        return None
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        await asyncio.to_thread(_log_entry, "report", "error", f"channel {channel_id} not found")
+        return None
+    return cast(Messageable, channel)
 
 
 def _previous_date(conn: sqlite3.Connection, latest: str) -> str | None:
@@ -441,27 +563,6 @@ def _build_report_data(
     )
 
 
-def _get_channel_or_log(conn: sqlite3.Connection, channel_id: int) -> Messageable | None:
-    bot = current_bot
-    if bot is None:
-        store.append_log(conn, "report", "error", "bot not initialized")
-        return None
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        store.append_log(conn, "report", "error", f"channel {channel_id} not found")
-        return None
-    return cast(Messageable, channel)
-
-
-async def _send_no_data(conn: sqlite3.Connection, cfg: MergedConfig, channel_id: int) -> None:
-    channel = _get_channel_or_log(conn, channel_id)
-    if channel is None:
-        return
-    embed = discord.Embed(description=NO_DATA_YET, color=cfg.report_embed_color)
-    _ = await channel.send(embed=embed)
-    store.append_log(conn, "report", "info", f"no snapshots yet, sent no-data embed to channel {channel_id}")
-
-
 # --- scheduler jobs ----------------------------------------------------------------
 
 
@@ -471,17 +572,48 @@ async def job_fetch() -> None:
 
 
 async def job_report() -> None:
-    """APScheduler job: daily report (thin wrapper over ``run_report``).
+    """APScheduler job: daily report (pre-checked wrapper over ``run_report``).
 
     Reads the merged config fresh (settings may have changed via the
-    dashboard) and resolves the target channel; task 10 adds the resolved-
-    subset pre-check here.
+    dashboard) and pre-checks the resolved alliance subset BEFORE calling
+    ``run_report``: missing channel, empty ``ALLIANCE_TAGS``, no snapshot
+    yet, or no resolvable tag → ``append_log`` warning + skip without the
+    call. ``run_report``'s own no-data path stays for ``/raport``.
     """
-    cfg = _current_config()
+    cfg = await asyncio.to_thread(_current_config)
     if cfg.channel_id is None:
-        _log_entry("report", "warning", "CHANNEL_ID not set (env or settings), skipping job")
+        await asyncio.to_thread(_log_entry, "report", "warning", "CHANNEL_ID not set (env or settings), skipping job")
+        return
+    if not cfg.alliance_tags:
+        await asyncio.to_thread(_log_entry, "report", "warning", "no alliance configured, skipping daily report")
+        return
+    if not await asyncio.to_thread(_job_report_precheck, cfg):
         return
     await run_report(cfg.channel_id, require_today=True)
+
+
+def _job_report_precheck(cfg: MergedConfig) -> bool:
+    """Resolve the configured tags against the latest snapshot, off the loop.
+
+    Worker thread (``job_report`` calls it via ``asyncio.to_thread``): opens
+    its own connection, logs a warning and returns False when no snapshot
+    exists yet or no configured tag resolves — the daily job then skips
+    WITHOUT calling ``run_report``.
+    """
+    conn = store.connect(_sqlite_path(os.environ))
+    try:
+        latest = store.load_latest(conn)
+        if latest is None:
+            store.append_log(conn, "report", "warning", "no snapshot yet, skipping daily report")
+            return False
+        curr_rows = store.load_villages(conn, latest.snapshot_date)
+        resolved, _ = resolve_alliance_ids(curr_rows, cfg.alliance_tags, conn)
+        if not resolved:
+            store.append_log(conn, "report", "warning", "unresolved alliance tags, skipping daily report")
+            return False
+        return True
+    finally:
+        conn.close()
 
 
 # --- bot class ----------------------------------------------------------------------
