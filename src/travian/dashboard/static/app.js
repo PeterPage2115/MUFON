@@ -754,12 +754,20 @@
       panel.appendChild(state);
     }
     state.textContent = message;
+    state.hidden = false; // the events panel's dedicated node starts hidden
     if (alert) state.setAttribute("role", "alert");
     panel.classList.add("is-empty");
   }
 
   function hidePanelEmpty(panel) {
     panel.classList.remove("is-empty");
+    var state = panel.querySelector(".empty-state");
+    // The events panel's dedicated node ([data-events-empty]) is owned by
+    // renderEvents; generated states are removed so recovery never leaves a
+    // stale message behind.
+    if (state && !state.hasAttribute("data-events-empty")) {
+      if (state.parentNode) state.parentNode.removeChild(state);
+    }
   }
 
   function showChartUnavailable(card) {
@@ -986,6 +994,10 @@
       showChartUnavailable(panel.querySelector(".chart-card"));
       return;
     }
+    var card = panel.querySelector(".chart-card");
+    card.classList.remove("is-empty");
+    var stale = card.querySelector(".empty-state");
+    if (stale) stale.remove();
     var dates = analysisState.regionsDates;
     var points = analysisState.regionsSeries[region] || [];
     var byDate = {};
