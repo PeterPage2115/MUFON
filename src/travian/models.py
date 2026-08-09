@@ -99,10 +99,13 @@ class PlayerStat(BaseModel):
 
 
 class RegionStat(BaseModel):
-    """Per-region numbers for our alliance(s) plus day-over-day population delta.
+    """Per-region numbers for our alliance(s) plus day-over-day deltas.
 
     ``share`` is our_pop / region_total_pop as a fraction (0.0-1.0); ``delta``
     is our_pop minus the previous day's, ``None`` when no previous snapshot.
+    ``our_vp`` is the sum of our villages' victory_points in the current
+    snapshot and ``vp_delta`` is ``our_vp`` minus the previous day's, ``None``
+    when no previous snapshot (a region absent from prev yields curr − 0).
     """
 
     region: str
@@ -111,6 +114,8 @@ class RegionStat(BaseModel):
     region_total_pop: int
     share: float
     delta: int | None
+    our_vp: int = 0
+    vp_delta: int | None = None
 
 
 class AllianceStat(BaseModel):

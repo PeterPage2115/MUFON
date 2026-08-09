@@ -32,10 +32,10 @@ Task 7 (regions, top players) extends this module:
 - **Regions** (``region_stats``): regions of interest = where OUR alliance has
   villages in curr OR prev (a region we left stays listed with zeros and a
   negative delta — losses stay visible). ``region`` ``None`` (map NULL) groups
-  as ``""``. ``share`` guards division by zero → 0.0. ``delta`` is ``None``
-  only when ``prev_rows`` is ``None``; a region absent from prev yields
-  curr − 0 (same semantics as above). Sorted by ``our_pop`` desc, region name
-  asc as tiebreak.
+  as ``""``. ``share`` guards division by zero → 0.0. ``delta``/``vp_delta``
+  are ``None`` only when ``prev_rows`` is ``None``; a region absent from prev
+  yields curr − 0 (same semantics as above). Sorted by ``share`` desc, region
+  name asc as tiebreak.
 - **Top players** (``top_players``): three separate rankings capped at ``n``.
   Player universe = curr-ours ∪ prev-ours (departed players still rank with
   negative growth). ``growth`` is ``None`` only when ``prev_rows`` is ``None``;
@@ -332,7 +332,7 @@ def region_stats(
     curr_rows: list[VillageRow],
     alliance_ids: set[int],
 ) -> list[RegionStat]:
-    """Per-region numbers for ``alliance_ids``, sorted by our_pop desc.
+    """Per-region numbers for ``alliance_ids``, sorted by share desc.
 
     Regions of interest = any region where WE have a village in ``curr_rows``
     OR in ``prev_rows`` — a region we left is still listed (our_villages=0,
@@ -341,7 +341,10 @@ def region_stats(
     (population of ALL villages in the region in curr) with a division-by-zero
     guard → 0.0. ``delta`` is our_pop minus the previous day's, ``None`` only
     when ``prev_rows`` is ``None``; a region absent from prev yields curr − 0
-    (same semantics as ``compute_deltas``). Tiebreak: region name ascending.
+    (same semantics as ``compute_deltas``). ``our_vp`` is the sum of our
+    villages' victory_points in curr; ``vp_delta`` follows ``delta``'s
+    semantics (None only when ``prev_rows`` is ``None``, else curr − prev).
+    Sort: share desc, region name asc as tiebreak (game-leaderboard order).
     """
     curr_ours: dict[str, list[VillageRow]] = {}
     region_total: dict[str, int] = {}
@@ -363,10 +366,15 @@ def region_stats(
         our_pop = sum(row.population for row in curr_ours.get(region, []))
         region_total_pop = region_total.get(region, 0)
         share = our_pop / region_total_pop if region_total_pop else 0.0
+        our_vp = sum(row.victory_points for row in curr_ours.get(region, []))
         if prev_rows is None:
             delta: int | None = None
+            vp_delta: int | None = None
         else:
-            delta = our_pop - sum(row.population for row in prev_ours.get(region, []))
+            prev_our_pop = sum(row.population for row in prev_ours.get(region, []))
+            prev_our_vp = sum(row.victory_points for row in prev_ours.get(region, []))
+            delta = our_pop - prev_our_pop
+            vp_delta = our_vp - prev_our_vp
         stats.append(
             RegionStat(
                 region=region,
@@ -375,9 +383,11 @@ def region_stats(
                 region_total_pop=region_total_pop,
                 share=share,
                 delta=delta,
+                our_vp=our_vp,
+                vp_delta=vp_delta,
             )
         )
-    stats.sort(key=lambda s: (-s.our_pop, s.region))
+    stats.sort(key=lambda s: (-s.share, s.region))
     return stats
 
 

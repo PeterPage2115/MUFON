@@ -14,8 +14,9 @@ locked by these tests:
 - Events are sorted by village_id for stable embeds.
 - ``region_stats``: regions of interest = ours in curr OR prev (lost regions
   stay listed with zeros); ``None`` region groups as ``""``; share guards
-  division-by-zero → 0.0; delta None only when prev is None; sorted by
-  ``our_pop`` desc, region name asc.
+  division-by-zero → 0.0; delta/vp_delta None only when prev is None (a
+  region absent from prev yields curr − 0); sorted by ``share`` desc,
+  region name asc.
 - ``top_players``: three separate rankings capped at n; player universe =
   curr-ours ∪ prev-ours; growth None only when prev is None; strict-gained
   for ``new_villages``; ties break by ``player_id``.
@@ -407,13 +408,13 @@ class TestVillageEvents:
 class TestRegionStats:
     def test_aggregates_our_region_with_share_and_delta(self):
         prev = [
-            _row(1, 7, 1, population=100, region="North"),
-            _row(2, 7, 2, population=50, region="North"),
+            _row(1, 7, 1, population=100, victory_points=300, region="North"),
+            _row(2, 7, 2, population=50, victory_points=400, region="North"),
         ]
         curr = [
-            _row(1, 7, 1, population=110, region="North"),
-            _row(2, 7, 2, population=50, region="North"),
-            _row(3, 8, 5, population=900, region="North"),
+            _row(1, 7, 1, population=110, victory_points=310, region="North"),
+            _row(2, 7, 2, population=50, victory_points=400, region="North"),
+            _row(3, 8, 5, population=900, victory_points=1000, region="North"),
         ]
 
         stats = region_stats(prev, curr, {7})
@@ -427,6 +428,8 @@ class TestRegionStats:
         assert region.region_total_pop == 1060
         assert region.share == pytest.approx(160 / 1060)
         assert region.delta == 10
+        assert region.our_vp == 710  # 310 + 400
+        assert region.vp_delta == 10  # 710 − (300 + 400)
 
     def test_multiple_regions_aggregated_independently(self):
         curr = [
@@ -443,10 +446,14 @@ class TestRegionStats:
         assert (north.our_villages, north.our_pop, north.region_total_pop) == (1, 100, 800)
         assert north.share == pytest.approx(100 / 800)
         assert north.delta is None
+        assert north.our_vp == 300
+        assert north.vp_delta is None
         south = by_name["South"]
         assert (south.our_villages, south.our_pop, south.region_total_pop) == (1, 200, 200)
         assert south.share == pytest.approx(1.0)
         assert south.delta is None
+        assert south.our_vp == 300
+        assert south.vp_delta is None
 
     def test_enemy_only_region_in_curr_not_included(self):
         curr = [_row(9, 8, 5, population=900, region="EnemyLand")]
@@ -464,7 +471,7 @@ class TestRegionStats:
         assert [s.region for s in stats] == ["Home"]
 
     def test_lost_region_still_listed_with_zero_values(self):
-        prev = [_row(1, 7, 1, population=300, region="Ghost")]
+        prev = [_row(1, 7, 1, population=300, victory_points=500, region="Ghost")]
 
         stats = region_stats(prev, [], {7})
 
@@ -476,10 +483,12 @@ class TestRegionStats:
         assert ghost.region_total_pop == 0
         assert ghost.share == 0.0
         assert ghost.delta == -300
+        assert ghost.our_vp == 0
+        assert ghost.vp_delta == -500  # curr 0 − prev 500
 
     def test_lost_region_with_enemies_share_zero_delta_negative(self):
-        prev = [_row(1, 7, 1, population=300, region="Ghost")]
-        curr = [_row(9, 8, 5, population=500, region="Ghost")]
+        prev = [_row(1, 7, 1, population=300, victory_points=500, region="Ghost")]
+        curr = [_row(9, 8, 5, population=500, victory_points=600, region="Ghost")]
 
         stats = region_stats(prev, curr, {7})
 
@@ -488,6 +497,8 @@ class TestRegionStats:
         assert ghost.region_total_pop == 500
         assert ghost.share == 0.0
         assert ghost.delta == -300
+        assert ghost.our_vp == 0
+        assert ghost.vp_delta == -500
 
     def test_share_zero_when_region_total_pop_is_zero(self):
         curr = [_row(1, 7, 1, population=0, region="Empty")]
@@ -509,6 +520,8 @@ class TestRegionStats:
         assert stats[0].region == ""
         assert stats[0].our_villages == 2
         assert stats[0].our_pop == 150
+        assert stats[0].our_vp == 680  # 2 × 340 (make_village_row default)
+        assert stats[0].vp_delta is None
 
     def test_delta_curr_minus_zero_when_region_absent_in_prev(self):
         prev = [_row(9, 8, 5, population=500, region="North")]
@@ -518,17 +531,25 @@ class TestRegionStats:
 
         assert stats[0].our_pop == 100
         assert stats[0].delta == 100
+        assert stats[0].our_vp == 300
+        assert stats[0].vp_delta == 300  # curr 300 − prev 0
 
-    def test_sorted_by_our_pop_desc_then_region_name(self):
+    def test_sorted_by_share_desc_then_region_name(self):
         curr = [
             _row(1, 7, 1, population=50, region="Alpha"),
-            _row(2, 7, 1, population=300, region="Beta"),
-            _row(3, 7, 1, population=50, region="Gamma"),
+            _row(2, 8, 5, population=200, region="Alpha"),
+            _row(3, 7, 1, population=300, region="Beta"),
+            _row(4, 7, 1, population=50, region="Gamma"),
+            _row(5, 8, 5, population=50, region="Gamma"),
+            _row(6, 7, 1, population=100, region="Delta"),
+            _row(7, 8, 5, population=100, region="Delta"),
         ]
 
         stats = region_stats(None, curr, {7})
 
-        assert [s.region for s in stats] == ["Beta", "Alpha", "Gamma"]
+        # shares: Beta 1.0, Delta 0.5, Gamma 0.5, Alpha 0.2 — share desc,
+        # name asc on the 0.5 tie.
+        assert [s.region for s in stats] == ["Beta", "Delta", "Gamma", "Alpha"]
 
 
 class TestRegionAllianceTotals:

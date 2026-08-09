@@ -105,10 +105,14 @@ docker compose logs -f    # watch startup
 - On the very first run there is **no snapshot yet** — the daily report is
   skipped ("no data yet") until the first map.sql fetch completes. Use the
   dashboard **Fetch now** button (or wait for the scheduled fetch).
-- The report shows our summary (villages, population, players, VP),
-  new/lost villages, top players, regions and victory points — plus a
-  **Standings** field comparing every `TRACKED_ALLIANCES` alliance
-  (ours bold, population/VP day-over-day deltas) when configured.
+- The report shows our summary (villages, population, players, VP,
+  regions controlled), new/lost villages, top players and victory points
+  — plus two fenced, monospace-aligned tables: **Standings** comparing
+  every `TRACKED_ALLIANCES` alliance (ours marked ★, population/VP
+  day-over-day deltas) and **Regions** with territory control % + bar,
+  population, daily VP Δ and the population still needed to reach 50%
+  (an alliance holding >50% of a region's population controls it — the
+  game rule) when configured.
 - The healthcheck (`/api/status`) only turns green with a **real**
   `DISCORD_TOKEN` in `.env` — the process exits with a clear error before the
   dashboard starts otherwise.

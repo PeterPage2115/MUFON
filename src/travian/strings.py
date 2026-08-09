@@ -40,6 +40,7 @@ SUMMARY_VILLAGES = "Villages"
 SUMMARY_POPULATION = "Population"
 SUMMARY_PLAYERS = "Players"
 SUMMARY_VP = "VP"
+SUMMARY_REGIONS_LINE = "Regions controlled: {controlled} of {total}"
 
 # --- Village events ------------------------------------------------------------
 VILLAGE_LINE = "**{name}** ({x}|{y})"
@@ -52,13 +53,20 @@ TOP_PLAYER_POPULATION_LINE = "{player} — {population} ({villages})"
 TOP_PLAYER_GROWTH_LINE = "{player} — {growth}"
 TOP_PLAYER_NEW_VILLAGES_LINE = "{player} — +{gains} villages"
 
-# --- Regions ---------------------------------------------------------------------
-REGION_LINE = "{region} — {villages} vil · {population} pop ({share}%) · {delta}"
-SHARE_PERCENT_FORMAT = "{:.1f}"
-
-# --- Standings ---------------------------------------------------------------------
-# {delta} is the population delta, {vp_delta} the victory-point delta.
-STANDINGS_LINE = "{tag} — {population} pop ({delta}) · {villages} vil · {players} pl · {vp} VP ({vp_delta})"
+# --- Tables (Standings + Regions, monospace-aligned) --------------------------------
+# Column positions are load-bearing (see report_embed): standings tag col 0,
+# pop col 8, Δ pop col 16, VP col 24, Δ VP col 32; region name col 0, bar col
+# 13, control col 20, pop col 26, VP Δ col 33, to 50% col 41. Do not "tidy".
+STANDINGS_TABLE_HEADER = "Tag      Pop      Δ Pop    VP       Δ VP"
+STANDINGS_TABLE_LINE = "{tag:<7} {pop:>7,} {pop_delta:>7} {vp:>7,} {vp_delta:>7}"
+STANDINGS_OURS_MARK = "★"
+STANDINGS_OURS_FOOTNOTE = "★ our alliances"
+REGION_TABLE_HEADER = "Region       Control      Pop      VP Δ    To 50%"
+REGION_TABLE_LINE = "{region:<12} {bar} {share:>5.1%} {pop:>6,} {vp_delta:>7} {to50:>7}"
+REGION_BAR_FILL = "▓"
+REGION_BAR_EMPTY = "░"
+REGION_CONTROLLED = "✓"
+REGION_TO50_NEEDED = "+{n:,}"
 
 # --- Victory points ---------------------------------------------------------------
 VICTORY_POINTS_LINE = "Total: {value} ({delta})"
