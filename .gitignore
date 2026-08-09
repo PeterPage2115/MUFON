@@ -1,5 +1,7 @@
-# Secrets
+# Secrets (never commit; .env.example is the tracked template)
 .env
+.env.*
+!.env.example
 
 # Runtime data
 data/
