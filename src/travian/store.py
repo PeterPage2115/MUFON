@@ -290,11 +290,19 @@ def set_settings(conn: sqlite3.Connection, kvs: dict[str, JsonValue]) -> None:
 
 
 def append_log(conn: sqlite3.Connection, job: str, level: str, message: str) -> None:
-    """Append one job_log row with a UTC ISO timestamp (single statement, autocommits)."""
-    _ = conn.execute(
-        "INSERT INTO job_log (ts, job, level, message) VALUES (?, ?, ?, ?)",
-        (_utc_now(), job, level, message),
-    )
+    """Append one job_log row with a UTC ISO timestamp (commits its own transaction).
+
+    The ``with conn:`` wrapper is REQUIRED: under Python's legacy sqlite3
+    isolation (``isolation_level=""``) an INSERT opens an implicit transaction
+    that is ROLLED BACK when the connection closes without a commit — an entry
+    written on one connection would be invisible to later connections. The
+    cross-connection test in test_store.py locks this behavior.
+    """
+    with conn:
+        _ = conn.execute(
+            "INSERT INTO job_log (ts, job, level, message) VALUES (?, ?, ?, ?)",
+            (_utc_now(), job, level, message),
+        )
 
 
 def recent_logs(conn: sqlite3.Connection, n: int = 50) -> list[dict[str, str]]:

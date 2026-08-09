@@ -281,6 +281,25 @@ def test_append_and_recent_logs_newest_first_when_multiple(conn: sqlite3.Connect
     assert logs[0]["ts"].endswith("+00:00")
 
 
+def test_append_log_visible_from_new_connection(tmp_path: Path) -> None:
+    # Given: a log entry appended, then its connection closed
+    first = connect(tmp_path / "test.db")
+    init_schema(first)
+    append_log(first, "report", "error", "boom")
+    first.close()
+
+    # When: a fresh connection reads the log
+    second = connect(tmp_path / "test.db")
+    try:
+        logs = recent_logs(second)
+    finally:
+        second.close()
+
+    # Then: the entry is visible — append_log must commit its own transaction
+    # (legacy sqlite3 isolation would otherwise roll back the INSERT on close)
+    assert [log["message"] for log in logs] == ["boom"]
+
+
 def test_recent_logs_limits_when_n_smaller_than_count(conn: sqlite3.Connection) -> None:
     # Given: five log entries
     for i in range(5):

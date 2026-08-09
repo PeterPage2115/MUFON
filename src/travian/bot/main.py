@@ -43,10 +43,9 @@ DECISIONS (documented for the plan):
   (``logging.basicConfig``); module loggers inherit. All job errors are also
   recorded in the ``job_log`` table via ``append_log`` (job names
   ``fetch``/``report``/``config``).
-- **append_log persistence**: ``store.append_log`` does NOT commit (Python
-  sqlite3 legacy isolation — an uncommitted INSERT is rolled back when the
-  connection closes), so every run commits its ``job_log`` rows before the
-  per-operation connection closes.
+- **append_log persistence (fixed at the root, T4-fix)**: ``store.append_log``
+  commits its own transaction (``with conn:``) — the T9 workaround (explicit
+  commits in the run functions) was removed.
 
 allow: SIZE_OK — the plan pins ``bot/main.py`` as the single bot module
 (tasks 9-11 reference only this file plus ``commands.py``), so config merge,
@@ -307,7 +306,6 @@ def _log_entry(job: str, level: str, message: str) -> None:
     conn = store.connect(_sqlite_path(os.environ))
     try:
         store.append_log(conn, job, level, message)
-        conn.commit()  # append_log does not commit — legacy sqlite3 rolls back on close
     finally:
         conn.close()
 
@@ -349,7 +347,6 @@ async def run_fetch() -> None:
             _record_failure("fetch", exc, conn)
     finally:
         if conn is not None:
-            conn.commit()  # persist append_log rows — legacy sqlite3 rolls back on close
             conn.close()
         _release()
 
@@ -406,7 +403,6 @@ async def run_report(channel_id: int, require_today: bool = True) -> None:
             _record_failure("report", exc, conn)
     finally:
         if conn is not None:
-            conn.commit()  # persist append_log rows — legacy sqlite3 rolls back on close
             conn.close()
         _release()
 
