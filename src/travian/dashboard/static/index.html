@@ -9,6 +9,7 @@
     <title>Travian Report Bot · Command Center</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/app.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to dashboard</a>
@@ -246,6 +247,120 @@
             <span id="log-count">Waiting for the first refresh</span>
             <span class="mono" id="log-updated">—</span>
           </footer>
+        </article>
+
+        <article class="card card--analysis" data-card="analysis" aria-labelledby="analysis-title">
+          <header class="card__header">
+            <div>
+              <p class="overline">Region &amp; alliance history</p>
+              <h2 id="analysis-title">Analysis</h2>
+            </div>
+            <span class="card-caption" data-analysis-range hidden>Last 30 days</span>
+          </header>
+
+          <div class="tab-bar" role="tablist" aria-label="Analysis views">
+            <button class="tab-bar__tab" role="tab" id="tab-regions" aria-controls="panel-regions" aria-selected="true" tabindex="0">Regions</button>
+            <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
+            <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+            <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
+          </div>
+
+          <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
+            <div class="analysis-layout--regions">
+              <div class="data-table__wrap">
+                <table class="data-table" aria-label="Region control summary">
+                  <thead>
+                    <tr>
+                      <th class="th--left" scope="col">Region</th>
+                      <th class="th--left" scope="col">Control</th>
+                      <th class="th--num" scope="col">Share</th>
+                      <th class="th--num" scope="col">Pop</th>
+                      <th class="th--num" scope="col">Δ %</th>
+                      <th class="th--num" scope="col">To 50%</th>
+                    </tr>
+                  </thead>
+                  <tbody data-regions-body></tbody>
+                </table>
+              </div>
+              <div class="chart-card">
+                <div class="chart-card__head">
+                  <p class="overline">Share over time</p>
+                  <label class="overline" for="analysis-region-select">Region</label>
+                  <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
+                </div>
+                <div class="chart-card__canvas">
+                  <canvas id="analysis-chart-regions" role="img" aria-label="Share of population over time"></canvas>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="analysis-panel" id="panel-alliances" role="tabpanel" aria-labelledby="tab-alliances" hidden>
+            <div class="chart-card">
+              <div class="chart-card__head">
+                <p class="overline">Tracked alliances</p>
+                <div class="segmented" role="group" aria-label="Chart metric">
+                  <button class="segmented__btn" type="button" aria-pressed="true" data-metric="population">Population</button>
+                  <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
+                </div>
+              </div>
+              <div class="chart-card__canvas">
+                <canvas id="analysis-chart-standings" role="img" aria-label="Alliance population over time"></canvas>
+              </div>
+            </div>
+          </section>
+
+          <section class="analysis-panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+            <div class="analysis-controls">
+              <div class="analysis-control">
+                <label class="overline" for="analysis-events-from">From</label>
+                <select id="analysis-events-from" class="analysis-select"></select>
+              </div>
+              <div class="analysis-control">
+                <label class="overline" for="analysis-events-to">To</label>
+                <select id="analysis-events-to" class="analysis-select"></select>
+              </div>
+              <p class="analysis-controls__error" role="alert" hidden></p>
+            </div>
+            <div class="events-grid" hidden>
+              <div class="event-list">
+                <div class="event-list__head">
+                  <p class="overline">New villages</p>
+                  <span class="event-list__count mono is-positive">· <span data-events-gained-count>0</span></span>
+                </div>
+                <ul class="event-list__items" data-events-gained></ul>
+              </div>
+              <div class="event-list">
+                <div class="event-list__head">
+                  <p class="overline">Lost villages</p>
+                  <span class="event-list__count mono is-negative">· <span data-events-lost-count>0</span></span>
+                </div>
+                <ul class="event-list__items" data-events-lost></ul>
+              </div>
+            </div>
+            <p class="empty-state" data-events-empty hidden></p>
+          </section>
+
+          <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
+            <div class="data-table__wrap">
+              <table class="data-table" aria-label="Daily change history">
+                <thead>
+                  <tr>
+                    <th class="th--left" scope="col">Date</th>
+                    <th class="th--num" scope="col">Villages</th>
+                    <th class="th--num" scope="col">Δ</th>
+                    <th class="th--num" scope="col">Population</th>
+                    <th class="th--num" scope="col">Δ</th>
+                    <th class="th--num" scope="col">Players</th>
+                    <th class="th--num" scope="col">Δ</th>
+                    <th class="th--num" scope="col">VP</th>
+                    <th class="th--num" scope="col">Δ</th>
+                  </tr>
+                </thead>
+                <tbody data-changes-body></tbody>
+              </table>
+            </div>
+          </section>
         </article>
       </div>
     </main>

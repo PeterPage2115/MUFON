@@ -62,13 +62,14 @@ DECISIONS (documented for the plan):
   report``) → tags resolve against the latest snapshot. Any failure =
   ``append_log`` warning + return WITHOUT calling ``run_report``;
   ``run_report`` itself always builds from the resolved subset.
-- **/raport registration (T11)**: ``register_commands`` (commands.py) is
-  called in ``TravianBot.__init__`` with this module's ``run_report`` and
-  ``_current_config``. The admin role id is read from a FRESH merged config
-  per command invocation, so dashboard changes apply immediately. The module
-  graph is single-direction (commands.py imports nothing from this module —
-  its config getter is typed against a minimal protocol), so no import cycle
-  exists.
+- **Command registration (T11 + report trim)**: ``register_commands``
+  (commands.py) is called in ``TravianBot.__init__`` with this module's
+  ``run_report``, ``_current_config``, ``run_villages`` and ``run_regions``
+  (/raport, /wioski, /regiony). The admin role id is read from a FRESH merged
+  config per command invocation, so dashboard changes apply immediately. The
+  module graph is single-direction (commands.py imports nothing from this
+  module — its config getter is typed against a minimal protocol), so no
+  import cycle exists.
 - **Logging**: ``main()`` configures the root logger at INFO
   (``logging.basicConfig``); module loggers inherit. All job errors are also
   recorded in the ``job_log`` table via ``append_log`` (job names
@@ -103,6 +104,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Final, Literal, Protocol, cast
@@ -120,7 +122,7 @@ from fastapi import FastAPI
 
 from travian import store
 from travian.bot.commands import register_commands
-from travian.bot.report_embed import build_report_embed
+from travian.bot.report_embed import DAILY_SECTIONS, build_report_embed
 from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
@@ -128,7 +130,6 @@ from travian.metrics import (
     compute_deltas,
     region_stats,
     resolve_alliance_ids,
-    top_players,
     village_events,
 )
 from travian.models import ReportData, VillageRow
@@ -535,6 +536,8 @@ def _report_phase(require_today: bool) -> _ReportPhase:
             _resolved_tags(cfg.alliance_tags, unresolved),
             latest.snapshot_date,
             color=cfg.report_embed_color,
+            sections=DAILY_SECTIONS,
+            region_limit=8,
         )
         return _ReportPhase(action="send", embeds=embeds, snapshot_date=latest.snapshot_date)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
@@ -623,6 +626,63 @@ def _resolved_tags(tags: list[str], unresolved: list[str]) -> list[str]:
     return [tag for tag in normalized if tag not in unresolved]
 
 
+def _section_embeds(sections: AbstractSet[str], region_limit: int | None) -> list[discord.Embed]:
+    """Build one section's embeds from the latest snapshot pair (worker thread).
+
+    Own connection (never shared with the loop thread) → load latest +
+    previous → resolve ids → ``_build_report_data`` → ``build_report_embed``
+    with ``sections``/``region_limit``. Returns ``[]`` when there is nothing
+    to show (no snapshot / no alliance / the section is empty) or on failure
+    (logged via ``_record_failure`` — the caller shows the no-content
+    string).
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        cfg = load_merged_config(conn, os.environ)
+        latest = store.load_latest(conn)
+        if latest is None:
+            return []
+        previous = _previous_date(conn, latest.snapshot_date)
+        curr_rows = store.load_villages(conn, latest.snapshot_date)
+        prev_rows = store.load_villages(conn, previous) if previous is not None else None
+        resolved, unresolved = resolve_alliance_ids(curr_rows, cfg.alliance_tags, conn)
+        if not resolved:
+            return []
+        data = _build_report_data(cfg, latest.snapshot_date, curr_rows, prev_rows, resolved)
+        return build_report_embed(
+            data,
+            _resolved_tags(cfg.alliance_tags, unresolved),
+            latest.snapshot_date,
+            color=cfg.report_embed_color,
+            sections=sections,
+            region_limit=region_limit,
+        )
+    except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
+        _record_failure("report", exc, conn)
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+async def run_villages() -> list[discord.Embed]:
+    """Full village events for the latest day — the /wioski runner.
+
+    The sync work runs in a worker thread (``_section_embeds`` opens its own
+    connection); the coroutine is returned for the command to await. The
+    command MUST NOT wrap this in ``asyncio.to_thread`` again — an async
+    callable passed to ``to_thread`` produces a discarded coroutine and no
+    embeds.
+    """
+    return await asyncio.to_thread(_section_embeds, {"villages"}, None)
+
+
+async def run_regions() -> list[discord.Embed]:
+    """Full regions table with Δ % — the /regiony runner (see ``run_villages``)."""
+    return await asyncio.to_thread(_section_embeds, {"regions"}, None)
+
+
 def _build_report_data(
     cfg: MergedConfig,
     snapshot_date: str,
@@ -640,10 +700,7 @@ def _build_report_data(
         standings=alliance_standings(prev_rows, curr_rows, cfg.tracked_alliances),
         new_villages=gained,
         lost_villages=lost,
-        top_players=top_players(curr_rows, prev_rows, alliance_ids),
         regions=region_stats(prev_rows, curr_rows, alliance_ids),
-        vp_total=summary.vp,
-        vp_delta=summary.vp_delta,
     )
 
 
@@ -736,11 +793,11 @@ class TravianBot(discord.Client):
         self.cfg: MergedConfig = cfg
         self.tree: app_commands.CommandTree[TravianBot] = app_commands.CommandTree(self)
         self.scheduler: _Scheduler | None = None
-        # /raport registration (T11): the command closes over this module's
-        # run_report and _current_config; config is re-read per invocation, so
-        # dashboard changes apply immediately. on_ready's tree.sync() picks
-        # the command up.
-        register_commands(self.tree, run_report, _current_config)
+        # Command registration (T11 + report trim): /raport closes over
+        # run_report, /wioski + /regiony over the section runners; config is
+        # re-read per invocation, so dashboard changes apply immediately.
+        # on_ready's tree.sync() picks the commands up.
+        register_commands(self.tree, run_report, _current_config, run_villages, run_regions)
 
     async def on_ready(self) -> None:
         global bot_loop

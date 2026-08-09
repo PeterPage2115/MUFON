@@ -2,12 +2,15 @@
 
 Decisions locked by these tests (all wording lives in ``travian.strings``):
 
-- Pinned structure: ONE message with up to 5 embeds — Daily Report (always),
-  Regions (fenced control table, only when regions exist), Standings (fenced
-  table, only when standings exist, our tags first ★ + footnote), New & Lost
-  Villages (only when events exist), Top Players / Victory Points (never
-  omitted). Only the first embed carries the context description; every
-  embed carries the footer.
+- Pinned structure: ONE message with up to 4 embeds — Daily Report (only
+  when "summary" is in ``sections``), Regions (fenced control table, only
+  when "regions" in ``sections`` and regions exist), Standings (fenced
+  table, only when "standings" in ``sections`` and standings exist, our
+  tags first ★ + footnote), New & Lost Villages (only when "villages" in
+  ``sections`` and events exist). The daily subset is ``DAILY_SECTIONS``
+  (summary + regions + standings) with ``region_limit=8``; the on-demand
+  commands request a single section. Only the first embed carries the
+  context description; every embed carries the footer.
 - Sections render inside DESCRIPTIONS (``#`` headings work there, not in
   field values): 4096-char budget; ``_fit_lines`` truncates tables with a
   ``…and N more`` line.
@@ -18,7 +21,10 @@ Decisions locked by these tests (all wording lives in ``travian.strings``):
   NOT controlled — "+1" cell). Inactive regions sit after a divider with
   "—" in To 50%. The Δ % column (our control-share change vs yesterday,
   "—" on baseline days, "±0.0%" below 0.05 pp) sits between Pop and VP Δ;
-  the legend below the fence explains every symbol.
+  the legend below the fence explains every symbol. With ``region_limit``
+  the table keeps only the top *limit* ACTIVE rows and collapses the rest
+  (remaining active + all inactive) behind a ``…and N more`` line; the
+  movers line names the best/worst Δ % moves when deltas exist.
 - Village event lines carry the region; new lines show the founder
   ("by <player>"), lost lines the conqueror ("conquered by <tag>" /
   "deleted") — the metrics layer pre-sorts gained by region and lost by
@@ -26,11 +32,10 @@ Decisions locked by these tests (all wording lives in ``travian.strings``):
 - Table headers are computed with the same cell widths as the data rows:
   every row is exactly as long as the header and every column starts at the
   same index.
-- Baseline day (no previous snapshot): KPI/VP parens dropped, all Δ cells
-  "—", growth and new-villages subsections omitted, " (baseline)" in the
-  description.
-- Caps: 15 village events per section, 5 players per subsection (more-line
-  when exceeded); names truncated (region 12, tag 7, village 24, player 18).
+- Baseline day (no previous snapshot): KPI parens dropped, all Δ cells
+  "—", " (baseline)" in the description.
+- Caps: 15 village events per section (more-line when exceeded); names
+  truncated (region 12, tag 7, village 24).
 - Delta rendering: None → "—", 0 → "±0", >0 → "+N", <0 → "−N" (U+2212).
 """
 
@@ -39,11 +44,15 @@ from typing import Any, Literal
 import discord
 
 from travian import strings
-from travian.bot.report_embed import _fit_lines, build_report_embed
+from travian.bot.report_embed import (
+    DAILY_SECTIONS,
+    REPORT_SECTIONS,
+    _fit_lines,
+    build_report_embed,
+)
 from travian.models import (
     AllianceStat,
     DeltaSummary,
-    PlayerStat,
     RegionStat,
     ReportData,
     VillageEvent,
@@ -71,24 +80,6 @@ def make_event(
         new_owner_player=player,
         old_player=None,
         region=region,
-    )
-
-
-def make_player(
-    player_id: int,
-    name: str,
-    population: int,
-    villages: int,
-    growth: int | None,
-    gains: int | None = None,
-) -> PlayerStat:
-    return PlayerStat(
-        player_id=player_id,
-        player_name=name,
-        population=population,
-        villages=villages,
-        growth=growth,
-        gains=gains,
     )
 
 
@@ -171,10 +162,7 @@ def make_report(**overrides: Any) -> ReportData:
         "summary": make_summary(),
         "new_villages": [],
         "lost_villages": [],
-        "top_players": {"population": [], "growth": [], "new_villages": []},
         "regions": [],
-        "vp_total": 340,
-        "vp_delta": 10,
     }
     defaults.update(overrides)
     return ReportData(**defaults)
@@ -209,16 +197,11 @@ def field_name(field: Any) -> str:
 
 
 def default_report() -> ReportData:
-    """Fully populated report: one of everything → all 5 embeds present."""
+    """Fully populated report: one of everything → all 4 embeds present."""
     return make_report(
         standings=[make_standings("WOLF")],
         new_villages=[make_event(1, "King's Landing", 45, -23)],
         lost_villages=[make_event(2, "Winterfell", 2, -5, event="lost_conquered", tag="ENEMY")],
-        top_players={
-            "population": [make_player(1, "Tyrion Lannister", 1200, 5, 150)],
-            "growth": [make_player(1, "Tyrion Lannister", 1200, 5, 150)],
-            "new_villages": [make_player(1, "Tyrion Lannister", 1200, 5, 150, gains=1)],
-        },
         regions=[make_region("Dacia", 12, 340, 800, 0.425, 5)],
     )
 
@@ -227,13 +210,11 @@ def worst_case_report() -> ReportData:
     """Worst-case fixture: 15+15 capped events, 30 regions with long names."""
     new = [make_event(i, "A" * 90, 12, -34) for i in range(15)]
     lost = [make_event(i, "B" * 90, 12, -34, event="lost_conquered", tag="ENEMY") for i in range(15)]
-    players = [make_player(i, "P" * 63, 1000 + i, 5, 10 + i, gains=1 + i) for i in range(5)]
     regions = [make_region(f"Region{i:02d}" + "R" * 40, 12, 340, 800, 0.425, 5) for i in range(30)]
     standings = [make_standings(f"T{i:02d}", population=100 + i, vp=1) for i in range(30)]
     return make_report(
         new_villages=new,
         lost_villages=lost,
-        top_players={"population": players, "growth": players, "new_villages": players},
         regions=regions,
         standings=standings,
     )
@@ -246,7 +227,7 @@ def table_lines(description: str) -> list[str]:
 
 
 class TestStructure:
-    def test_five_embeds_titles_in_order(self):
+    def test_four_embeds_titles_in_order(self):
         embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
 
         assert [e.title for e in embeds] == [
@@ -254,7 +235,6 @@ class TestStructure:
             strings.EMBED_TITLE_REGIONS,
             strings.EMBED_TITLE_STANDINGS,
             strings.EMBED_TITLE_VILLAGES,
-            strings.EMBED_TITLE_TOP_PLAYERS,
         ]
 
     def test_description_context_on_first_embed_only(self):
@@ -292,7 +272,6 @@ class TestStructure:
         assert embeds[1].colour == discord.Colour(0x1ABC9C)
         assert embeds[2].colour == discord.Colour(0xE67E22)
         assert embeds[3].colour == discord.Colour(0x3498DB)
-        assert embeds[4].colour == discord.Colour(0xF1C40F)
 
     def test_custom_color_applies_to_first_embed_only(self):
         embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", color=0x5865F2)
@@ -307,11 +286,11 @@ class TestStructure:
             assert len(desc(e)) <= 4096
             assert embed_total(e) <= 6000
 
-    def test_players_embed_never_omitted(self):
+    def test_summary_embed_only_when_everything_empty(self):
         embeds = build_report_embed(make_report(), ["WOLF"], "2026-08-08")
 
-        assert len(embeds) == 2
-        assert embeds[-1].title == strings.EMBED_TITLE_VICTORY_POINTS
+        assert len(embeds) == 1
+        assert embeds[0].title == strings.EMBED_TITLE_REPORT
 
 
 class TestSummaryKpi:
@@ -402,7 +381,8 @@ class TestRegionTable:
             f"{strings.REGION_TABLE_DIVIDER}\n"
             "Segestica    ░░░░░░   5.4%     126   ±0.0%      ±0       —\n"
             "```\n\n"
-            f"{strings.REGION_LEGEND}"
+            f"{strings.REGION_LEGEND}\n"
+            f"{strings.REGION_MOVERS_LINE.format(best='+2.1% Eburacum', worst='−0.5% Borders')}"
         )
 
     def test_strict_more_than_half_is_not_controlled(self):
@@ -472,6 +452,147 @@ class TestRegionTable:
         lines = table_lines(description)
         assert any(line.startswith("…and ") for line in lines)
         assert lines[-1].startswith("…and ")
+
+
+class TestSectionsAndRegionLimit:
+    def test_daily_sections_exclude_villages(self):
+        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", sections=DAILY_SECTIONS)
+
+        assert [e.title for e in embeds] == [
+            strings.EMBED_TITLE_REPORT,
+            strings.EMBED_TITLE_REGIONS,
+            strings.EMBED_TITLE_STANDINGS,
+        ]
+
+    def test_villages_only_section(self):
+        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", sections={"villages"})
+
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_VILLAGES]
+        assert desc(embeds[0]).startswith("# New Villages")
+
+    def test_regions_only_section(self):
+        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", sections={"regions"})
+
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_REGIONS]
+
+    def test_summary_only_section(self):
+        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", sections={"summary"})
+
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_REPORT]
+
+    def test_empty_sections_yields_no_embeds(self):
+        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08", sections=frozenset())
+
+        assert embeds == []
+
+    def test_sections_must_be_subset(self):
+        assert DAILY_SECTIONS <= REPORT_SECTIONS
+        assert {"villages"} <= REPORT_SECTIONS
+
+    def test_region_limit_condenses_with_more_line(self):
+        regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(30)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=8)
+
+        lines = table_lines(desc(embeds[1]))
+        assert lines[2].startswith("Region 00")
+        assert lines[9].startswith("Region 07")  # 8th (last) shown row
+        assert lines[10] == strings.REGION_TABLE_DIVIDER
+        assert lines[11] == strings.MORE_LINE.format(n=22)  # 30 regions − 8 shown
+        assert len(lines) == 12  # header + divider + 8 rows + divider + more-line
+        # The more-line sits INSIDE the fence and no full table rows follow.
+        assert not any(line.startswith("Region 0") for line in lines[12:])
+
+    def test_region_limit_zero_shows_only_more_line(self):
+        regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(5)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=0)
+
+        lines = table_lines(desc(embeds[1]))
+        assert lines == [
+            strings.REGION_TABLE_HEADER,
+            strings.REGION_TABLE_DIVIDER,
+            strings.REGION_TABLE_DIVIDER,
+            strings.MORE_LINE.format(n=5),
+        ]
+
+    def test_region_limit_none_keeps_full_table(self):
+        regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(30)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+
+        lines = table_lines(desc(embeds[1]))
+        assert "Region 29" in "\n".join(lines)
+        assert not any(line.startswith("…and ") for line in lines)
+
+    def test_region_limit_counts_only_active_rows(self):
+        # 3 active + 2 inactive; limit 2 → 2 active rows + more-line for 3.
+        regions = [
+            make_region(f"Active {i}", 1, 1000, 5000, 0.2, 1) for i in range(3)
+        ] + [
+            make_region(f"Inactive {i}", 1, 100, 500, 0.2, 1) for i in range(2)
+        ]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=2)
+
+        lines = table_lines(desc(embeds[1]))
+        assert lines[2].startswith("Active 0")
+        assert lines[3].startswith("Active 1")
+        assert lines[4] == strings.REGION_TABLE_DIVIDER
+        assert lines[5] == strings.MORE_LINE.format(n=3)
+        assert "Inactive" not in "\n".join(lines)
+
+    def test_region_limit_hides_inactive_block_behind_more_line(self):
+        # With a limit set, inactive regions are ALWAYS behind the more-line
+        # (the plan's assumption: region_limit counts only top ACTIVE rows).
+        regions = [make_region("A", 1, 1000, 5000, 0.2, 1), make_region("B", 1, 900, 4000, 0.225, 1)]
+        regions += [make_region("C", 1, 100, 500, 0.2, 1), make_region("D", 1, 100, 500, 0.2, 1)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
+
+        lines = table_lines(desc(embeds[1]))
+        assert lines[2].startswith("B")  # share 22.5% > 20% → first
+        assert lines[3].startswith("A")
+        assert lines[4] == strings.REGION_TABLE_DIVIDER
+        assert lines[5] == strings.MORE_LINE.format(n=2)
+        assert not any(line.startswith(("C", "D")) for line in lines)
+
+
+class TestRegionMoversLine:
+    def test_best_and_worst_from_deltas(self):
+        regions = [
+            make_region("Corinium", 1, 1000, 5000, 0.2, 1, share_delta=0.033),
+            make_region("Teutones", 1, 1000, 5000, 0.2, 1, share_delta=-0.053),
+            make_region("Steady", 1, 1000, 5000, 0.2, 1, share_delta=0.0),
+        ]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+
+        assert desc(embeds[1]).endswith(
+            strings.REGION_MOVERS_LINE.format(best="+3.3% Corinium", worst="−5.3% Teutones")
+        )
+
+    def test_single_candidate_renders_one_move(self):
+        regions = [make_region("Only", 1, 1000, 5000, 0.2, 1, share_delta=0.021)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+
+        assert desc(embeds[1]).endswith(strings.REGION_MOVERS_SINGLE.format(move="+2.1% Only"))
+
+    def test_omitted_when_no_deltas(self):
+        regions = [make_region("A", 1, 1000, 5000, 0.2, 1)]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+
+        assert strings.REGION_MOVERS_LINE.split("{")[0] not in desc(embeds[1])
+        assert strings.REGION_MOVERS_SINGLE.split("{")[0] not in desc(embeds[1])
+        assert desc(embeds[1]).endswith(strings.REGION_LEGEND)
+
+    def test_ties_break_by_region_name(self):
+        # Equal deltas: best = lexicographically largest region, worst = smallest.
+        regions = [
+            make_region("Alpha", 1, 1000, 5000, 0.2, 1, share_delta=0.02),
+            make_region("Beta", 1, 1000, 5000, 0.2, 1, share_delta=0.02),
+            make_region("Gamma", 1, 1000, 5000, 0.2, 1, share_delta=-0.01),
+            make_region("Delta", 1, 1000, 5000, 0.2, 1, share_delta=-0.01),
+        ]
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+
+        assert desc(embeds[1]).endswith(
+            strings.REGION_MOVERS_LINE.format(best="+2.0% Beta", worst="−1.0% Delta")
+        )
 
 
 class TestStandingsTable:
@@ -666,118 +787,11 @@ class TestVillageEvents:
         assert strings.EMBED_TITLE_VILLAGES not in [e.title for e in embeds]
 
 
-class TestTopPlayers:
-    def test_ranked_subsections_exact_description(self):
-        embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
-
-        players = embeds[-1]
-        assert players.title == strings.EMBED_TITLE_TOP_PLAYERS
-        assert desc(players) == (
-            "# Top Players\n\n"
-            "### Population\n\n**1.** Tyrion Lannister — 1,200 (5)\n\n"
-            "### Growth\n\n**1.** Tyrion Lannister — +150\n\n"
-            "### New Villages\n\n**1.** Tyrion Lannister — +1 villages\n\n"
-            "# Victory Points\n\nTotal: 340 (+10)"
-        )
-
-    def test_growth_renders_delta(self):
-        players = [
-            make_player(1, "Grower", 1200, 5, 150),
-            make_player(2, "Shrinker", 800, 4, -50),
-            make_player(3, "Steady", 700, 3, 0),
-        ]
-        embeds = build_report_embed(
-            make_report(top_players={"population": [], "growth": players, "new_villages": []}),
-            ["WOLF"],
-            "2026-08-08",
-        )
-
-        description = desc(embeds[-1])
-        assert (
-            "### Growth\n\n**1.** Grower — +150\n**2.** Shrinker — −50\n**3.** Steady — ±0"
-            in description
-        )
-
-    def test_growth_subsection_omitted_when_all_none(self):
-        data = make_report(top_players={"growth": [make_player(1, "P1", 100, 1, None)]})
-        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
-
-        assert "### Growth" not in desc(embeds[-1])
-        assert embeds[-1].title == strings.EMBED_TITLE_VICTORY_POINTS
-
-    def test_new_villages_subsection_omitted_when_all_zero(self):
-        data = make_report(
-            top_players={"new_villages": [make_player(1, "P1", 100, 1, None, gains=0)]}
-        )
-        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
-
-        assert "### New Villages" not in desc(embeds[-1])
-
-    def test_new_villages_gains_none_renders_zero(self):
-        players = [
-            make_player(1, "Founder", 1200, 5, 150),
-            make_player(2, "Builder", 800, 4, 100, gains=3),
-        ]
-        embeds = build_report_embed(
-            make_report(top_players={"population": [], "growth": [], "new_villages": players}),
-            ["WOLF"],
-            "2026-08-08",
-        )
-
-        assert (
-            "### New Villages\n\n**1.** Founder — +0 villages\n**2.** Builder — +3 villages"
-            in desc(embeds[-1])
-        )
-
-    def test_vp_grouped(self):
-        data = make_report(vp_total=48267, vp_delta=4330)
-        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
-
-        assert desc(embeds[-1]).endswith("# Victory Points\n\nTotal: 48,267 (+4,330)")
-
-    def test_vp_no_delta_on_baseline(self):
-        data = make_report(vp_delta=None)
-        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
-
-        assert desc(embeds[-1]).endswith("# Victory Points\n\nTotal: 340")
-
-    def test_cap_5_with_more_line(self):
-        players = [make_player(i, f"Player {i}", 1000 + i, 5, 10) for i in range(7)]
-        embeds = build_report_embed(
-            make_report(top_players={"population": players, "growth": [], "new_villages": []}),
-            ["WOLF"],
-            "2026-08-08",
-        )
-
-        lines = desc(embeds[-1]).split("\n")
-        assert lines[4] == "**1.** Player 0 — 1,000 (5)"
-        assert lines[9] == strings.MORE_LINE.format(n=2)  # more-line ends the subsection
-
-    def test_player_name_truncated_at_18(self):
-        players = [make_player(1, "T" * 25, 1200, 5, 150)]
-        embeds = build_report_embed(
-            make_report(top_players={"population": players, "growth": [], "new_villages": []}),
-            ["WOLF"],
-            "2026-08-08",
-        )
-
-        assert f"**1.** {'T' * 17}… — 1,200 (5)" in desc(embeds[-1])
-
-    def test_title_fallback_when_all_omitted(self):
-        embeds = build_report_embed(make_report(), ["WOLF"], "2026-08-08")
-
-        assert embeds[-1].title == strings.EMBED_TITLE_VICTORY_POINTS
-        assert desc(embeds[-1]) == "# Victory Points\n\nTotal: 340 (+10)"
-
-
 class TestOmission:
-    def test_minimal_report_two_embeds(self):
+    def test_minimal_report_one_embed(self):
         embeds = build_report_embed(make_report(), ["WOLF"], "2026-08-08")
 
-        assert [e.title for e in embeds] == [
-            strings.EMBED_TITLE_REPORT,
-            strings.EMBED_TITLE_VICTORY_POINTS,
-        ]
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_REPORT]
 
     def test_no_regions(self):
         data = default_report()
@@ -785,12 +799,11 @@ class TestOmission:
             standings=data.standings,
             new_villages=data.new_villages,
             lost_villages=data.lost_villages,
-            top_players=data.top_players,
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         assert strings.EMBED_TITLE_REGIONS not in [e.title for e in embeds]
-        assert len(embeds) == 4
+        assert len(embeds) == 3
 
     def test_no_standings(self):
         data = default_report()
@@ -798,34 +811,27 @@ class TestOmission:
             regions=data.regions,
             new_villages=data.new_villages,
             lost_villages=data.lost_villages,
-            top_players=data.top_players,
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         assert strings.EMBED_TITLE_STANDINGS not in [e.title for e in embeds]
-        assert len(embeds) == 4
+        assert len(embeds) == 3
 
     def test_no_events(self):
         data = default_report()
-        data = make_report(standings=data.standings, regions=data.regions, top_players=data.top_players)
+        data = make_report(standings=data.standings, regions=data.regions)
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         assert strings.EMBED_TITLE_VILLAGES not in [e.title for e in embeds]
-        assert len(embeds) == 4
+        assert len(embeds) == 3
 
     def test_baseline_day(self):
         data = make_report(
             summary=make_summary(
                 villages_delta=None, population_delta=None, players_delta=None, vp_delta=None
             ),
-            vp_delta=None,
             regions=[make_region("A", 1, 1000, 5000, 0.2, None)],
             standings=[make_standings("WOLF", population_delta=None, vp_delta=None)],
-            top_players={
-                "population": [make_player(1, "P1", 100, 1, None)],
-                "growth": [make_player(1, "P1", 100, 1, None)],
-                "new_villages": [make_player(1, "P1", 100, 1, None, gains=0)],
-            },
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
@@ -833,12 +839,7 @@ class TestOmission:
             strings.EMBED_TITLE_REPORT,
             strings.EMBED_TITLE_REGIONS,
             strings.EMBED_TITLE_STANDINGS,
-            strings.EMBED_TITLE_TOP_PLAYERS,
         ]
-        players = embeds[-1]
-        assert "### Growth" not in desc(players)
-        assert "### New Villages" not in desc(players)
-        assert desc(players).endswith("Total: 340")
 
 
 class TestBaseline:
@@ -847,12 +848,6 @@ class TestBaseline:
             summary=make_summary(
                 villages_delta=None, population_delta=None, players_delta=None, vp_delta=None
             ),
-            vp_delta=None,
-            top_players={
-                "population": [make_player(1, "P1", 100, 1, None)],
-                "growth": [make_player(1, "P1", 100, 1, None)],
-                "new_villages": [make_player(1, "P1", 100, 1, None, gains=0)],
-            },
             regions=[make_region("A", 1, 4000, 8000, 0.5, None)],
             standings=[make_standings("WOLF", population_delta=None, vp_delta=None)],
         )
@@ -874,7 +869,7 @@ class TestLimits:
     def test_worst_case_every_embed_within_limits(self):
         embeds = build_report_embed(worst_case_report(), ["WOLF"], "2026-08-08")
 
-        assert len(embeds) == 5
+        assert len(embeds) == 4
         assert len(embeds[0].fields) <= 6
         for e in embeds:
             assert len(desc(e)) <= 4096

@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict, cast
 
-from travian.models import VillageRow
+from travian.models import AllianceDay, RegionDay, SummaryDay, VillageRow
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -315,6 +315,166 @@ def recent_logs(conn: sqlite3.Connection, n: int = 50) -> list[dict[str, str]]:
         ).fetchall(),
     )
     return [dict(row) for row in rows]
+
+
+# --- analysis aggregators (dashboard) -------------------------------------------
+#
+# One GROUP BY query per series — no row explosion: the dashboard's
+# /api/analysis/* endpoints hand these day lists to the pure functions in
+# travian.analysis. ``from_date``/``to_date`` are inclusive on
+# ``snapshot_date``; empty ``alliance_ids`` returns [] (SQL ``IN ()`` is
+# invalid).
+
+
+def alliance_ids_by_tag(conn: sqlite3.Connection, date: str) -> dict[str, list[int]]:
+    """``tag → [alliance_id]`` for ``date`` (``alliance_id != 0``).
+
+    One tag may union several alliance ids (the metrics resolution
+    semantics); the id lists are sorted ascending for determinism.
+    """
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            """
+            SELECT DISTINCT alliance_tag, alliance_id FROM villages
+            WHERE snapshot_date = ? AND alliance_id != 0
+            ORDER BY alliance_tag, alliance_id
+            """,
+            (date,),
+        ).fetchall(),
+    )
+    by_tag: dict[str, list[int]] = {}
+    for row in rows:
+        tag = cast(str, row["alliance_tag"])
+        by_tag.setdefault(tag, []).append(cast(int, row["alliance_id"]))
+    return by_tag
+
+
+def region_days(
+    conn: sqlite3.Connection,
+    from_date: str,
+    to_date: str,
+    alliance_ids: set[int],
+) -> list[RegionDay]:
+    """Per-day per-region aggregates over the inclusive date range.
+
+    ``our_pop`` sums the population of the given alliance ids, ``total_pop``
+    of ALL villages in the region that day; ``region`` NULL groups as ``""``
+    (COALESCE — same semantics as the region metrics). Ordered by date ASC,
+    region ASC.
+    """
+    if not alliance_ids:
+        return []
+    placeholders = ",".join("?" * len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            f"""
+            SELECT snapshot_date, COALESCE(region, '') AS region,
+                   SUM(population) AS total_pop,
+                   SUM(CASE WHEN alliance_id IN ({placeholders})
+                            THEN population ELSE 0 END) AS our_pop
+            FROM villages
+            WHERE snapshot_date BETWEEN ? AND ?
+            GROUP BY snapshot_date, COALESCE(region, '')
+            ORDER BY snapshot_date ASC, region ASC
+            """,
+            (*alliance_ids, from_date, to_date),
+        ).fetchall(),
+    )
+    return [
+        RegionDay(
+            date=cast(str, row["snapshot_date"]),
+            region=cast(str, row["region"]),
+            our_pop=cast(int, row["our_pop"]),
+            total_pop=cast(int, row["total_pop"]),
+        )
+        for row in rows
+    ]
+
+
+def alliance_days(
+    conn: sqlite3.Connection,
+    from_date: str,
+    to_date: str,
+    alliance_ids: set[int],
+) -> list[AllianceDay]:
+    """Per-day per-alliance aggregates over the inclusive date range.
+
+    ``alliance_tag`` = ``MAX(alliance_tag)`` (lexicographically greatest —
+    map.sql is tag-consistent per alliance_id within a snapshot, so this is
+    the tag); ``villages`` = COUNT(*), ``vp`` = SUM(victory_points). Ordered
+    by date ASC, alliance_id ASC.
+    """
+    if not alliance_ids:
+        return []
+    placeholders = ",".join("?" * len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            f"""
+            SELECT snapshot_date, alliance_id, MAX(alliance_tag) AS alliance_tag,
+                   COUNT(*) AS villages, SUM(population) AS population,
+                   SUM(victory_points) AS vp
+            FROM villages
+            WHERE snapshot_date BETWEEN ? AND ? AND alliance_id IN ({placeholders})
+            GROUP BY snapshot_date, alliance_id
+            ORDER BY snapshot_date ASC, alliance_id ASC
+            """,
+            (from_date, to_date, *alliance_ids),
+        ).fetchall(),
+    )
+    return [
+        AllianceDay(
+            date=cast(str, row["snapshot_date"]),
+            alliance_id=cast(int, row["alliance_id"]),
+            alliance_tag=cast(str, row["alliance_tag"]),
+            villages=cast(int, row["villages"]),
+            population=cast(int, row["population"]),
+            vp=cast(int, row["vp"]),
+        )
+        for row in rows
+    ]
+
+
+def summary_days(
+    conn: sqlite3.Connection,
+    from_date: str,
+    to_date: str,
+    alliance_ids: set[int],
+) -> list[SummaryDay]:
+    """Per-day headline aggregates for ``alliance_ids`` over the date range.
+
+    ``villages`` = COUNT(*), ``players`` = COUNT(DISTINCT player_id),
+    ``vp`` = SUM(victory_points). Ordered by date ASC.
+    """
+    if not alliance_ids:
+        return []
+    placeholders = ",".join("?" * len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            f"""
+            SELECT snapshot_date, COUNT(*) AS villages, SUM(population) AS population,
+                   COUNT(DISTINCT player_id) AS players, SUM(victory_points) AS vp
+            FROM villages
+            WHERE snapshot_date BETWEEN ? AND ? AND alliance_id IN ({placeholders})
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date ASC
+            """,
+            (from_date, to_date, *alliance_ids),
+        ).fetchall(),
+    )
+    return [
+        SummaryDay(
+            date=cast(str, row["snapshot_date"]),
+            villages=cast(int, row["villages"]),
+            population=cast(int, row["population"]),
+            players=cast(int, row["players"]),
+            vp=cast(int, row["vp"]),
+        )
+        for row in rows
+    ]
 
 
 def _load_json(text: str) -> JsonValue:

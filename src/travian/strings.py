@@ -27,13 +27,11 @@ DESCRIPTION_BASELINE = " (baseline)"
 FOOTER_TEMPLATE = "map.sql snapshot {date} (midnight server time)"
 FOOTER_NO_DATE = "map.sql snapshot (midnight server time)"
 
-# --- Embed titles (one message, up to 5 embeds) --------------------------------
+# --- Embed titles (one message, up to 4 embeds) --------------------------------
 EMBED_TITLE_REPORT = "📊 Daily Report"
 EMBED_TITLE_REGIONS = "🗺️ Regions"
 EMBED_TITLE_STANDINGS = "⚔️ Standings"
 EMBED_TITLE_VILLAGES = "🏗️ New & Lost Villages"
-EMBED_TITLE_TOP_PLAYERS = "🏆 Top Players"
-EMBED_TITLE_VICTORY_POINTS = "🏆 Victory Points"  # fallback when all top lists are omitted
 
 # --- Section headings (render only in descriptions) ----------------------------
 HEADING_SUMMARY = "# Summary"
@@ -41,11 +39,6 @@ HEADING_REGIONS = "# Regions"
 HEADING_STANDINGS = "# Standings"
 HEADING_NEW_VILLAGES = "# New Villages"
 HEADING_LOST_VILLAGES = "# Lost Villages"
-HEADING_TOP_PLAYERS = "# Top Players"
-HEADING_VICTORY_POINTS = "# Victory Points"
-HEADING_TOP_POPULATION = "### Population"
-HEADING_TOP_GROWTH = "### Growth"
-HEADING_TOP_NEW_VILLAGES = "### New Villages"
 
 # --- Summary KPI grid (inline fields, 3 per row) --------------------------------
 KPI_VILLAGES = "Villages"
@@ -89,11 +82,8 @@ REGION_CONTROLLED = "✓"
 REGION_INACTIVE_CELL = "—"  # To-50% cell for inactive regions (same glyph as DELTA_NONE, different column)
 REGION_TO50_NEEDED = "+{n:,}"
 REGION_LEGEND = "_✓ = we control (active region, >50% of its population) · +N = population still needed for control · — = inactive (total population below 4,000) · Δ % = our control change vs yesterday_"
-
-# --- Top players + Victory points ------------------------------------------------
-TOP_PLAYER_RANK_LINE = "**{rank}.** {player} — {value}"
-VICTORY_POINTS_LINE = "Total: {value:,} ({delta})"
-VICTORY_POINTS_NO_DELTA = "Total: {value:,}"  # parens dropped entirely when delta is None
+REGION_MOVERS_LINE = "_Biggest moves: {best} · {worst}_"
+REGION_MOVERS_SINGLE = "_Biggest move: {move}_"
 
 # --- Delta rendering ---------------------------------------------------------------
 DELTA_NONE = "—"
@@ -110,3 +100,10 @@ COMMAND_RAPORT_DESCRIPTION = "Send the daily report now (admin only)"
 RAPORT_NO_PERMISSION = "No permission: /raport is restricted to admins."
 RAPORT_SENT = "Report sent"
 RAPORT_ERROR = "Something went wrong while sending the report."
+
+# --- /wioski + /regiony commands (report trim) --------------------------------------
+COMMAND_WIOSKI_DESCRIPTION = "Village events (new/lost) for the latest day (admin only)"
+COMMAND_REGIONS_DESCRIPTION = "Full regions table with Δ % (admin only)"
+COMMAND_NO_PERMISSION = "No permission: this command is restricted to admins."
+WIOSKI_NO_EVENTS = "No village events in the latest snapshot pair."
+REGIONS_NO_DATA = "No region data yet."

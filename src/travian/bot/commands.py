@@ -1,15 +1,17 @@
-"""The /raport slash command (task 11): admin-only manual report trigger.
+"""The /raport, /wioski and /regiony slash commands (admin-only triggers).
 
 Design decisions (documented for the plan):
 
-- **Registration-based injection (circular-import resolution)**: the command
-  receives ``run_report`` and the config getter as parameters of
-  ``register_commands(tree, run_report, get_config)`` — main.py wires the
-  real functions, tests inject fakes. The module graph is single-direction
-  (main → commands): the getter's return is typed against the minimal
-  ``AdminConfig`` protocol (satisfied structurally by ``MergedConfig``), so
-  commands.py never imports main.py and no cycle exists in either direction
-  — confirmed by basedpyright's ``reportImportCycles``.
+- **Registration-based injection (circular-import resolution)**: the commands
+  receive ``run_report``, the two section runners (``run_villages`` /
+  ``run_regions``) and the config getter as parameters of
+  ``register_commands(tree, run_report, get_config, run_villages,
+  run_regions)`` — main.py wires the real functions, tests inject fakes. The
+  module graph is single-direction (main → commands): the getter's return is
+  typed against the minimal ``AdminConfig`` protocol (satisfied structurally
+  by ``MergedConfig``), so commands.py never imports main.py and no cycle
+  exists in either direction — confirmed by basedpyright's
+  ``reportImportCycles``.
 - **Admin check** (``is_admin``): ``manage_guild`` guild permission OR
   membership in the configured admin role. ``interaction.guild is None``
   (DM) short-circuits to False — a DM user has no guild permissions and no
@@ -20,10 +22,12 @@ Design decisions (documented for the plan):
   not block the bot loop), so dashboard changes apply immediately.
   A config-read failure escapes to discord.py's command error handling
   (genuine bug — not guarded).
-- **Ephemeral acknowledgements**: the denial and the "Report sent"/error
-  responses are ephemeral — the report embed in the channel is the visible
-  artifact; the command's own chatter never pollutes the channel.
-- **Strings**: the command name/description are Discord API surface rather
+- **Ephemeral acknowledgements**: denials and results are ephemeral — the
+  report embed in the channel is the visible artifact; the commands' own
+  chatter never pollutes the channel. ``/wioski``/``/regiony`` deliver their
+  embeds (or the no-content string) via ``interaction.followup.send``,
+  ephemeral, because the detail belongs to the requester, not the channel.
+- **Strings**: the command names/descriptions are Discord API surface rather
   than embed text, but all user-facing strings live in ``strings.py``
   (repo convention, task 8) — see the constants used here.
 """
@@ -39,10 +43,15 @@ import discord
 from discord import app_commands
 
 from travian.strings import (
+    COMMAND_NO_PERMISSION,
     COMMAND_RAPORT_DESCRIPTION,
+    COMMAND_REGIONS_DESCRIPTION,
+    COMMAND_WIOSKI_DESCRIPTION,
     RAPORT_ERROR,
     RAPORT_NO_PERMISSION,
     RAPORT_SENT,
+    REGIONS_NO_DATA,
+    WIOSKI_NO_EVENTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +66,16 @@ class ReportRunner(Protocol):
     """
 
     async def __call__(self, channel_id: int, require_today: bool = True) -> str: ...
+
+
+class SectionRunner(Protocol):
+    """The ``run_villages``/``run_regions`` surface (injected by main.py).
+
+    Async runners that return the section's embeds, ``[]`` when there is
+    nothing to show (no snapshot / no alliance / empty section).
+    """
+
+    async def __call__(self) -> list[discord.Embed]: ...
 
 
 class AdminConfig(Protocol):
@@ -76,7 +95,7 @@ ConfigGetter = Callable[[], AdminConfig]
 
 
 def is_admin(interaction: discord.Interaction, admin_role_id: int | None) -> bool:
-    """True when the interaction's user may run /raport.
+    """True when the interaction's user may run the admin commands.
 
     Admin = ``manage_guild`` guild permission OR membership in the configured
     admin role. Non-guild contexts (DMs): no guild permissions and no roles →
@@ -94,17 +113,32 @@ def is_admin(interaction: discord.Interaction, admin_role_id: int | None) -> boo
     return False
 
 
+async def _admin_defer_or_deny(
+    interaction: discord.Interaction,
+    get_config: ConfigGetter,
+    denial: str,
+) -> bool:
+    """Shared admin-check + defer prologue of every command.
+
+    Returns True when the interaction is allowed (``defer`` was called);
+    False when the ephemeral ``denial`` message was sent instead.
+    """
+    cfg = await asyncio.to_thread(get_config)
+    if not is_admin(interaction, cfg.admin_role_id):
+        _ = await interaction.response.send_message(denial, ephemeral=True)
+        return False
+    _ = await interaction.response.defer()
+    return True
+
+
 async def _raport(
     interaction: discord.Interaction,
     run_report: ReportRunner,
     get_config: ConfigGetter,
 ) -> None:
     """The /raport flow: admin check → defer → run_report → ephemeral ack."""
-    cfg = await asyncio.to_thread(get_config)
-    if not is_admin(interaction, cfg.admin_role_id):
-        _ = await interaction.response.send_message(RAPORT_NO_PERMISSION, ephemeral=True)
+    if not await _admin_defer_or_deny(interaction, get_config, RAPORT_NO_PERMISSION):
         return
-    _ = await interaction.response.defer()
     channel = interaction.channel
     if channel is None:
         # Unreachable for guild commands (the admin check already excludes
@@ -122,20 +156,60 @@ async def _raport(
     _ = await interaction.followup.send(RAPORT_SENT, ephemeral=True)
 
 
+async def _section_command(
+    interaction: discord.Interaction,
+    run_section: SectionRunner,
+    get_config: ConfigGetter,
+    no_content: str,
+) -> None:
+    """Shared flow of /wioski and /regiony: admin check → defer → runner →
+    ephemeral embeds, or the command's no-content string when empty."""
+    if not await _admin_defer_or_deny(interaction, get_config, COMMAND_NO_PERMISSION):
+        return
+    embeds = await run_section()
+    if embeds:
+        _ = await interaction.followup.send(embeds=embeds, ephemeral=True)
+    else:
+        _ = await interaction.followup.send(no_content, ephemeral=True)
+
+
 def register_commands[ClientT: discord.Client](
     tree: app_commands.CommandTree[ClientT],
     run_report: ReportRunner,
     get_config: ConfigGetter,
+    run_villages: SectionRunner,
+    run_regions: SectionRunner,
 ) -> None:
-    """Add the /raport command to ``tree`` (callback closes over the injected fns)."""
+    """Add the /raport, /wioski and /regiony commands to ``tree`` (each
+    callback closes over the injected fns)."""
 
-    async def callback(interaction: discord.Interaction) -> None:
+    async def raport_callback(interaction: discord.Interaction) -> None:
         await _raport(interaction, run_report, get_config)
+
+    async def wioski_callback(interaction: discord.Interaction) -> None:
+        await _section_command(interaction, run_villages, get_config, WIOSKI_NO_EVENTS)
+
+    async def regiony_callback(interaction: discord.Interaction) -> None:
+        await _section_command(interaction, run_regions, get_config, REGIONS_NO_DATA)
 
     tree.add_command(
         app_commands.Command(
             name="raport",
             description=COMMAND_RAPORT_DESCRIPTION,
-            callback=callback,
+            callback=raport_callback,
+        )
+    )
+    tree.add_command(
+        app_commands.Command(
+            name="wioski",
+            description=COMMAND_WIOSKI_DESCRIPTION,
+            callback=wioski_callback,
+        )
+    )
+    tree.add_command(
+        app_commands.Command(
+            name="regiony",
+            description=COMMAND_REGIONS_DESCRIPTION,
+            callback=regiony_callback,
         )
     )

@@ -31,6 +31,18 @@ Endpoints:
   ``wait_for`` uses ``asyncio.shield`` so a timeout (504) never cancels the
   running job — the lock keeps a concurrent action skipping.
 - ``GET /api/logs?n=50`` — newest-first ``job_log`` rows (n clamped 1..500).
+- ``GET /api/analysis/regions?days=30`` — region share series over the
+  window plus the latest-pair control table (``current`` rows carry the
+  server-computed ``active``/``controlled``/``to50_needed`` fields).
+- ``GET /api/analysis/standings?days=30`` — population/VP series per
+  TRACKED_ALLIANCES alliance (rows carry ``ours`` for the UI highlight).
+- ``GET /api/analysis/dates`` — all snapshot dates ascending (Events tab
+  selectors).
+- ``GET /api/analysis/events?from=&to=`` — gained/lost village events
+  between two dates (missing sides default to the latest pair; ``from >= to``
+  or an unknown date → 422 listing the valid dates).
+- ``GET /api/analysis/deltas?days=30`` — headline history with day-over-day
+  deltas (``None`` on the oldest date).
 
 Auth middleware: active ONLY when ``DASHBOARD_BIND`` is not a loopback
 address AND ``DASHBOARD_LOOPBACK_ONLY != "true"`` (compose sets it to "true"
@@ -66,7 +78,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from travian import store
+from travian import analysis, store
+from travian.metrics import region_stats, village_events
+from travian.models import RegionDay, VillageEvent
 
 #: Static UI directory — populated by task 13 (index.html/style.css/app.js).
 STATIC_DIR: Final = Path(__file__).resolve().parent / "static"
@@ -258,6 +272,32 @@ def _recent_errors(conn: sqlite3.Connection, n: int = 5) -> list[dict[str, str]]
     (a bare ``recent_logs(conn, n)`` filter would return fewer).
     """
     return [entry for entry in store.recent_logs(conn, 50) if entry["level"] == "error"][:n]
+
+
+def _resolve_ids(conn: sqlite3.Connection, date: str, tags: list[str]) -> set[int]:
+    """Resolve ``tags`` to alliance ids against ``date`` (unresolved tags skipped).
+
+    Shares the metrics resolution semantics (tag → union of matching ids),
+    backed by ``store.alliance_ids_by_tag``.
+    """
+    by_tag = store.alliance_ids_by_tag(conn, date)
+    ids: set[int] = set()
+    for tag in tags:
+        ids.update(by_tag.get(tag, []))
+    return ids
+
+
+def _event_dict(event: VillageEvent) -> dict[str, object]:
+    """One village event in the events-browser payload shape."""
+    return {
+        "village_name": event.village_name,
+        "x": event.x,
+        "y": event.y,
+        "region": event.region,
+        "event": event.event,
+        "owner_tag": event.new_owner_tag,
+        "owner_player": event.new_owner_player,
+    }
 
 
 def _settings_payload(cfg: ConfigProtocol) -> SettingsPayload:
@@ -511,6 +551,146 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
+    # --- analysis endpoints (report trim) --------------------------------------
+    #
+    # All of them: asyncio.to_thread + own store.connect per op (existing
+    # pattern), config tags resolved against the LATEST snapshot date
+    # (fallback: latest snapshot date; no snapshot → empty payloads). ``days``
+    # is at least 2 because deltas and charts need a pair of dates.
+
+    async def analysis_regions(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return {"dates": [], "series": {}, "current": []}
+                dates = store.list_dates(conn)[-days:]
+                ids = _resolve_ids(conn, latest.snapshot_date, cfg.alliance_tags)
+                day_rows = store.region_days(conn, dates[0], dates[-1], ids)
+                by_region: dict[str, list[RegionDay]] = {}
+                for day in day_rows:
+                    by_region.setdefault(day.region, []).append(day)
+                share_series = analysis.region_share_series(day_rows)
+                series: dict[str, list[dict[str, object]]] = {}
+                for region in sorted(share_series):
+                    days_list = by_region[region]
+                    # Regions with no our-population over the window are
+                    # dropped (flat 0.0% enemy-only lines); regions we left
+                    # keep their declining line.
+                    if not any(d.our_pop > 0 for d in days_list):
+                        continue
+                    series[region] = [
+                        {"date": d.date, "share": share, "our_pop": d.our_pop, "total_pop": d.total_pop}
+                        for (_, share), d in zip(share_series[region], days_list, strict=True)
+                    ]
+                # current = the latest-pair table (identical numbers to the
+                # report's Regions embed) plus the server-computed control
+                # fields — the UI formats, never re-implements the rules.
+                prev_date = dates[-2] if len(dates) >= 2 else None
+                curr_rows = store.load_villages(conn, latest.snapshot_date)
+                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
+                stats = region_stats(prev_rows, curr_rows, ids)
+                current: list[dict[str, object]] = []
+                for stat in stats:
+                    row = stat.model_dump()
+                    row["active"] = analysis.region_active(stat)
+                    row["controlled"] = analysis.region_controlled(stat)
+                    row["to50_needed"] = analysis.to50_needed(stat)
+                    current.append(row)
+                return {"dates": dates, "series": series, "current": current}
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_standings(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return {"dates": [], "series": []}
+                dates = store.list_dates(conn)[-days:]
+                ids = _resolve_ids(conn, latest.snapshot_date, cfg.tracked_alliances)
+                if not ids:
+                    return {"dates": dates, "series": []}
+                day_rows = store.alliance_days(conn, dates[0], dates[-1], ids)
+                series = analysis.standings_series(day_rows, set(cfg.alliance_tags))
+                return {"dates": dates, "series": series}
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_dates() -> dict[str, object]:
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                return {"dates": store.list_dates(conn)}
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_events(
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
+    ) -> dict[str, object]:
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                if not all_dates:
+                    return {"gained": [], "lost": []}
+                latest = all_dates[-1]
+                from_date = from_ if from_ is not None else (all_dates[-2] if len(all_dates) >= 2 else latest)
+                to_date = to if to is not None else latest
+                if from_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'from' date {from_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if to_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'to' date {to_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if from_date >= to_date:
+                    raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
+                ids = _resolve_ids(conn, latest, cfg.alliance_tags)
+                prev_rows = store.load_villages(conn, from_date)
+                curr_rows = store.load_villages(conn, to_date)
+                gained, lost = village_events(prev_rows, curr_rows, ids)
+                return {
+                    "gained": [_event_dict(e) for e in gained],
+                    "lost": [_event_dict(e) for e in lost],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_deltas(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return {"dates": [], "rows": []}
+                dates = store.list_dates(conn)[-days:]
+                ids = _resolve_ids(conn, latest.snapshot_date, cfg.alliance_tags)
+                day_rows = store.summary_days(conn, dates[0], dates[-1], ids)
+                return {"dates": dates, "rows": analysis.summary_history(day_rows)}
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
     if STATIC_DIR.is_dir():
@@ -521,4 +701,9 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.post("/api/actions/fetch")(fetch_now)
     _ = app.post("/api/actions/report")(report_now)
     _ = app.get("/api/logs")(logs)
+    _ = app.get("/api/analysis/regions")(analysis_regions)
+    _ = app.get("/api/analysis/standings")(analysis_standings)
+    _ = app.get("/api/analysis/dates")(analysis_dates)
+    _ = app.get("/api/analysis/events")(analysis_events)
+    _ = app.get("/api/analysis/deltas")(analysis_deltas)
     return app

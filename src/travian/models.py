@@ -126,6 +126,50 @@ class RegionStat(BaseModel):
     share_delta: float | None = None
 
 
+class RegionDay(BaseModel):
+    """One region's per-day aggregate for the analysis dashboard.
+
+    ``our_pop`` is the population of our alliance(s) in the region that day;
+    ``total_pop`` is the population of ALL villages in the region. Produced
+    by ``store.region_days`` (GROUP BY snapshot_date, region).
+    """
+
+    date: str
+    region: str
+    our_pop: int
+    total_pop: int
+
+
+class AllianceDay(BaseModel):
+    """One alliance's per-day aggregate for the analysis dashboard.
+
+    ``alliance_tag`` is the lexicographically greatest tag of that
+    alliance_id that day (map.sql is tag-consistent per alliance_id within a
+    snapshot, so this is the tag). Produced by ``store.alliance_days``.
+    """
+
+    date: str
+    alliance_id: int
+    alliance_tag: str
+    villages: int
+    population: int
+    vp: int
+
+
+class SummaryDay(BaseModel):
+    """One day's headline aggregates for our alliance(s) (analysis dashboard).
+
+    Produced by ``store.summary_days``; ``analysis.summary_history`` derives
+    the day-over-day deltas from a run of these.
+    """
+
+    date: str
+    villages: int
+    population: int
+    players: int
+    vp: int
+
+
 class AllianceStat(BaseModel):
     """One tracked alliance's row in the report's Standings comparison.
 
@@ -147,12 +191,11 @@ class AllianceStat(BaseModel):
 
 
 class ReportData(BaseModel):
-    """Everything the daily report embed needs — one block per embed field.
+    """Everything the report embeds need — one block per embed field.
 
     ``new_villages``/``lost_villages`` are split lists so the embed builder
-    (task 8) renders the two "New Villages"/"Lost Villages" fields without
-    filtering. ``top_players`` keys are exactly ``population`` | ``growth`` |
-    ``new_villages`` (three separate embed fields, each capped at 5).
+    renders the two "New Villages"/"Lost Villages" sections without
+    filtering. ``regions`` feeds both the Regions embed and the KPI grid.
     """
 
     snapshot_date: str | None
@@ -162,7 +205,4 @@ class ReportData(BaseModel):
     standings: list[AllianceStat] = []
     new_villages: list[VillageEvent]
     lost_villages: list[VillageEvent]
-    top_players: dict[str, list[PlayerStat]]
     regions: list[RegionStat]
-    vp_total: int
-    vp_delta: int | None

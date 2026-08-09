@@ -689,6 +689,777 @@
     });
   }
 
+  /* --- analysis (report trim) ---------------------------------------------- */
+
+  var ANALYSIS_DAYS = 30;
+  var SERIES_COLORS = ["#1abc9c", "#e67e22", "#3498db", "#f1c40f"];
+  var analysisState = {
+    charts: {},
+    metric: "population",
+    region: null,
+    from: null,
+    to: null,
+    regionsDates: [],
+    regionsSeries: {},
+    standingsPayload: null,
+  };
+  var activatedTabs = {};
+  var analysisEls = null;
+
+  function cssVar(name, fallback) {
+    var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function fmtInt(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function analysisElements() {
+    if (!analysisEls) {
+      analysisEls = {
+        range: document.querySelector("[data-analysis-range]"),
+        tabs: Array.prototype.slice.call(document.querySelectorAll(".tab-bar__tab")),
+        panels: Array.prototype.slice.call(document.querySelectorAll(".analysis-panel")),
+        regionsBody: document.querySelector("[data-regions-body]"),
+        regionSelect: document.getElementById("analysis-region-select"),
+        regionCanvas: document.getElementById("analysis-chart-regions"),
+        standingsCanvas: document.getElementById("analysis-chart-standings"),
+        metricButtons: Array.prototype.slice.call(document.querySelectorAll(".segmented__btn")),
+        eventsFrom: document.getElementById("analysis-events-from"),
+        eventsTo: document.getElementById("analysis-events-to"),
+        eventsError: document.querySelector(".analysis-controls__error"),
+        eventsGrid: document.querySelector(".events-grid"),
+        eventsEmpty: document.querySelector("[data-events-empty]"),
+        gainedList: document.querySelector("[data-events-gained]"),
+        lostList: document.querySelector("[data-events-lost]"),
+        gainedCount: document.querySelector("[data-events-gained-count]"),
+        lostCount: document.querySelector("[data-events-lost-count]"),
+        changesBody: document.querySelector("[data-changes-body]"),
+      };
+    }
+    return analysisEls;
+  }
+
+  function setPanelBusy(name, busy) {
+    var panel = document.getElementById("panel-" + name);
+    if (panel) panel.setAttribute("aria-busy", String(busy));
+  }
+
+  function showPanelEmpty(panel, message, alert) {
+    var state = panel.querySelector(".empty-state");
+    if (!state) {
+      state = document.createElement("p");
+      state.className = "empty-state";
+      panel.appendChild(state);
+    }
+    state.textContent = message;
+    if (alert) state.setAttribute("role", "alert");
+    panel.classList.add("is-empty");
+  }
+
+  function hidePanelEmpty(panel) {
+    panel.classList.remove("is-empty");
+  }
+
+  function showChartUnavailable(card) {
+    var state = card.querySelector(".empty-state");
+    if (!state) {
+      state = document.createElement("p");
+      state.className = "empty-state";
+      card.appendChild(state);
+    }
+    state.textContent = "Chart library unavailable.";
+    card.classList.add("is-empty");
+  }
+
+  function applyChartDefaults() {
+    if (!window.Chart) return;
+    var bodyFont = getComputedStyle(document.body).fontFamily || "system-ui";
+    Chart.defaults.font.family = bodyFont;
+    Chart.defaults.color = "#96988c"; // --text-muted
+  }
+
+  var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function baseChartOpts() {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      animation: reducedMotion ? false : { duration: 300 },
+      scales: {
+        x: {
+          ticks: { color: "#96988c", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+          grid: { display: false },
+          border: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: "rgba(42,51,40,0.55)" },
+          border: { display: false },
+          ticks: { color: "#96988c", maxTicksLimit: 6 },
+        },
+      },
+      plugins: {
+        legend: {
+          labels: {
+            color: "#c5c2b5",
+            boxWidth: 10,
+            boxHeight: 10,
+            usePointStyle: true,
+            pointStyle: "line",
+            padding: 16,
+            font: { size: 11, weight: "600" },
+          },
+        },
+        tooltip: {
+          backgroundColor: "#151b15",
+          borderColor: "#2a3328",
+          borderWidth: 1,
+          titleColor: "#f1eee1",
+          bodyColor: "#c5c2b5",
+          displayColors: false,
+          padding: 10,
+        },
+      },
+    };
+  }
+
+  api.analysis = function (kind, params) {
+    var qs = "";
+    if (params) {
+      var parts = Object.keys(params).map(function (key) {
+        return encodeURIComponent(key) + "=" + encodeURIComponent(params[key]);
+      });
+      if (parts.length) qs = "?" + parts.join("&");
+    }
+    return request("GET", "/api/analysis/" + kind + qs);
+  };
+
+  function tableLoading(tbody, colspan) {
+    tbody.textContent = "";
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = colspan;
+    td.className = "table-loading";
+    td.textContent = "Loading…";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  /* Regions tab */
+
+  function loadRegions() {
+    var panel = document.getElementById("panel-regions");
+    var els = analysisElements();
+    setPanelBusy("regions", true);
+    tableLoading(els.regionsBody, 6);
+    return api
+      .analysis("regions", { days: ANALYSIS_DAYS })
+      .then(function (payload) {
+        renderRegions(payload);
+        setPanelBusy("regions", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("regions", false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.regions = false; // next activation retries
+      });
+  }
+
+  function renderRegions(payload) {
+    var panel = document.getElementById("panel-regions");
+    var els = analysisElements();
+    var current = payload.current || [];
+    var dates = payload.dates || [];
+    var series = payload.series || {};
+
+    if (!current.length || !dates.length) {
+      showPanelEmpty(panel, "No data yet.");
+      els.range.hidden = true;
+      return;
+    }
+    hidePanelEmpty(panel);
+    els.range.hidden = false;
+
+    els.regionsBody.textContent = "";
+    current.forEach(function (row) {
+      els.regionsBody.appendChild(regionRow(row));
+    });
+
+    // Chartable regions = series keys; default = highest current share.
+    var shareOf = {};
+    current.forEach(function (row) {
+      shareOf[row.region] = row.share;
+    });
+    var chartable = Object.keys(series);
+    var ordered = chartable.slice().sort(function (a, b) {
+      return (shareOf[b] || 0) - (shareOf[a] || 0) || (a < b ? -1 : a > b ? 1 : 0);
+    });
+    var region = analysisState.region && ordered.indexOf(analysisState.region) !== -1 ? analysisState.region : ordered[0];
+    analysisState.region = region;
+    analysisState.regionsDates = dates;
+    analysisState.regionsSeries = series;
+
+    els.regionSelect.textContent = "";
+    ordered.forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      els.regionSelect.appendChild(opt);
+    });
+    if (region) els.regionSelect.value = region;
+
+    if (!ordered.length) {
+      showChartUnavailable(panel.querySelector(".chart-card"));
+      return;
+    }
+    renderRegionChart(region);
+  }
+
+  function regionRow(row) {
+    var tr = document.createElement("tr");
+    if (!row.active) tr.classList.add("is-inactive");
+
+    var tdRegion = document.createElement("td");
+    tdRegion.className = "region-name";
+    tdRegion.textContent = row.region;
+
+    var tdControl = document.createElement("td");
+    var fills = Math.min(6, Math.round(row.share * 6));
+    var bar = document.createElement("span");
+    bar.className = "control-bar";
+    bar.textContent = new Array(fills + 1).join("\u2593") + new Array(6 - fills + 1).join("\u2591");
+    tdControl.appendChild(bar);
+
+    var tdShare = document.createElement("td");
+    tdShare.className = "num";
+    tdShare.textContent = (row.share * 100).toFixed(1) + "%";
+
+    var tdPop = document.createElement("td");
+    tdPop.className = "num";
+    tdPop.textContent = fmtInt(row.our_pop);
+
+    var tdDelta = document.createElement("td");
+    tdDelta.className = "num";
+    var d = row.share_delta;
+    if (d === null || d === undefined) {
+      tdDelta.textContent = "\u2014";
+      tdDelta.classList.add("faint");
+    } else if (Math.abs(d) < 0.0005) {
+      tdDelta.textContent = "\u00b10.0%";
+      tdDelta.classList.add("faint");
+    } else if (d > 0) {
+      tdDelta.textContent = "+" + (d * 100).toFixed(1) + "%";
+      tdDelta.classList.add("is-positive");
+    } else {
+      tdDelta.textContent = "\u2212" + Math.abs(d * 100).toFixed(1) + "%";
+      tdDelta.classList.add("is-negative");
+    }
+
+    var tdTo50 = document.createElement("td");
+    tdTo50.className = "num";
+    if (row.controlled) {
+      tdTo50.textContent = "\u2713";
+      tdTo50.classList.add("is-positive");
+    } else if (!row.active) {
+      tdTo50.textContent = "\u2014";
+      tdTo50.classList.add("faint");
+    } else {
+      tdTo50.textContent = "+" + fmtInt(row.to50_needed);
+    }
+
+    tr.appendChild(tdRegion);
+    tr.appendChild(tdControl);
+    tr.appendChild(tdShare);
+    tr.appendChild(tdPop);
+    tr.appendChild(tdDelta);
+    tr.appendChild(tdTo50);
+    return tr;
+  }
+
+  function renderRegionChart(region) {
+    var panel = document.getElementById("panel-regions");
+    var els = analysisElements();
+    if (!window.Chart) {
+      showChartUnavailable(panel.querySelector(".chart-card"));
+      return;
+    }
+    var dates = analysisState.regionsDates;
+    var points = analysisState.regionsSeries[region] || [];
+    var byDate = {};
+    points.forEach(function (p) {
+      byDate[p.date] = p;
+    });
+    var data = [];
+    var rows = [];
+    dates.forEach(function (d) {
+      var p = byDate[d];
+      data.push(p ? p.share : null);
+      rows.push(p ? { our_pop: p.our_pop, total_pop: p.total_pop } : null);
+    });
+
+    els.regionCanvas.setAttribute("aria-label", "Share of population over time for " + region);
+
+    var chart = analysisState.charts.regions;
+    if (chart) {
+      chart.data.labels = dates;
+      chart.data.datasets[0].label = region;
+      chart.data.datasets[0].data = data;
+      chart.data.datasets[0]._rows = rows;
+      chart.update();
+      return;
+    }
+
+    chart = new Chart(els.regionCanvas.getContext("2d"), {
+      type: "line",
+      data: {
+        labels: dates,
+        datasets: [
+          {
+            label: region,
+            data: data,
+            borderColor: "#1abc9c",
+            backgroundColor: "rgba(26,188,156,0.12)",
+            fill: true,
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            tension: 0.3,
+            spanGaps: false,
+            _rows: rows,
+          },
+        ],
+      },
+      options: baseChartOpts(),
+    });
+    chart.options.plugins.legend.display = false;
+    chart.options.scales.y.ticks.callback = function (value) {
+      return Math.round(value * 100) + "%";
+    };
+    chart.options.plugins.tooltip.callbacks = {
+      title: function (ctx) {
+        return ctx[0].label;
+      },
+      label: function (ctx) {
+        return ctx.dataset.label + ": " + (ctx.parsed.y * 100).toFixed(1) + "%";
+      },
+      afterBody: function (ctx) {
+        var point = ctx[0].dataset._rows[ctx[0].dataIndex];
+        return point ? ["our " + fmtInt(point.our_pop) + " \u00b7 total " + fmtInt(point.total_pop)] : [""];
+      },
+    };
+    analysisState.charts.regions = chart;
+  }
+
+  /* Alliances tab */
+
+  function loadStandings() {
+    var panel = document.getElementById("panel-alliances");
+    setPanelBusy("alliances", true);
+    return api
+      .analysis("standings", { days: ANALYSIS_DAYS })
+      .then(function (payload) {
+        analysisState.standingsPayload = payload;
+        var series = payload.series || [];
+        var dates = payload.dates || [];
+        if (!series.length || !dates.length) {
+          showPanelEmpty(panel, "No data yet.");
+        } else {
+          hidePanelEmpty(panel);
+          renderStandingsChart(payload);
+        }
+        setPanelBusy("alliances", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("alliances", false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.alliances = false;
+      });
+  }
+
+  function alignedValues(row, dates, metric) {
+    var key = metric === "vp" ? "vp_points" : "points";
+    var byDate = {};
+    (row[key] || []).forEach(function (pair) {
+      byDate[pair[0]] = pair[1];
+    });
+    return dates.map(function (d) {
+      return byDate[d] !== undefined ? byDate[d] : null;
+    });
+  }
+
+  function applyStandingsTicks(chart, metric) {
+    if (metric === "vp") {
+      chart.options.scales.y.ticks.callback = function (value) {
+        return Number(value).toLocaleString("en-US");
+      };
+    } else {
+      chart.options.scales.y.ticks.callback = function (value) {
+        return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+      };
+    }
+  }
+
+  function renderStandingsChart(payload) {
+    var panel = document.getElementById("panel-alliances");
+    var els = analysisElements();
+    if (!window.Chart) {
+      showPanelEmpty(panel, "Chart library unavailable.");
+      return;
+    }
+    var dates = payload.dates || [];
+    var series = payload.series || [];
+    var metric = analysisState.metric;
+    els.standingsCanvas.setAttribute(
+      "aria-label",
+      (metric === "vp" ? "Victory points" : "Population") + " over time for tracked alliances"
+    );
+
+    var chart = analysisState.charts.alliances;
+    if (chart) {
+      chart.data.labels = dates;
+      chart.data.datasets.forEach(function (ds, i) {
+        ds.data = alignedValues(series[i], dates, metric);
+      });
+      applyStandingsTicks(chart, metric);
+      chart.update();
+      return;
+    }
+
+    chart = new Chart(els.standingsCanvas.getContext("2d"), {
+      type: "line",
+      data: {
+        labels: dates,
+        datasets: series.map(function (row, i) {
+          return {
+            label: row.tag,
+            data: alignedValues(row, dates, metric),
+            borderColor: row.ours ? cssVar("--accent-gold", "#d1a84a") : SERIES_COLORS[i % SERIES_COLORS.length],
+            borderWidth: row.ours ? 2.5 : 1.75,
+            fill: false,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            tension: 0.3,
+            spanGaps: false,
+          };
+        }),
+      },
+      options: baseChartOpts(),
+    });
+    chart.options.plugins.legend.position = "bottom";
+    applyStandingsTicks(chart, metric);
+    analysisState.charts.alliances = chart;
+  }
+
+  /* Events tab */
+
+  function fillDateSelect(select, dates) {
+    select.textContent = "";
+    dates.forEach(function (d) {
+      var opt = document.createElement("option");
+      opt.value = d;
+      opt.textContent = d;
+      select.appendChild(opt);
+    });
+  }
+
+  function loadEvents() {
+    var panel = document.getElementById("panel-events");
+    var els = analysisElements();
+    setPanelBusy("events", true);
+    return api
+      .analysis("dates")
+      .then(function (payload) {
+        var dates = payload.dates || [];
+        if (dates.length < 2) {
+          showPanelEmpty(panel, "No data yet.");
+          setPanelBusy("events", false);
+          return;
+        }
+        hidePanelEmpty(panel);
+        fillDateSelect(els.eventsFrom, dates);
+        fillDateSelect(els.eventsTo, dates);
+        if (analysisState.from && dates.indexOf(analysisState.from) !== -1) {
+          els.eventsFrom.value = analysisState.from;
+        } else {
+          els.eventsFrom.value = dates[dates.length - 2];
+        }
+        if (analysisState.to && dates.indexOf(analysisState.to) !== -1) {
+          els.eventsTo.value = analysisState.to;
+        } else {
+          els.eventsTo.value = dates[dates.length - 1];
+        }
+        analysisState.from = els.eventsFrom.value;
+        analysisState.to = els.eventsTo.value;
+        return fetchEvents(analysisState.from, analysisState.to);
+      })
+      .catch(function (err) {
+        setPanelBusy("events", false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.events = false;
+      });
+  }
+
+  function fetchEvents(from, to) {
+    return api.analysis("events", { from: from, to: to }).then(function (payload) {
+      renderEvents(payload, from, to);
+    });
+  }
+
+  function renderEvents(payload, from, to) {
+    var els = analysisElements();
+    var gained = payload.gained || [];
+    var lost = payload.lost || [];
+    els.gainedList.textContent = "";
+    els.lostList.textContent = "";
+    setText(els.gainedCount, String(gained.length));
+    setText(els.lostCount, String(lost.length));
+
+    if (!gained.length && !lost.length) {
+      els.eventsGrid.hidden = true;
+      els.eventsEmpty.hidden = false;
+      setText(els.eventsEmpty, "No villages changed between " + from + " and " + to + ".");
+      return;
+    }
+    els.eventsEmpty.hidden = true;
+    els.eventsGrid.hidden = false;
+    gained.forEach(function (ev) {
+      els.gainedList.appendChild(eventLine(ev, true));
+    });
+    lost.forEach(function (ev) {
+      els.lostList.appendChild(eventLine(ev, false));
+    });
+  }
+
+  function eventLine(ev, gained) {
+    var li = document.createElement("li");
+    li.className = "event-line " + (gained ? "event-line--gained" : "event-line--lost");
+
+    var name = document.createElement("span");
+    name.className = "event-line__name";
+    name.textContent = ev.village_name;
+    li.appendChild(name);
+
+    var coords = document.createElement("span");
+    coords.className = "event-line__coords";
+    coords.textContent = "(" + ev.x + "|" + ev.y + ")";
+    li.appendChild(coords);
+
+    if (ev.region) {
+      var region = document.createElement("span");
+      region.className = "event-line__region";
+      region.textContent = "\u2014 " + ev.region;
+      li.appendChild(region);
+    }
+
+    var meta = document.createElement("span");
+    meta.className = "event-line__meta";
+    if (gained) {
+      meta.textContent = "by " + (ev.owner_player || "unknown");
+    } else if (ev.event === "lost_deleted") {
+      meta.textContent = "deleted";
+      meta.classList.add("is-muted");
+    } else {
+      meta.textContent = "conquered by " + (ev.owner_tag || ev.owner_player || "unknown");
+    }
+    li.appendChild(meta);
+    return li;
+  }
+
+  /* Changes tab */
+
+  function loadChanges() {
+    var panel = document.getElementById("panel-changes");
+    var els = analysisElements();
+    setPanelBusy("changes", true);
+    tableLoading(els.changesBody, 9);
+    return api
+      .analysis("deltas", { days: ANALYSIS_DAYS })
+      .then(function (payload) {
+        var rows = payload.rows || [];
+        if (!rows.length) {
+          showPanelEmpty(panel, "No data yet.");
+          setPanelBusy("changes", false);
+          return;
+        }
+        hidePanelEmpty(panel);
+        els.changesBody.textContent = "";
+        rows.slice().reverse().forEach(function (row) {
+          els.changesBody.appendChild(changeRow(row));
+        });
+        setPanelBusy("changes", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("changes", false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.changes = false;
+      });
+  }
+
+  function changeRow(row) {
+    var tr = document.createElement("tr");
+    var tdDate = document.createElement("td");
+    tdDate.className = "date-cell";
+    tdDate.textContent = row.date;
+    tr.appendChild(tdDate);
+    tr.appendChild(numCell(fmtInt(row.villages)));
+    tr.appendChild(deltaCell(row.villages_delta));
+    tr.appendChild(numCell(fmtInt(row.population)));
+    tr.appendChild(deltaCell(row.population_delta));
+    tr.appendChild(numCell(fmtInt(row.players)));
+    tr.appendChild(deltaCell(row.players_delta));
+    tr.appendChild(numCell(fmtInt(row.vp)));
+    tr.appendChild(deltaCell(row.vp_delta));
+    return tr;
+  }
+
+  function numCell(text) {
+    var td = document.createElement("td");
+    td.className = "num";
+    td.textContent = text;
+    return td;
+  }
+
+  function deltaCell(d) {
+    var td = document.createElement("td");
+    td.className = "num";
+    if (d === null || d === undefined) {
+      td.textContent = "\u2014";
+      td.classList.add("faint");
+    } else if (d > 0) {
+      td.textContent = "+" + fmtInt(d);
+      td.classList.add("is-positive");
+    } else if (d < 0) {
+      td.textContent = "\u2212" + fmtInt(Math.abs(d));
+      td.classList.add("is-negative");
+    } else {
+      td.textContent = "\u00b10";
+      td.classList.add("faint");
+    }
+    return td;
+  }
+
+  /* Tab bar + wiring */
+
+  var tabLoaders = {
+    regions: loadRegions,
+    alliances: loadStandings,
+    events: loadEvents,
+    changes: loadChanges,
+  };
+
+  function activateTab(tab) {
+    var els = analysisElements();
+    els.tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+      t.classList.toggle("is-active", on);
+    });
+    els.panels.forEach(function (panel) {
+      panel.hidden = panel.id !== tab.getAttribute("aria-controls");
+    });
+    var name = tab.id.replace("tab-", "");
+    if (!activatedTabs[name]) {
+      activatedTabs[name] = true;
+      tabLoaders[name]();
+    } else {
+      var chart = analysisState.charts[name];
+      if (chart) chart.resize();
+    }
+  }
+
+  function wireTabs() {
+    var els = analysisElements();
+    els.tabs.forEach(function (tab, index) {
+      tab.addEventListener("click", function () {
+        activateTab(tab);
+      });
+      tab.addEventListener("keydown", function (event) {
+        var target = null;
+        if (event.key === "ArrowRight") {
+          target = els.tabs[(index + 1) % els.tabs.length];
+        } else if (event.key === "ArrowLeft") {
+          target = els.tabs[(index - 1 + els.tabs.length) % els.tabs.length];
+        } else if (event.key === "Home") {
+          target = els.tabs[0];
+        } else if (event.key === "End") {
+          target = els.tabs[els.tabs.length - 1];
+        }
+        if (target) {
+          event.preventDefault();
+          target.focus();
+          activateTab(target);
+        }
+      });
+    });
+  }
+
+  function wireRegionSelect() {
+    var els = analysisElements();
+    els.regionSelect.addEventListener("change", function () {
+      analysisState.region = els.regionSelect.value;
+      renderRegionChart(analysisState.region);
+    });
+  }
+
+  function wireMetricToggle() {
+    var els = analysisElements();
+    els.metricButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var metric = btn.getAttribute("data-metric");
+        if (metric === analysisState.metric) return;
+        analysisState.metric = metric;
+        els.metricButtons.forEach(function (b) {
+          b.setAttribute("aria-pressed", String(b === btn));
+        });
+        if (analysisState.standingsPayload) {
+          renderStandingsChart(analysisState.standingsPayload);
+        } else {
+          loadStandings();
+        }
+      });
+    });
+  }
+
+  function wireEventsControls() {
+    var els = analysisElements();
+    function onChange() {
+      var from = els.eventsFrom.value;
+      var to = els.eventsTo.value;
+      if (from >= to) {
+        setText(els.eventsError, "From must be earlier than To.");
+        els.eventsError.hidden = false;
+        return; // keep the previous lists
+      }
+      els.eventsError.hidden = true;
+      analysisState.from = from;
+      analysisState.to = to;
+      setPanelBusy("events", true);
+      fetchEvents(from, to)
+        .catch(function (err) {
+          showToast("Events refresh failed", err.message, "error");
+        })
+        .then(function () {
+          setPanelBusy("events", false);
+        });
+    }
+    els.eventsFrom.addEventListener("change", onChange);
+    els.eventsTo.addEventListener("change", onChange);
+  }
+
+  function wireAnalysis() {
+    applyChartDefaults();
+    wireTabs();
+    wireRegionSelect();
+    wireMetricToggle();
+    wireEventsControls();
+    // Regions is the default tab — its payload is fetched at init.
+    activateTab(document.getElementById("tab-regions"));
+  }
+
   /* --- init --------------------------------------------------------------------- */
 
   function loadStatus() {
@@ -743,5 +1514,7 @@
     els.reportButton.addEventListener("click", function () {
       runAction("report");
     });
+
+    wireAnalysis();
   });
 })();

@@ -88,19 +88,6 @@ def make_report_data(**overrides: Any) -> ReportData:
                 old_player="Tyrion Lannister",
             ),
         ],
-        "top_players": {
-            "population": [
-                PlayerStat(
-                    player_id=7,
-                    player_name="Tyrion Lannister",
-                    population=5000,
-                    villages=42,
-                    growth=120,
-                ),
-            ],
-            "growth": [],
-            "new_villages": [],
-        },
         "regions": [
             RegionStat(
                 region="North",
@@ -111,8 +98,6 @@ def make_report_data(**overrides: Any) -> ReportData:
                 delta=120,
             ),
         ],
-        "vp_total": 340,
-        "vp_delta": 10,
     }
     values.update(overrides)
     return ReportData(**values)
@@ -376,10 +361,7 @@ class TestReportData:
         assert report.new_villages[0].event == "gained"
         assert len(report.lost_villages) == 1
         assert report.lost_villages[0].event == "lost_conquered"
-        assert set(report.top_players) == {"population", "growth", "new_villages"}
         assert report.regions[0].share == 0.625
-        assert report.vp_total == 340
-        assert report.vp_delta == 10
 
     def test_empty_lists_and_none_deltas_ok(self):
         report = make_report_data(
@@ -396,15 +378,13 @@ class TestReportData:
             ),
             new_villages=[],
             lost_villages=[],
-            top_players={"population": [], "growth": [], "new_villages": []},
             regions=[],
-            vp_delta=None,
         )
 
         assert report.snapshot_date is None
         assert report.new_villages == []
         assert report.lost_villages == []
-        assert report.vp_delta is None
+        assert report.regions == []
 
     def test_serialization_roundtrip(self):
         report = make_report_data()

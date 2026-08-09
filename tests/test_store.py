@@ -15,9 +15,16 @@ from typing import Any
 
 import pytest
 
-from travian.models import VillageRow
+from travian.models import (
+    AllianceDay,
+    RegionDay,
+    SummaryDay,
+    VillageRow,
+)
 from travian.store import (
     SnapshotRecord,
+    alliance_days,
+    alliance_ids_by_tag,
     append_log,
     connect,
     get_setting,
@@ -27,8 +34,10 @@ from travian.store import (
     load_latest,
     load_villages,
     recent_logs,
+    region_days,
     save_snapshot,
     set_settings,
+    summary_days,
 )
 
 
@@ -298,6 +307,142 @@ def test_append_log_visible_from_new_connection(tmp_path: Path) -> None:
     # Then: the entry is visible — append_log must commit its own transaction
     # (legacy sqlite3 isolation would otherwise roll back the INSERT on close)
     assert [log["message"] for log in logs] == ["boom"]
+
+
+# --- analysis aggregators ---------------------------------------------------
+
+
+class TestAllianceIdsByTag:
+    def test_groups_ids_per_tag_excluding_id_zero(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, alliance_tag="AAA"),
+                make_row(2, alliance_id=21, alliance_tag="AAA"),
+                make_row(3, alliance_id=30, alliance_tag="BBB"),
+                make_row(4, alliance_id=0, alliance_tag=""),
+            ],
+        )
+
+        assert alliance_ids_by_tag(conn, "2026-08-08") == {"AAA": [20, 21], "BBB": [30]}
+
+    def test_empty_when_date_unknown(self, conn: sqlite3.Connection) -> None:
+        assert alliance_ids_by_tag(conn, "2026-08-08") == {}
+
+
+class TestRegionDays:
+    def test_aggregates_our_and_total_pop_per_region(self, conn: sqlite3.Connection) -> None:
+        # region NULL groups as "" (COALESCE); enemy villages count only in total.
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, population=100, region="North"),
+                make_row(2, alliance_id=20, population=200, region="North"),
+                make_row(3, alliance_id=30, population=50, region="North"),
+                make_row(4, alliance_id=20, population=10, region=None),
+                make_row(5, alliance_id=30, population=30, region=None),
+            ],
+        )
+
+        days = region_days(conn, "2026-08-08", "2026-08-08", {20})
+
+        assert days == [
+            RegionDay(date="2026-08-08", region="", our_pop=10, total_pop=40),
+            RegionDay(date="2026-08-08", region="North", our_pop=300, total_pop=350),
+        ]
+
+    def test_window_inclusive_and_date_asc(self, conn: sqlite3.Connection) -> None:
+        for date in ("2026-08-07", "2026-08-08", "2026-08-09"):
+            save_snapshot(conn, date, [make_row(1, alliance_id=20, population=100, region="North")])
+
+        days = region_days(conn, "2026-08-08", "2026-08-09", {20})
+
+        assert [day.date for day in days] == ["2026-08-08", "2026-08-09"]
+
+    def test_empty_alliance_ids_returns_empty(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(1, alliance_id=20, region="North")])
+
+        assert region_days(conn, "2026-08-08", "2026-08-08", set()) == []
+
+
+class TestAllianceDays:
+    def test_aggregates_villages_pop_vp_per_alliance(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, alliance_tag="AAA", population=100, victory_points=5),
+                make_row(2, alliance_id=20, alliance_tag="AAA", population=200, victory_points=7),
+                make_row(3, alliance_id=30, alliance_tag="BBB", population=50, victory_points=1),
+            ],
+        )
+
+        days = alliance_days(conn, "2026-08-08", "2026-08-08", {20, 30})
+
+        assert days == [
+            AllianceDay(date="2026-08-08", alliance_id=20, alliance_tag="AAA", villages=2, population=300, vp=12),
+            AllianceDay(date="2026-08-08", alliance_id=30, alliance_tag="BBB", villages=1, population=50, vp=1),
+        ]
+
+    def test_tag_is_lexicographically_greatest(self, conn: sqlite3.Connection) -> None:
+        # Same alliance_id with two tags in one snapshot (tag rename) → MAX wins.
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, alliance_tag="AAA", population=100),
+                make_row(2, alliance_id=20, alliance_tag="ZZZ", population=100),
+            ],
+        )
+
+        days = alliance_days(conn, "2026-08-08", "2026-08-08", {20})
+
+        assert days == [AllianceDay(date="2026-08-08", alliance_id=20, alliance_tag="ZZZ", villages=2, population=200, vp=10)]
+
+    def test_window_inclusive(self, conn: sqlite3.Connection) -> None:
+        for date in ("2026-08-07", "2026-08-08", "2026-08-09"):
+            save_snapshot(conn, date, [make_row(1, alliance_id=20, population=100)])
+
+        days = alliance_days(conn, "2026-08-08", "2026-08-09", {20})
+
+        assert [day.date for day in days] == ["2026-08-08", "2026-08-09"]
+
+    def test_empty_alliance_ids_returns_empty(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(1, alliance_id=20)])
+
+        assert alliance_days(conn, "2026-08-08", "2026-08-08", set()) == []
+
+
+class TestSummaryDays:
+    def test_aggregates_villages_pop_players_vp(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, population=100, victory_points=5),
+                make_row(2, alliance_id=20, population=200, victory_points=7, player_id=11),
+                make_row(3, alliance_id=30, population=50, victory_points=1),
+            ],
+        )
+
+        days = summary_days(conn, "2026-08-08", "2026-08-08", {20})
+
+        assert days == [SummaryDay(date="2026-08-08", villages=2, population=300, players=2, vp=12)]
+
+    def test_window_inclusive_and_date_asc(self, conn: sqlite3.Connection) -> None:
+        for date, pop in (("2026-08-07", 100), ("2026-08-08", 200), ("2026-08-09", 300)):
+            save_snapshot(conn, date, [make_row(1, alliance_id=20, population=pop)])
+
+        days = summary_days(conn, "2026-08-08", "2026-08-09", {20})
+
+        assert [(day.date, day.population) for day in days] == [("2026-08-08", 200), ("2026-08-09", 300)]
+
+    def test_empty_alliance_ids_returns_empty(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(1, alliance_id=20)])
+
+        assert summary_days(conn, "2026-08-08", "2026-08-08", set()) == []
 
 
 def test_recent_logs_limits_when_n_smaller_than_count(conn: sqlite3.Connection) -> None:

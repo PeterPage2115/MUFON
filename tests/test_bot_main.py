@@ -22,7 +22,7 @@ import discord
 import pytest
 from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingTypeStubs]
 
-from travian import store
+from travian import store, strings
 from travian.bot import main as bot_main
 from travian.map_sql import MapSqlFetchError
 from travian.models import VillageRow
@@ -485,7 +485,7 @@ class TestRunReport:
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
         assert len(channel.sent) == 1  # one message
         sent = channel.sent[0]
-        assert 1 <= len(sent) <= 5  # up to 5 embeds in one message
+        assert 1 <= len(sent) <= 4  # up to 4 embeds in one message
         assert all(isinstance(e, discord.Embed) for e in sent)
         assert "NOVA" in (sent[0].description or "")
         logs = _logs(_db_path(tmp_path))
@@ -537,7 +537,7 @@ class TestRunReport:
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=False))
         assert len(channel.sent) == 1
         sent = channel.sent[0]
-        assert 1 <= len(sent) <= 5
+        assert 1 <= len(sent) <= 4
         assert all(isinstance(e, discord.Embed) for e in sent)
         assert "NOVA" in (sent[0].description or "")
 
@@ -920,6 +920,63 @@ class TestRunReportT10:
         monkeypatch.setattr(asyncio, "to_thread", spy)
         asyncio.run(bot_main.run_report(CHANNEL_ID))
         assert "_report_phase" in calls
+
+
+# --- /wioski + /regiony section runners --------------------------------------------
+
+
+class TestSectionRunners:
+    def test_run_villages_returns_villages_embed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100)])
+        _seed(conn, today, [_row(1, population=110), _row(2, population=50)])  # row 2 is gained
+        conn.close()
+        embeds = asyncio.run(bot_main.run_villages())
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_VILLAGES]
+        assert "# New Villages" in (embeds[0].description or "")
+
+    def test_run_regions_returns_full_regions_embed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100)])
+        _seed(conn, today, [_row(1, population=110)])
+        conn.close()
+        embeds = asyncio.run(bot_main.run_regions())
+        assert [e.title for e in embeds] == [strings.EMBED_TITLE_REGIONS]
+        description = embeds[0].description or ""
+        # The on-demand command carries the FULL table (no region_limit) —
+        # all rows render, no more-line inside the fence.
+        assert "Testland" in description
+        assert "…and " not in description
+        assert strings.REGION_LEGEND in description
+
+    def test_run_villages_empty_without_snapshot(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        assert asyncio.run(bot_main.run_villages()) == []
+
+    def test_run_villages_empty_without_alliance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOPE")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        assert asyncio.run(bot_main.run_villages()) == []
+
+    def test_run_villages_empty_when_no_events(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1)])
+        _seed(conn, today, [_row(1, population=110)])  # no new/lost villages
+        conn.close()
+        assert asyncio.run(bot_main.run_villages()) == []
 
 
 # --- job_report: T10 — resolved-subset pre-check --------------------------------
