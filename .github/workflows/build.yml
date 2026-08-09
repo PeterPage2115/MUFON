@@ -55,9 +55,18 @@ jobs:
           # Full history so gitleaks can scan all commits, not just HEAD.
           fetch-depth: 0
 
+      # gitleaks-action@v2 derives the scan range from the event's `before`
+      # SHA (`--log-opts=... ${before}^..${head}`) and has no way to override
+      # it. When `before` is the repo's ROOT commit or a new branch's all-zero
+      # SHA, the range is invalid and gitleaks exits 1 with "Unexpected exit
+      # code" — a false failure. Run gitleaks directly instead: no range means
+      # the full history (fetch-depth: 0 above), on every event type.
       - name: Gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v2
-        # Free for personal repositories — no GITLEAKS_LICENSE needed.
+        shell: bash
+        run: |
+          curl -sSfL https://github.com/zricethezav/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin
+          gitleaks detect --redact --no-banner --exit-code=1
 
       - name: Fallback DISCORD_TOKEN grep
         shell: bash
