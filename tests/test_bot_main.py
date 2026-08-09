@@ -1,0 +1,618 @@
+"""Integration tests for the bot entrypoint (task 9): startup validation,
+settings merge (env + DB), the shared ``run_fetch``/``run_report`` functions,
+the scheduler registration and the shared run lock.
+
+No real Discord gateway is touched: the client is never ``.run()``'d, and the
+channel surface is a fake (``FakeBot``/``FakeChannel``). async tests run via
+``asyncio.run`` (pytest-asyncio is not a dependency); the run lock is bound
+per event loop so multiple ``asyncio.run`` invocations get independent locks.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
+from zoneinfo import ZoneInfo
+
+import discord
+import pytest
+from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingTypeStubs]
+
+from travian import store
+from travian.bot import main as bot_main
+from travian.map_sql import MapSqlFetchError
+from travian.models import VillageRow
+from travian.strings import NO_DATA_YET
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "map_sql_sample.txt"
+CHANNEL_ID = 111111111111111111
+
+
+# --- helpers -----------------------------------------------------------------
+
+
+def _row(
+    village_id: int,
+    *,
+    alliance_tag: str = "NOVA",
+    alliance_id: int = 7,
+    population: int = 100,
+    region: str = "Testland",
+) -> VillageRow:
+    return VillageRow(
+        village_id=village_id,
+        x=village_id,
+        y=village_id,
+        tribe=1,
+        name=f"Village {village_id}",
+        player_id=1000 + village_id,
+        player_name=f"Player {village_id}",
+        alliance_id=alliance_id,
+        alliance_tag=alliance_tag,
+        population=population,
+        region=region,
+        is_capital=False,
+        is_city=False,
+        is_harbor=False,
+        victory_points=10,
+    )
+
+
+def _env(**overrides: str) -> dict[str, str]:
+    env = {
+        "DISCORD_TOKEN": "test-token",
+        "CHANNEL_ID": "111111111111111111",
+        "ALLIANCE_TAGS": "NOVA",
+        "FETCH_TZ": "Europe/London",
+        "REPORT_TZ": "Europe/Warsaw",
+    }
+    env.update(overrides)
+    return env
+
+
+def _cfg(**overrides: object) -> bot_main.MergedConfig:
+    values: dict[str, object] = {
+        "discord_token": "test-token",
+        "sqlite_path": "/tmp/bot.db",
+        "channel_id": CHANNEL_ID,
+        "alliance_tags": ["NOVA"],
+        "fetch_hour": 0,
+        "fetch_minute": 15,
+        "fetch_tz": "Europe/London",
+        "report_hour": 9,
+        "report_minute": 0,
+        "report_tz": "Europe/Warsaw",
+        "admin_role_id": None,
+        "report_embed_color": 0x2ECC71,
+    }
+    values.update(overrides)
+    return bot_main.MergedConfig(**cast(Any, values))
+
+
+def _db_path(tmp_path: Path) -> Path:
+    return tmp_path / "bot.db"
+
+
+def _set_bot_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: str) -> None:
+    env = _env(**overrides)
+    env["SQLITE_PATH"] = str(_db_path(tmp_path))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+
+def _fetch_date() -> str:
+    return datetime.now(ZoneInfo("Europe/London")).date().isoformat()
+
+
+def _seed(conn: sqlite3.Connection, day: date, rows: list[VillageRow]) -> None:
+    store.save_snapshot(conn, day.isoformat(), rows)
+
+
+class FakeChannel:
+    def __init__(self) -> None:
+        self.sent: list[discord.Embed | None] = []
+
+    async def send(self, embed: discord.Embed | None = None, **kwargs: object) -> object:
+        self.sent.append(embed)
+        return object()
+
+
+class FakeBot:
+    def __init__(self, channels: dict[int, FakeChannel]) -> None:
+        self._channels = channels
+
+    def get_channel(self, channel_id: int) -> FakeChannel | None:
+        return self._channels.get(channel_id)
+
+
+def _install_bot(channels: dict[int, FakeChannel]) -> FakeChannel:
+    bot_main.current_bot = cast(bot_main.TravianBot, FakeBot(channels))
+    return channels[CHANNEL_ID]
+
+
+def _logs(db: Path) -> list[dict[str, str]]:
+    conn = store.connect(db)
+    try:
+        return store.recent_logs(conn)
+    finally:
+        conn.close()
+
+
+# --- startup validation -------------------------------------------------------
+
+
+class TestValidateConfig:
+    def test_valid_config_passes(self) -> None:
+        bot_main.validate_config(_cfg())  # must not raise
+
+    def test_missing_token_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(discord_token=""))
+        assert exc.value.code == 1
+        assert "DISCORD_TOKEN not set" in caplog.text
+
+    def test_missing_channel_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(channel_id=None))
+        assert exc.value.code == 1
+        assert "CHANNEL_ID not set" in caplog.text
+
+    def test_unknown_fetch_tz_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(fetch_tz="Mars/Olympus"))
+        assert exc.value.code == 1
+        assert "unknown timezone" in caplog.text
+
+    def test_unknown_report_tz_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(report_tz="Nope/Nowhere"))
+        assert exc.value.code == 1
+        assert "unknown timezone" in caplog.text
+
+    def test_empty_tz_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(fetch_tz=""))
+        assert exc.value.code == 1
+        assert "unknown timezone" in caplog.text
+
+    @pytest.mark.parametrize("key", ["fetch_hour", "report_hour"])
+    def test_hour_out_of_range_exits(self, key: str, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(**{key: 25}))
+        assert exc.value.code == 1
+        assert "hour must be" in caplog.text
+
+    def test_negative_hour_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(fetch_hour=-1))
+        assert exc.value.code == 1
+        assert "hour must be" in caplog.text
+
+    @pytest.mark.parametrize("key", ["fetch_minute", "report_minute"])
+    def test_minute_out_of_range_exits(self, key: str, caplog: pytest.LogCaptureFixture) -> None:
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(**{key: 60}))
+        assert exc.value.code == 1
+        assert "minute must be" in caplog.text
+
+    def test_boundary_values_pass(self) -> None:
+        bot_main.validate_config(
+            _cfg(fetch_hour=0, fetch_minute=59, report_hour=23, report_minute=0)
+        )  # must not raise
+
+
+# --- settings merge ------------------------------------------------------------
+
+
+class TestLoadMergedConfig:
+    def test_defaults_when_nothing_set(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {})
+        finally:
+            conn.close()
+        assert cfg.discord_token == ""
+        assert cfg.sqlite_path == "/data/travian.db"
+        assert cfg.channel_id is None
+        assert cfg.alliance_tags == []
+        assert (cfg.fetch_hour, cfg.fetch_minute, cfg.fetch_tz) == (0, 15, "Europe/London")
+        assert (cfg.report_hour, cfg.report_minute, cfg.report_tz) == (9, 0, "Europe/Warsaw")
+        assert cfg.admin_role_id is None
+        assert cfg.report_embed_color == 0x2ECC71
+
+    def test_env_values_parsed(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(
+                conn,
+                {"CHANNEL_ID": "12345", "ALLIANCE_TAGS": "A, B,,A", "FETCH_HOUR": "7", "ADMIN_ROLE_ID": "42"},
+            )
+        finally:
+            conn.close()
+        assert cfg.channel_id == 12345
+        assert cfg.alliance_tags == ["A", "B"]
+        assert cfg.fetch_hour == 7
+        assert cfg.admin_role_id == 42
+
+    def test_db_overrides_env(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(
+            conn,
+            {"CHANNEL_ID": 999, "FETCH_HOUR": 5, "ALLIANCE_TAGS": ["DBTAG"], "REPORT_EMBED_COLOR": 12345},
+        )
+        try:
+            cfg = bot_main.load_merged_config(
+                conn, {"CHANNEL_ID": "1", "FETCH_HOUR": "2", "ALLIANCE_TAGS": "ENVTAG"}
+            )
+        finally:
+            conn.close()
+        assert cfg.channel_id == 999
+        assert cfg.fetch_hour == 5
+        assert cfg.alliance_tags == ["DBTAG"]
+        assert cfg.report_embed_color == 12345
+
+    def test_token_never_from_db(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"DISCORD_TOKEN": "db-token"})
+        try:
+            cfg = bot_main.load_merged_config(conn, {"DISCORD_TOKEN": "env-token"})
+        finally:
+            conn.close()
+        assert cfg.discord_token == "env-token"
+
+    def test_token_empty_when_only_in_db(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"DISCORD_TOKEN": "db-token"})
+        try:
+            cfg = bot_main.load_merged_config(conn, {})
+        finally:
+            conn.close()
+        assert cfg.discord_token == ""
+
+    def test_sqlite_path_env_only(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"SQLITE_PATH": "/from/db.db"})
+        try:
+            cfg = bot_main.load_merged_config(conn, {"SQLITE_PATH": "/from/env.db"})
+        finally:
+            conn.close()
+        assert cfg.sqlite_path == "/from/env.db"
+
+    def test_color_env_hex_and_decimal(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            assert bot_main.load_merged_config(conn, {"REPORT_EMBED_COLOR": "0x2ECC71"}).report_embed_color == 0x2ECC71
+            assert bot_main.load_merged_config(conn, {"REPORT_EMBED_COLOR": "65280"}).report_embed_color == 65280
+        finally:
+            conn.close()
+
+    def test_bad_channel_id_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(ValueError, match="CHANNEL_ID"):
+                bot_main.load_merged_config(conn, {"CHANNEL_ID": "abc"})
+        finally:
+            conn.close()
+
+    def test_bad_hour_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(ValueError, match="FETCH_HOUR"):
+                bot_main.load_merged_config(conn, {"FETCH_HOUR": "abc"})
+        finally:
+            conn.close()
+
+    def test_tags_dedupe_strip_case_sensitive(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {"ALLIANCE_TAGS": "A,,a, A, b"})
+        finally:
+            conn.close()
+        assert cfg.alliance_tags == ["A", "a", "b"]
+
+
+# --- run_fetch ----------------------------------------------------------------
+
+
+class TestRunFetch:
+    def test_success_saves_snapshot_and_logs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: FIXTURE_PATH.read_text())
+        asyncio.run(bot_main.run_fetch())
+        assert store.list_dates(store.connect(_db_path(tmp_path))) == [_fetch_date()]
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "fetch"
+            and entry["level"] == "info"
+            and entry["message"].startswith("snapshot saved for")
+            for entry in logs
+        )
+
+    def test_fetch_error_logged_without_crash(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+        asyncio.run(bot_main.run_fetch())
+        assert store.list_dates(store.connect(_db_path(tmp_path))) == []
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "fetch" and entry["level"] == "error" and "fetch failed after 4 attempts" in entry["message"]
+            for entry in logs
+        )
+
+    def test_unexpected_error_logged_without_crash(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+
+        def boom(url: str) -> str:
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", boom)
+        asyncio.run(bot_main.run_fetch())
+        logs = _logs(_db_path(tmp_path))
+        assert any(entry["job"] == "fetch" and entry["level"] == "error" and "unexpected" in entry["message"] for entry in logs)
+
+
+# --- run_report ---------------------------------------------------------------
+
+
+class TestRunReport:
+    def test_with_data_sends_embed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100)])
+        _seed(conn, today, [_row(1, population=110), _row(2, population=50)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
+        assert len(channel.sent) == 1
+        embed = channel.sent[0]
+        assert isinstance(embed, discord.Embed)
+        assert "NOVA" in (embed.description or "")
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report"
+            and entry["level"] == "info"
+            and f"report sent to channel {CHANNEL_ID}" in entry["message"]
+            for entry in logs
+        )
+
+    def test_no_data_sends_no_data_embed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        assert len(channel.sent) == 1
+        embed = channel.sent[0]
+        assert isinstance(embed, discord.Embed)
+        assert embed.description == NO_DATA_YET
+        logs = _logs(_db_path(tmp_path))
+        assert any(entry["job"] == "report" and entry["level"] == "info" and "no-data" in entry["message"] for entry in logs)
+
+    def test_stale_skips_when_require_today(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        yesterday = date.fromisoformat(_fetch_date()) - timedelta(days=1)
+        _seed(conn, yesterday, [_row(1)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        assert channel.sent == []
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report" and entry["level"] == "warning" and "no snapshot for today" in entry["message"]
+            for entry in logs
+        )
+
+    def test_stale_sends_when_require_today_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        yesterday = date.fromisoformat(_fetch_date()) - timedelta(days=1)
+        _seed(conn, yesterday, [_row(1)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=False))
+        assert len(channel.sent) == 1
+        embed = channel.sent[0]
+        assert isinstance(embed, discord.Embed)
+        assert "NOVA" in (embed.description or "")
+
+    @pytest.mark.parametrize("tags", ["NOPE", ""])
+    def test_unresolved_or_empty_tags_skip(
+        self, tags: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS=tags)
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        assert channel.sent == []
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report" and entry["level"] == "warning" and "no alliance configured" in entry["message"]
+            for entry in logs
+        )
+
+    def test_channel_not_found_logs_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        bot_main.current_bot = cast(bot_main.TravianBot, FakeBot({}))  # get_channel -> None
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report" and entry["level"] == "error" and f"channel {CHANNEL_ID} not found" in entry["message"]
+            for entry in logs
+        )
+
+    def test_send_failure_logged_and_lock_released(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+
+        class ExplodingChannel(FakeChannel):
+            async def send(self, embed: discord.Embed | None = None, **kwargs: object) -> object:
+                raise RuntimeError("boom")
+
+        _install_bot({CHANNEL_ID: ExplodingChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        logs = _logs(_db_path(tmp_path))
+        assert any(entry["job"] == "report" and entry["level"] == "error" and "boom" in entry["message"] for entry in logs)
+
+        # The lock must have been released by the failed run: a second run works.
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID))
+        assert len(channel.sent) == 1
+
+
+# --- shared run lock -----------------------------------------------------------
+
+
+class TestRunLock:
+    def test_concurrent_run_skipped_and_logged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        class BlockingChannel(FakeChannel):
+            async def send(self, embed: discord.Embed | None = None, **kwargs: object) -> object:
+                started.set()
+                await gate.wait()
+                return await super().send(embed, **kwargs)
+
+        channel = BlockingChannel()
+        _install_bot({CHANNEL_ID: channel})
+
+        async def scenario() -> None:
+            first = asyncio.create_task(bot_main.run_report(CHANNEL_ID))
+            await started.wait()  # first run holds the lock inside channel.send
+            await bot_main.run_report(CHANNEL_ID)  # must skip, not queue
+            gate.set()
+            await first
+
+        asyncio.run(scenario())
+        assert len(channel.sent) == 1  # only the first run sent
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report" and entry["level"] == "warning" and "already running" in entry["message"]
+            for entry in logs
+        )
+
+
+# --- bot class: on_ready + scheduler -------------------------------------------
+
+
+def _field(trigger: CronTrigger, name: str) -> int:
+    return next(f for f in trigger.fields if f.name == name).expressions[0].first  # type: ignore[union-attr]
+
+
+class TestBot:
+    def test_on_ready_syncs_and_starts_scheduler(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def scenario() -> None:
+            bot = bot_main.TravianBot(_cfg())
+
+            async def fake_sync() -> list[object]:
+                return []
+
+            monkeypatch.setattr(bot.tree, "sync", fake_sync)
+            await bot.on_ready()
+            try:
+                assert bot.scheduler is not None
+                assert {job.id for job in bot.scheduler.get_jobs()} == {"job_fetch", "job_report"}
+                assert bot_main.bot_loop is asyncio.get_running_loop()
+            finally:
+                bot.scheduler.shutdown(wait=False)  # type: ignore[union-attr]
+
+        asyncio.run(scenario())
+
+    def test_scheduler_triggers_match_config(self) -> None:
+        cfg = _cfg(
+            fetch_hour=3,
+            fetch_minute=45,
+            fetch_tz="Europe/London",
+            report_hour=11,
+            report_minute=30,
+            report_tz="Europe/Warsaw",
+        )
+
+        async def scenario() -> None:
+            bot = bot_main.TravianBot(cfg)
+            bot._start_scheduler()
+            assert bot.scheduler is not None
+            try:
+                jobs = {job.id: job for job in bot.scheduler.get_jobs()}
+                assert jobs["job_fetch"].func is bot_main.job_fetch
+                assert jobs["job_report"].func is bot_main.job_report
+                fetch_trigger = jobs["job_fetch"].trigger
+                assert isinstance(fetch_trigger, CronTrigger)
+                assert fetch_trigger.timezone == ZoneInfo("Europe/London")
+                assert _field(fetch_trigger, "hour") == 3
+                assert _field(fetch_trigger, "minute") == 45
+                report_trigger = jobs["job_report"].trigger
+                assert isinstance(report_trigger, CronTrigger)
+                assert report_trigger.timezone == ZoneInfo("Europe/Warsaw")
+                assert _field(report_trigger, "hour") == 11
+                assert _field(report_trigger, "minute") == 30
+            finally:
+                bot.scheduler.shutdown(wait=False)  # type: ignore[union-attr]
+
+        asyncio.run(scenario())
+
+
+# --- entry point ----------------------------------------------------------------
+
+
+class TestMain:
+    def test_main_exits_1_without_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        monkeypatch.setenv("SQLITE_PATH", str(_db_path(tmp_path)))
+        monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+        monkeypatch.delenv("CHANNEL_ID", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            bot_main.main()
+        assert exc.value.code == 1
+        assert "DISCORD_TOKEN not set" in caplog.text
+
+    def test_main_exits_1_on_bad_tz(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        monkeypatch.setenv("SQLITE_PATH", str(_db_path(tmp_path)))
+        monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+        monkeypatch.setenv("CHANNEL_ID", "111111111111111111")
+        monkeypatch.setenv("FETCH_TZ", "Mars/Olympus")
+        with pytest.raises(SystemExit) as exc:
+            bot_main.main()
+        assert exc.value.code == 1
+        assert "unknown timezone" in caplog.text
