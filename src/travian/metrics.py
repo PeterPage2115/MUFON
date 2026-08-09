@@ -316,7 +316,9 @@ def top_players(
     ``None`` only when ``prev_rows`` is ``None``; ``prev_rows=[]`` (snapshot
     exists, alliance absent) means growth = curr − 0 and every curr-ours
     village counts as gained. With no previous snapshot all three rankings
-    degenerate to population-desc order (growth ``None``, zero gains). Ties
+    degenerate to population-desc order (growth ``None``, zero gains). Every
+    stat carries ``gains`` (the strict-gained count — 0 when there is no
+    previous snapshot) regardless of which ranking it appears in. Ties
     break by ``player_id`` ascending; order is fully deterministic.
     """
     curr_ours = [row for row in curr_rows if row.alliance_id in alliance_ids]
@@ -350,6 +352,7 @@ def top_players(
             population=population.get(player, 0),
             villages=villages.get(player, 0),
             growth=None if prev_rows is None else population.get(player, 0) - prev_pop.get(player, 0),
+            gains=gains[player],
         )
         for player in names
     ]

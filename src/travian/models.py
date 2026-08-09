@@ -85,7 +85,9 @@ class VillageEvent(BaseModel):
 class PlayerStat(BaseModel):
     """One player's standing in a top ranking (population/growth/new_villages).
 
-    ``growth`` is ``None`` when there is no previous snapshot.
+    ``growth`` is ``None`` when there is no previous snapshot; ``gains`` is
+    the strict-gained village count (village absent from prev with ANY
+    owner), ``None`` when not provided/unknown.
     """
 
     player_id: int
@@ -93,6 +95,7 @@ class PlayerStat(BaseModel):
     population: int
     villages: int
     growth: int | None
+    gains: int | None = None
 
 
 class RegionStat(BaseModel):

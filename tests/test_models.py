@@ -301,6 +301,30 @@ class TestPlayerStat:
 
         assert PlayerStat.model_validate(stat.model_dump()) == stat
 
+    def test_gains_defaults_to_none(self):
+        stat = PlayerStat(
+            player_id=7,
+            player_name="Tyrion Lannister",
+            population=5000,
+            villages=42,
+            growth=120,
+        )
+
+        assert stat.gains is None
+
+    def test_gains_roundtrip(self):
+        stat = PlayerStat(
+            player_id=7,
+            player_name="Tyrion Lannister",
+            population=5000,
+            villages=42,
+            growth=120,
+            gains=3,
+        )
+
+        assert PlayerStat.model_validate(stat.model_dump()) == stat
+        assert stat.gains == 3
+
 
 class TestRegionStat:
     def test_share_is_fraction(self):

@@ -66,6 +66,7 @@ def make_player(
     population: int,
     villages: int,
     growth: int | None,
+    gains: int | None = None,
 ) -> PlayerStat:
     return PlayerStat(
         player_id=player_id,
@@ -73,6 +74,7 @@ def make_player(
         population=population,
         villages=villages,
         growth=growth,
+        gains=gains,
     )
 
 
@@ -156,7 +158,7 @@ def default_report() -> ReportData:
         top_players={
             "population": [make_player(1, "Tyrion Lannister", 1200, 5, 150)],
             "growth": [make_player(1, "Tyrion Lannister", 1200, 5, 150)],
-            "new_villages": [make_player(1, "Tyrion Lannister", 1200, 5, 150)],
+            "new_villages": [make_player(1, "Tyrion Lannister", 1200, 5, 150, gains=1)],
         },
         regions=[make_region("Dacia", 12, 340, 800, 0.425, 5)],
     )
@@ -168,7 +170,7 @@ def worst_case_report() -> ReportData:
     test fails loudly if the fixture ever stops being worst-case."""
     new = [make_event(i, "A" * 90, 12, -34) for i in range(15)]
     lost = [make_event(i, "B" * 90, 12, -34, event="lost_conquered", tag="ENEMY") for i in range(15)]
-    players = [make_player(i, "P" * 63, 1000 + i, 5, 10 + i) for i in range(5)]
+    players = [make_player(i, "P" * 63, 1000 + i, 5, 10 + i, gains=1 + i) for i in range(5)]
     regions = [make_region(f"Region{i:02d}" + "R" * 40, 12, 340, 800, 0.425, 5) for i in range(30)]
     return make_report(
         new_villages=new,
@@ -303,11 +305,18 @@ class TestContentFormatting:
         assert field_value(field).split("\n") == ["Grower — +150", "Shrinker — −50", "Steady — ±0"]
 
     def test_top_players_new_villages_line(self):
+        data = make_report(top_players={"new_villages": [make_player(1, "Founder", 1200, 5, 150, gains=2)]})
+        embed = build_report_embed(data, ["WOLF"], "2026-08-08")
+
+        field = next(f for f in embed.fields if f.name == strings.FIELD_TOP_PLAYERS_NEW_VILLAGES)
+        assert field_value(field) == "Founder — +2 villages"
+
+    def test_top_players_new_villages_gains_none_fallback(self):
         data = make_report(top_players={"new_villages": [make_player(1, "Founder", 1200, 5, 150)]})
         embed = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         field = next(f for f in embed.fields if f.name == strings.FIELD_TOP_PLAYERS_NEW_VILLAGES)
-        assert field_value(field) == "Founder — 5 villages"
+        assert field_value(field) == "Founder — +— villages"  # gains None → DELTA_NONE, never crashes
 
     def test_region_line_format(self):
         data = make_report(regions=[make_region("Dacia", 12, 340, 800, 0.625, 5)])

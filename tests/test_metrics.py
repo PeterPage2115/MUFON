@@ -602,6 +602,10 @@ class TestTopPlayers:
         assert ranking[2].growth == 10
         assert [p.player_id for p in result["growth"]] == [3, 1, 2]
         assert [p.player_id for p in result["new_villages"]] == [3, 1, 2]
+        # gains carried in every ranking: P3 gained village 4, P1/P2 none
+        assert [p.gains for p in result["population"]] == [0, 1, 0]
+        assert [p.gains for p in result["growth"]] == [1, 0, 0]
+        assert [p.gains for p in result["new_villages"]] == [1, 0, 0]
 
     def test_rankings_respect_cap(self):
         curr = [_row(i, 7, i, population=100 + i) for i in range(1, 8)]
@@ -653,6 +657,7 @@ class TestTopPlayers:
         assert [p.player_id for p in result["growth"]] == [2, 1]
         assert all(p.growth is None for p in result["growth"])
         assert [p.player_id for p in result["new_villages"]] == [2, 1]
+        assert all(p.gains == 0 for p in result["new_villages"])
 
     def test_growth_int_when_prev_snapshot_empty(self):
         curr = [_row(1, 7, 1, population=100)]
@@ -662,6 +667,7 @@ class TestTopPlayers:
         assert result["population"][0].growth == 100
         assert result["growth"][0].growth == 100
         assert [p.player_id for p in result["new_villages"]] == [1]
+        assert result["population"][0].gains == 1
 
     def test_new_villages_ranking_uses_strict_gained(self):
         prev = [_row(1, 7, 1), _row(9, 8, 5), _row(5, 8, 5)]
@@ -678,6 +684,7 @@ class TestTopPlayers:
         ranking = top_players(curr, prev, {7})["new_villages"]
 
         assert [p.player_id for p in ranking] == [3, 1, 2]
+        assert [p.gains for p in ranking] == [2, 1, 1]  # P3 gained 4+6, P1 gained 2, P2 gained 3
 
     def test_tiebreak_by_player_id(self):
         prev = [_row(1, 7, 1, population=100), _row(2, 7, 2, population=100)]

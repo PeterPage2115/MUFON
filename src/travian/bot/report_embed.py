@@ -17,10 +17,8 @@ warning. The Regions field cap ``25 − fixed_after_splits`` is enforced
 via ``max_fields`` — the char budget always binds first in practice.
 
 Delta rendering: None → "—", 0 → "±0", >0 → "+N", <0 → "−N" (U+2212).
-DEVIATION: PlayerStat carries no gains count (T7 compromise), so the
-"Top Players — New Villages" field renders the player's current village
-count — the ranking ORDER carries the gains signal; v1.1 should add a
-``gains`` field to PlayerStat (see learnings T8).
+Top Players — New Villages renders the strict-gained count carried by
+``PlayerStat.gains`` ("+N villages"; "—" when gains is None).
 """
 
 import logging
@@ -215,7 +213,9 @@ def _top_player_lines(top_players: dict[str, list[PlayerStat]], key: str) -> lis
             ]
         case "new_villages":
             return [
-                strings.TOP_PLAYER_NEW_VILLAGES_LINE.format(player=s.player_name, villages=s.villages)
+                strings.TOP_PLAYER_NEW_VILLAGES_LINE.format(
+                    player=s.player_name, gains=s.gains if s.gains is not None else strings.DELTA_NONE
+                )
                 for s in stats
             ]
         case _:

@@ -46,7 +46,7 @@ OWNER_UNKNOWN = "unknown"
 # --- Top players ----------------------------------------------------------------
 TOP_PLAYER_POPULATION_LINE = "{player} — {population} ({villages})"
 TOP_PLAYER_GROWTH_LINE = "{player} — {growth}"
-TOP_PLAYER_NEW_VILLAGES_LINE = "{player} — {villages} villages"
+TOP_PLAYER_NEW_VILLAGES_LINE = "{player} — +{gains} villages"
 
 # --- Regions ---------------------------------------------------------------------
 REGION_LINE = "{region} — {villages} vil · {population} pop ({share}%) · {delta}"
