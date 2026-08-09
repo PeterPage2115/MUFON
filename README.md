@@ -74,7 +74,7 @@ as unset.
 | `DISCORD_TOKEN` | *(required)* | Bot token — env only, never in the DB. |
 | `CHANNEL_ID` | *(required)* | Channel where the daily report is posted. |
 | `ALLIANCE_TAGS` | *(empty)* | Comma-separated alliance tags, e.g. `AAA,BBB`. Empty → daily report skipped with a warning. |
-| `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** field, e.g. `AAA,BBB,CCC`. OUR tags (`ALLIANCE_TAGS`) are bold; empty → no Standings field. |
+| `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** card, e.g. `AAA,BBB,CCC`. OUR tags (`ALLIANCE_TAGS`) are marked ★; empty → no Standings card. |
 | `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server). |
 | `FETCH_HOUR` | `0` | Hour (24h) of the daily map.sql fetch. |
 | `FETCH_MINUTE` | `15` | Minute of the daily map.sql fetch. |
@@ -105,14 +105,16 @@ docker compose logs -f    # watch startup
 - On the very first run there is **no snapshot yet** — the daily report is
   skipped ("no data yet") until the first map.sql fetch completes. Use the
   dashboard **Fetch now** button (or wait for the scheduled fetch).
-- The report shows our summary (villages, population, players, VP,
-  regions controlled), new/lost villages, top players and victory points
-  — plus two fenced, monospace-aligned tables: **Standings** comparing
-  every `TRACKED_ALLIANCES` alliance (ours marked ★, population/VP
-  day-over-day deltas) and **Regions** with territory control % + bar,
-  population, daily VP Δ and the population still needed to reach 50%
-  (an alliance holding >50% of a region's population controls it — the
-  game rule) when configured.
+- The report is one message with up to 5 embed cards — Summary+KPI,
+  Regions, Standings, New & Lost Villages, Top Players+Victory Points —
+  each with `#`-headed sections. The **Standings** card is a fenced,
+  monospace-aligned table comparing every `TRACKED_ALLIANCES` alliance
+  (ours first, marked ★) with population/VP day-over-day deltas; the
+  **Regions** card shows territory control % + bar, population, daily
+  VP Δ and the population still needed to exceed 50%. A region is
+  active only with ≥ 4,000 total population, and control requires an
+  active region holding >50% of its population (game rule); inactive
+  regions are listed last with a `—` in To 50%.
 - The healthcheck (`/api/status`) only turns green with a **real**
   `DISCORD_TOKEN` in `.env` — the process exits with a clear error before the
   dashboard starts otherwise.

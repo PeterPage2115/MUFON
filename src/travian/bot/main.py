@@ -487,13 +487,13 @@ def _fetch_snapshot_phase(text: str) -> RunFetchStatus:
 class _ReportPhase:
     """Outcome of ``run_report``'s blocking read+compute phase.
 
-    ``action``: ``send`` (embed + snapshot_date ready, send on the loop),
+    ``action``: ``send`` (embeds + snapshot_date ready, send on the loop),
     ``no_data`` (no snapshots — send the no-data embed), ``stale`` /
     ``no_alliance`` / ``failed`` (already logged, nothing to send).
     """
 
     action: Literal["send", "no_data", "stale", "no_alliance", "failed"]
-    embed: discord.Embed | None = None
+    embeds: list[discord.Embed]
     snapshot_date: str = ""
 
 
@@ -513,11 +513,11 @@ def _report_phase(require_today: bool) -> _ReportPhase:
         latest = store.load_latest(conn)
         if latest is None:
             embed = discord.Embed(description=NO_DATA_YET, color=cfg.report_embed_color)
-            return _ReportPhase(action="no_data", embed=embed)
+            return _ReportPhase(action="no_data", embeds=[embed])
         expected = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
         if require_today and latest.snapshot_date != expected:
             store.append_log(conn, "report", "warning", "no snapshot for today, skipping")
-            return _ReportPhase(action="stale")
+            return _ReportPhase(action="stale", embeds=[])
         previous = _previous_date(conn, latest.snapshot_date)
         if previous is not None:
             gap = date.fromisoformat(latest.snapshot_date) - date.fromisoformat(previous)
@@ -528,25 +528,25 @@ def _report_phase(require_today: bool) -> _ReportPhase:
         resolved, unresolved = resolve_alliance_ids(curr_rows, cfg.alliance_tags, conn)
         if not resolved:
             store.append_log(conn, "report", "warning", "no alliance configured, skipping report")
-            return _ReportPhase(action="no_alliance")
+            return _ReportPhase(action="no_alliance", embeds=[])
         data = _build_report_data(cfg, latest.snapshot_date, curr_rows, prev_rows, resolved)
-        embed = build_report_embed(
+        embeds = build_report_embed(
             data,
             _resolved_tags(cfg.alliance_tags, unresolved),
             latest.snapshot_date,
             color=cfg.report_embed_color,
         )
-        return _ReportPhase(action="send", embed=embed, snapshot_date=latest.snapshot_date)
+        return _ReportPhase(action="send", embeds=embeds, snapshot_date=latest.snapshot_date)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         _record_failure("report", exc, conn)
-        return _ReportPhase(action="failed")
+        return _ReportPhase(action="failed", embeds=[])
     finally:
         if conn is not None:
             conn.close()
 
 
 async def run_report(channel_id: int, require_today: bool = True) -> RunReportStatus:
-    """Send the daily report embed to ``channel_id``.
+    """Send the daily report (up to 5 embeds in one message) to ``channel_id``.
 
     Order of checks: (1) ``load_latest``; (2) no snapshot at all → "no data
     yet" embed; (3) ``require_today`` and the latest snapshot is not today
@@ -582,9 +582,9 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
         channel = await _get_channel_on_loop(channel_id)
         if channel is None:
             return REPORT_STATUS_CHANNEL_NOT_FOUND
-        embed = phase.embed
-        assert embed is not None  # send/no_data always carry the embed (see _ReportPhase)
-        _ = await channel.send(embed=embed)
+        embeds = phase.embeds
+        assert embeds  # send/no_data always carry the embeds (see _ReportPhase)
+        _ = await channel.send(embeds=embeds)
         await asyncio.to_thread(_log_entry, "report", "info", message)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "report", exc)

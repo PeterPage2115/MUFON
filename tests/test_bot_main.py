@@ -114,10 +114,20 @@ def _seed(conn: sqlite3.Connection, day: date, rows: list[VillageRow]) -> None:
 
 class FakeChannel:
     def __init__(self) -> None:
-        self.sent: list[discord.Embed | None] = []
+        self.sent: list[list[discord.Embed]] = []
 
-    async def send(self, embed: discord.Embed | None = None, **kwargs: object) -> object:
-        self.sent.append(embed)
+    async def send(
+        self,
+        embed: discord.Embed | None = None,
+        embeds: list[discord.Embed] | None = None,
+        **kwargs: object,
+    ) -> object:
+        if embeds is not None:
+            self.sent.append(embeds)
+        elif embed is not None:
+            self.sent.append([embed])
+        else:
+            self.sent.append([])
         return object()
 
 
@@ -473,10 +483,11 @@ class TestRunReport:
         conn.close()
         channel = _install_bot({CHANNEL_ID: FakeChannel()})
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
-        assert len(channel.sent) == 1
-        embed = channel.sent[0]
-        assert isinstance(embed, discord.Embed)
-        assert "NOVA" in (embed.description or "")
+        assert len(channel.sent) == 1  # one message
+        sent = channel.sent[0]
+        assert 1 <= len(sent) <= 5  # up to 5 embeds in one message
+        assert all(isinstance(e, discord.Embed) for e in sent)
+        assert "NOVA" in (sent[0].description or "")
         logs = _logs(_db_path(tmp_path))
         assert any(
             entry["job"] == "report"
@@ -491,7 +502,9 @@ class TestRunReport:
         channel = _install_bot({CHANNEL_ID: FakeChannel()})
         asyncio.run(bot_main.run_report(CHANNEL_ID))
         assert len(channel.sent) == 1
-        embed = channel.sent[0]
+        sent = channel.sent[0]
+        assert len(sent) == 1
+        embed = sent[0]
         assert isinstance(embed, discord.Embed)
         assert embed.description == NO_DATA_YET
         logs = _logs(_db_path(tmp_path))
@@ -523,9 +536,10 @@ class TestRunReport:
         channel = _install_bot({CHANNEL_ID: FakeChannel()})
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=False))
         assert len(channel.sent) == 1
-        embed = channel.sent[0]
-        assert isinstance(embed, discord.Embed)
-        assert "NOVA" in (embed.description or "")
+        sent = channel.sent[0]
+        assert 1 <= len(sent) <= 5
+        assert all(isinstance(e, discord.Embed) for e in sent)
+        assert "NOVA" in (sent[0].description or "")
 
     @pytest.mark.parametrize("tags", ["NOPE", ""])
     def test_unresolved_or_empty_tags_skip(
