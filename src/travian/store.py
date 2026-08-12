@@ -262,7 +262,7 @@ def search_villages(conn: sqlite3.Connection, snapshot_date: str, query: str, li
             list[_VillageColumns],
             conn.execute(
                 "SELECT * FROM villages WHERE snapshot_date = ? AND x = ? AND y = ? "
-                "ORDER BY population DESC, village_id ASC LIMIT ?",
+                + "ORDER BY population DESC, village_id ASC LIMIT ?",
                 (snapshot_date, x, y, limit),
             ).fetchall(),
         )
@@ -272,9 +272,9 @@ def search_villages(conn: sqlite3.Connection, snapshot_date: str, query: str, li
             list[_VillageColumns],
             conn.execute(
                 "SELECT * FROM villages WHERE snapshot_date = ? AND ("
-                "name LIKE ? ESCAPE '\\' COLLATE NOCASE OR "
-                "player_name LIKE ? ESCAPE '\\' COLLATE NOCASE"
-                ") ORDER BY population DESC, village_id ASC LIMIT ?",
+                + "name LIKE ? ESCAPE '\\' COLLATE NOCASE OR "
+                + "player_name LIKE ? ESCAPE '\\' COLLATE NOCASE"
+                + ") ORDER BY population DESC, village_id ASC LIMIT ?",
                 (snapshot_date, pattern, pattern, limit),
             ).fetchall(),
         )

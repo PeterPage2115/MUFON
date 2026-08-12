@@ -943,7 +943,7 @@ def _dashboard_app_factory(env: Mapping[str, str], bot: TravianBot) -> Callable[
         cfg = await asyncio.to_thread(_current_config)
         if bot.scheduler is None:
             return "pending"
-        if bot._reschedule(cfg):
+        if bot._reschedule(cfg):  # pyright: ignore[reportPrivateUsage] — module-internal wiring
             _log_entry("config", "info", "scheduler rescheduled from dashboard settings")
             return "applied"
         return "unchanged"
