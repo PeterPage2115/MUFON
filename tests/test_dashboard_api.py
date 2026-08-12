@@ -20,6 +20,8 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar, cast
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import FastAPI
@@ -28,6 +30,7 @@ from fastapi.testclient import TestClient
 from travian import store
 from travian.bot import main as bot_main
 from travian.dashboard import app as dashboard_app
+from travian.dashboard import auth as dashboard_auth
 from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
 from travian.models import VillageRow
 
@@ -1003,6 +1006,249 @@ class TestAuthMiddleware:
             assert client.get("/api/status").status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
+
+
+class TestAuthModes:
+    def test_explicit_none_overrides_non_loopback_bind(self, tmp_path: Path) -> None:
+        db = tmp_path / "am.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_AUTH_MODE="none")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/status").status_code == 200
+
+    def test_oauth_without_oauth_env_falls_back_to_token(self, tmp_path: Path) -> None:
+        # Loopback bind + DASHBOARD_AUTH_MODE=oauth but no OAUTH_* keys: the
+        # safe default is token mode (the token is required even on loopback
+        # then — never silent openness).
+        db = tmp_path / "am.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_AUTH_MODE="oauth", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/status").status_code == 401
+            assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
+
+    def test_oauth_complete_requires_session(self, tmp_path: Path) -> None:
+        db = tmp_path / "am.db"
+        _seed_db(db)
+        env = _env(
+            DASHBOARD_AUTH_MODE="oauth",
+            OAUTH_CLIENT_ID="cid",
+            OAUTH_CLIENT_SECRET="csec",
+            OAUTH_GUILD_ID="100",
+        )
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/status").status_code == 401
+            assert client.get("/api/status", headers={"Authorization": "Bearer bogus"}).status_code == 401
+
+    def test_legacy_loopback_no_token(self, tmp_path: Path) -> None:
+        # Unset DASHBOARD_AUTH_MODE + loopback bind → legacy "none".
+        db = tmp_path / "am.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:  # bind 127.0.0.1
+            assert client.get("/api/status").status_code == 200
+
+
+class TestOAuthFlow:
+    OAUTH_ENV: ClassVar[dict[str, str]] = {
+        "DASHBOARD_AUTH_MODE": "oauth",
+        "OAUTH_CLIENT_ID": "cid",
+        "OAUTH_CLIENT_SECRET": "csec",
+        "OAUTH_GUILD_ID": "100",
+        "ADMIN_ROLE_ID": "555",
+    }
+
+    #: Distinguishes "not given" from an explicit None (member endpoint 404).
+    _MEMBER_MISSING = object()
+
+    def _client(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        member: object = _MEMBER_MISSING,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> TestClient:
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        env = _env(**self.OAUTH_ENV)
+        if member is self._MEMBER_MISSING:
+            member = {"roles": []}
+        member_obj = cast(dict[str, object] | None, member)
+        self.exchange_calls: list[tuple[str, str, str, str]] = []
+
+        def fake_exchange(client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict[str, object]:
+            self.exchange_calls.append((client_id, client_secret, code, redirect_uri))
+            return {"access_token": "at-fake"}
+
+        monkeypatch.setattr(dashboard_auth, "exchange_code", fake_exchange)
+        monkeypatch.setattr(dashboard_auth, "fetch_user", lambda token: {"id": "u1", "username": "Tester"})
+        monkeypatch.setattr(dashboard_auth, "fetch_guild_member", lambda token, guild_id: member_obj)
+        monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: [])
+        return TestClient(_app(db, env, loop=loop), follow_redirects=False)
+
+    def test_login_redirects_to_discord_with_state(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        with client:
+            res = client.get("/api/auth/login")
+
+        assert res.status_code == 302
+        location = res.headers["location"]
+        assert location.startswith("https://discord.com/oauth2/authorize?")
+        qs = parse_qs(urlparse(location).query)
+        assert qs["client_id"] == ["cid"]
+        assert qs["state"]
+        assert qs["redirect_uri"] == ["http://testserver/api/auth/callback"]
+        assert qs["scope"] == ["identify guilds guilds.members.read"]
+
+    def test_login_not_enabled_in_token_mode(self, tmp_path: Path) -> None:
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:  # token-mode env
+            res = client.get("/api/auth/login")
+
+        assert res.status_code == 409
+        assert res.json() == {"error": "oauth not enabled"}
+
+    def test_callback_invalid_state(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        with client:
+            res = client.get("/api/auth/callback?code=x&state=bogus")
+
+        assert res.status_code == 302
+        assert res.headers["location"] == "/?#auth_error=invalid_state"
+
+    def test_callback_missing_params(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        with client:
+            assert client.get("/api/auth/callback").status_code == 302
+            assert client.get("/api/auth/callback?code=x").status_code == 302
+
+    def test_callback_exchange_error(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        with client:
+            state = self._login_state(client)
+
+            def boom(*args: object, **kwargs: object) -> dict[str, object]:
+                raise httpx.HTTPError("boom")
+
+            monkeypatch.setattr(dashboard_auth, "exchange_code", boom)
+            res = client.get(f"/api/auth/callback?code=x&state={state}")
+
+        assert res.status_code == 302
+        assert res.headers["location"] == "/?#auth_error=login_failed"
+
+    def test_full_flow_member_readonly(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)  # member without admin role
+        with client:
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+            assert res.status_code == 302
+            location = res.headers["location"]
+            assert location.startswith("/?session=")
+            token = location.split("session=", 1)[1]
+
+            # The exchange saw the right arguments.
+            assert self.exchange_calls == [("cid", "csec", "thecode", "http://testserver/api/auth/callback")]
+
+            # Session works for data endpoints.
+            headers = {"Authorization": f"Bearer {token}"}
+            assert client.get("/api/status", headers=headers).status_code == 200
+            status = client.get("/api/auth/status", headers=headers).json()
+            assert status == {"method": "oauth", "user": {"name": "Tester", "admin": False}}
+
+            # Member: read-only — settings and actions are 403.
+            assert client.get("/api/settings", headers=headers).status_code == 403
+            assert client.get("/api/settings", headers=headers).json() == {"error": "admin required"}
+            assert client.post("/api/actions/fetch", headers=headers).status_code == 403
+
+            # Logout kills the session.
+            assert client.post("/api/auth/logout", headers=headers).status_code == 204
+            assert client.get("/api/status", headers=headers).status_code == 401
+
+    def test_admin_gets_settings_and_actions(self, tmp_path: Path, monkeypatch) -> None:
+        loop = LoopThread()
+        try:
+            client = self._client(tmp_path, monkeypatch, member={"roles": ["555"]}, loop=loop.loop)
+            with client:
+                state = self._login_state(client)
+                res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+                token = res.headers["location"].split("session=", 1)[1]
+                headers = {"Authorization": f"Bearer {token}"}
+
+                assert client.get("/api/settings", headers=headers).status_code == 200
+                assert client.get("/api/auth/status", headers=headers).json()["user"] == {
+                    "name": "Tester",
+                    "admin": True,
+                }
+                # fetch dispatches to the fake run function on the bot loop.
+                res = client.post("/api/actions/fetch", headers=headers)
+                assert res.status_code == 200
+                assert res.json() == {"status": "ok", "message": "completed"}
+        finally:
+            loop.stop()
+
+    def test_callback_not_a_member(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch, member=None)  # member endpoint 404s, guilds empty
+        with client:
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=x&state={state}")
+
+        assert res.status_code == 302
+        assert res.headers["location"] == "/?#auth_error=not_a_member"
+
+    @staticmethod
+    def _login_state(client: TestClient) -> str:
+        res = client.get("/api/auth/login")
+        assert res.status_code == 302
+        return parse_qs(urlparse(res.headers["location"]).query)["state"][0]
+
+
+class TestRateLimit:
+    def test_actions_limited_per_window(self, tmp_path: Path) -> None:
+        db = tmp_path / "rl.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            headers = {"Authorization": "Bearer sekret"}
+            statuses = [client.post("/api/actions/fetch", headers=headers).status_code for _ in range(7)]
+
+        # 6 allowed (409 = bot not ready, past the middleware), then 429.
+        assert statuses[:6] == [409] * 6
+        assert statuses[6] == 429
+        limited = client.post("/api/actions/fetch", headers=headers)
+        assert limited.status_code == 429
+        assert limited.json() == {"error": "rate limited"}
+        assert int(limited.headers["Retry-After"]) > 0
+
+
+class TestAuthStatus:
+    def test_public_in_token_mode(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            res = client.get("/api/auth/status")
+
+        assert res.status_code == 200
+        assert res.json() == {"method": "token", "user": None}
+
+    def test_public_in_none_mode(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:  # loopback → none
+            assert client.get("/api/auth/status").json() == {"method": "none", "user": None}
+
+    def test_public_in_oauth_mode_without_session(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_db(db)
+        env = _env(
+            DASHBOARD_AUTH_MODE="oauth",
+            OAUTH_CLIENT_ID="cid",
+            OAUTH_CLIENT_SECRET="csec",
+            OAUTH_GUILD_ID="100",
+        )
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/auth/status").json() == {"method": "oauth", "user": None}
 
 
 # --- uvicorn bootstrap (bot.main.start_dashboard) ------------------------------

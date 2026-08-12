@@ -43,17 +43,30 @@ Endpoints:
   or an unknown date → 422 listing the valid dates).
 - ``GET /api/analysis/deltas?days=30`` — headline history with day-over-day
   deltas (``None`` on the oldest date).
+- ``GET /api/analysis/regions|events|deltas?alliance=<tag>`` — per-alliance
+  filtering (``combined``/absent = union of ``ALLIANCE_TAGS``; unknown tag →
+  422 listing the valid tags).
+- ``GET /api/auth/status`` — public: ``{"method": ..., "user": ...}`` for the
+  auth-aware UI.
+- ``GET /api/auth/login`` — public: 302 to Discord's authorization endpoint
+  (oauth mode; 409 otherwise).
+- ``GET /api/auth/callback`` — public: Discord redirect; always 302, either
+  to ``/?session=<token>`` or ``/?auth_error=<reason>``.
+- ``POST /api/auth/logout`` — public: invalidates the Bearer session (204).
 
-Auth middleware: active ONLY when ``DASHBOARD_BIND`` is not a loopback
-address AND ``DASHBOARD_LOOPBACK_ONLY != "true"`` (compose historically set
-it to "true" because the host published loopback-only); then every ``/api/*``
-route requires ``Authorization: Bearer <DASHBOARD_TOKEN>`` (401 otherwise —
-and 401 always when the token env is empty while the middleware is active).
-The static UI (``/``, ``/static/*``) and the ``/healthz`` probe stay public
-so the browser can load the page and the container HEALTHCHECK works without
-a token; the UI authenticates the API calls with the token the operator
-enters. The decision is computed once at app creation: env is static for the
-process.
+Auth: one of three modes, computed once at app creation from env
+(``_auth_method``): ``token`` (``Authorization: Bearer <DASHBOARD_TOKEN>``,
+compared constant-time; token possession = admin), ``oauth`` (Discord OAuth
+sessions from ``auth.SessionStore``; RBAC: members read-only, admins full —
+``GET/PUT /api/settings`` and ``POST /api/actions/*`` return 403 for
+members) and ``none`` (everything open, loopback use only). Admin actions
+are rate-limited per user (``ActionLimiter``, 6/60 s → 429 + ``Retry-After``;
+key = session token in oauth mode, client IP in token mode). The static UI
+(``/``, ``/static/*``), ``/healthz`` and the whole ``/api/auth/*`` surface
+are always public — the browser loads the page and logs in without
+credentials, then authenticates every other API call. OAuth sessions are
+in-memory (restart logs everyone out) and the redirect state tokens live
+10 minutes.
 
 - ``GET /healthz`` — always ``{"status": "ok"}``, never token-protected:
   the container HEALTHCHECK probe (the app only starts serving after
@@ -74,21 +87,28 @@ and endpoints share this file by plan contract — same rationale as the
 from __future__ import annotations
 
 import asyncio
+import hmac
+import logging
+import secrets
 import sqlite3
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Final, Protocol, TypedDict, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from travian import analysis, store
+from travian.dashboard import auth
 from travian.metrics import region_stats, village_events
 from travian.models import RegionDay, VillageEvent
+
+logger = logging.getLogger(__name__)
 
 #: Static UI directory — populated by task 13 (index.html/style.css/app.js).
 STATIC_DIR: Final = Path(__file__).resolve().parent / "static"
@@ -256,6 +276,53 @@ def _auth_required(env: Mapping[str, str]) -> bool:
     static for the process.
     """
     return not _is_loopback(env.get("DASHBOARD_BIND", "127.0.0.1")) and env.get("DASHBOARD_LOOPBACK_ONLY") != "true"
+
+
+def _auth_method(env: Mapping[str, str]) -> str:
+    """Resolve the dashboard auth mode from env, once at app creation.
+
+    - ``DASHBOARD_AUTH_MODE=none`` → "none".
+    - ``oauth`` complete (all ``OAUTH_*`` set) → "oauth"; a missing key →
+      warning + fallback to "token" (safe default, never silent openness).
+    - anything else (unset or ``token``) → the legacy heuristic: "token"
+      when the dashboard is reachable beyond loopback, else "none".
+    """
+    mode = env.get("DASHBOARD_AUTH_MODE", "").strip().lower()
+    if mode == "none":
+        return "none"
+    if mode == "oauth":
+        if env.get("OAUTH_CLIENT_ID") and env.get("OAUTH_CLIENT_SECRET") and env.get("OAUTH_GUILD_ID"):
+            return "oauth"
+        logger.warning(
+            "DASHBOARD_AUTH_MODE=oauth requires OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET and OAUTH_GUILD_ID — falling back to token mode"
+        )
+        return "token"
+    return "token" if _auth_required(env) else "none"
+
+
+#: OAuth login state tokens (state → expiry, UTC). Module-level so every app
+#: instance of the single dashboard process shares them; entries live 10
+#: minutes and are pruned lazily on write.
+_oauth_states: dict[str, datetime] = {}
+_oauth_states_lock = threading.Lock()
+
+
+def _store_oauth_state(state: str, expires: datetime) -> None:
+    with _oauth_states_lock:
+        now = datetime.now(UTC)
+        for stale in [token for token, exp in _oauth_states.items() if exp <= now]:
+            del _oauth_states[stale]
+        _oauth_states[state] = expires
+
+
+def _consume_oauth_state(state: str) -> bool:
+    """True (and consumed) when ``state`` is known and unexpired."""
+    with _oauth_states_lock:
+        entry = _oauth_states.get(state)
+        if entry is None:
+            return False
+        del _oauth_states[state]
+        return entry > datetime.now(UTC)
 
 
 def _next_occurrence(hour: int, minute: int, tz_name: str) -> str:
@@ -504,21 +571,54 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     unused-function check stays silent (decorator form would flag them).
     """
     app = FastAPI(title="travian report bot dashboard", docs_url=None, redoc_url=None, openapi_url=None)
-    auth_required = _auth_required(deps.env)
+    auth_method = _auth_method(deps.env)
+    session_store = auth.SessionStore()
+    action_limiter = auth.ActionLimiter()  # 6 actions / 60 s per user
     db_path = _db_path(deps.env)
+
+    def _is_public(path: str) -> bool:
+        # The static UI, the healthcheck probe and the whole /api/auth/*
+        # surface stay public so the browser can load the page and log in
+        # without credentials; every other /api/* route is protected.
+        return path == "/" or path == "/healthz" or path.startswith(("/static/", "/api/auth/"))
+
+    def _rate_limited(path: str, method: str, key: str) -> bool:
+        if not (path.startswith("/api/actions/") or (path == "/api/settings" and method == "PUT")):
+            return False
+        return not action_limiter.allow(key)
 
     async def _auth_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        # Only the API is sensitive; the static UI (/, /static/*, /healthz)
-        # stays public so the browser can load it — the UI then authenticates
-        # every API call with the token the operator enters (app.js sends
-        # Authorization: Bearer <token> from the login dialog). /healthz is
-        # the container HEALTHCHECK probe and must stay token-free.
-        if auth_required and request.url.path.startswith("/api/"):
-            token = deps.env.get("DASHBOARD_TOKEN", "")
-            if not token or request.headers.get("authorization") != f"Bearer {token}":
+        path = request.url.path
+        if _is_public(path) or not path.startswith("/api/"):
+            return await call_next(request)
+        if auth_method == "none":
+            return await call_next(request)
+
+        supplied = request.headers.get("authorization", "")
+        bearer = supplied[len("Bearer ") :] if supplied.startswith("Bearer ") else ""
+        if auth_method == "token":
+            expected = deps.env.get("DASHBOARD_TOKEN", "")
+            # Constant-time comparison; an empty expected token rejects
+            # everything (the middleware being active without a token is a
+            # configuration error and must not silently open the API).
+            if not expected or not bearer or not hmac.compare_digest(bearer, expected):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
+            rate_key = request.client.host if request.client is not None else "unknown"
+        else:  # oauth
+            session = session_store.get(bearer) if bearer else None
+            if session is None:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            request.state.user = session
+            rate_key = session.token
+
+        if _rate_limited(path, request.method, rate_key):
+            return JSONResponse(
+                {"error": "rate limited"},
+                status_code=429,
+                headers={"Retry-After": str(action_limiter.retry_after(rate_key))},
+            )
         return await call_next(request)
 
     def index() -> FileResponse:
@@ -536,14 +636,99 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         """
         return {"status": "ok"}
 
+    def _admin_ok(request: Request) -> bool:
+        """RBAC gate: token mode treats token possession as admin; oauth mode
+        requires the session's ``admin`` flag (the middleware has already
+        401'd non-sessions)."""
+        if auth_method != "oauth":
+            return True
+        user = getattr(request.state, "user", None)
+        return isinstance(user, auth.Session) and user.admin
+
+    async def auth_status(request: Request) -> dict[str, object]:
+        """Public: the active auth method + the logged-in user (oauth only)."""
+        user: dict[str, object] | None = None
+        if auth_method == "oauth":
+            supplied = request.headers.get("authorization", "")
+            if supplied.startswith("Bearer "):
+                session = session_store.get(supplied[len("Bearer ") :])
+                if session is not None:
+                    user = {"name": session.username, "admin": session.admin}
+        return {"method": auth_method, "user": user}
+
+    def auth_login(request: Request) -> Response:
+        """Public: redirect to Discord's authorization page (oauth mode)."""
+        if auth_method != "oauth":
+            return JSONResponse({"error": "oauth not enabled"}, status_code=409)
+        state = secrets.token_urlsafe(16)
+        _store_oauth_state(state, datetime.now(UTC) + timedelta(minutes=10))
+        redirect_uri = str(request.base_url) + "api/auth/callback"
+        client_id = deps.env.get("OAUTH_CLIENT_ID", "")
+        return RedirectResponse(auth.authorize_url(client_id, redirect_uri, state), status_code=302)
+
+    async def auth_callback(request: Request) -> Response:
+        """Public: Discord redirect target — exchanges the code, resolves
+        member/admin and lands on ``/?session=<token>`` (the UI adopts it).
+        Failures redirect to ``/?auth_error=<reason>``; always 302."""
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        if not code or not state or not _consume_oauth_state(state):
+            return RedirectResponse("/?#auth_error=invalid_state", status_code=302)
+        redirect_uri = str(request.base_url) + "api/auth/callback"
+        client_id = deps.env.get("OAUTH_CLIENT_ID", "")
+        client_secret = deps.env.get("OAUTH_CLIENT_SECRET", "")
+        try:
+            token_data = await asyncio.to_thread(auth.exchange_code, client_id, client_secret, code, redirect_uri)
+            access_token_raw = token_data.get("access_token")
+            if not isinstance(access_token_raw, str):
+                return RedirectResponse("/?#auth_error=login_failed", status_code=302)
+            user = await asyncio.to_thread(auth.fetch_user, access_token_raw)
+            member = await asyncio.to_thread(auth.fetch_guild_member, access_token_raw, deps.env.get("OAUTH_GUILD_ID", ""))
+            # Member-endpoint fallback: the guilds list alone can still prove
+            # membership (and carries the Manage Server permission bit).
+            if member is None:
+                guilds = await asyncio.to_thread(auth.fetch_guilds, access_token_raw)
+            else:
+                guilds = []
+        except Exception:  # noqa: BLE001 — any OAuth failure is a login failure, never a crash
+            return RedirectResponse("/?#auth_error=login_failed", status_code=302)
+        guild_id_raw = deps.env.get("OAUTH_GUILD_ID", "")
+        try:
+            guild_id = int(guild_id_raw)
+        except ValueError:
+            return RedirectResponse("/?#auth_error=login_failed", status_code=302)
+        cfg = deps.get_config()
+        is_member, is_admin = auth.resolve_admin(member, guilds, guild_id, cfg.admin_role_id)
+        if not is_member:
+            return RedirectResponse("/?#auth_error=not_a_member", status_code=302)
+        user_id_raw = user.get("id")
+        username_raw = user.get("username")
+        user_id = str(user_id_raw) if user_id_raw is not None else ""
+        username = str(username_raw) if username_raw is not None else "unknown"
+        token = session_store.create(user_id, username, is_admin)
+        return RedirectResponse(f"/?session={token}", status_code=302)
+
+    async def auth_logout(request: Request) -> Response:
+        """Public: invalidate the session from the Bearer header (204)."""
+        supplied = request.headers.get("authorization", "")
+        if supplied.startswith("Bearer "):
+            session_store.delete(supplied[len("Bearer ") :])
+        return Response(status_code=204)
+
     async def status() -> StatusData:
         return await asyncio.to_thread(deps.get_status)
 
-    async def get_settings() -> SettingsPayload:
+    async def get_settings(request: Request) -> Response:
+        # Settings are configuration — in oauth mode only admins may read
+        # them (members get data via /api/status and /api/analysis/*).
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
         cfg = await asyncio.to_thread(deps.get_config)
-        return _settings_payload(cfg)
+        return JSONResponse(_settings_payload(cfg))
 
-    async def put_settings(payload: dict[str, object]) -> Response:
+    async def put_settings(request: Request, payload: dict[str, object]) -> Response:
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
         validated = _validate_payload(payload)
 
         def write() -> SettingsPayload:
@@ -556,7 +741,9 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return JSONResponse(await asyncio.to_thread(write))
 
-    async def fetch_now() -> Response:
+    async def fetch_now(request: Request) -> Response:
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
         loop = deps.bot_loop_getter()
         if loop is None:
             return JSONResponse({"error": "bot not ready"}, status_code=409)
@@ -567,7 +754,9 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             return JSONResponse({"error": "fetch timed out"}, status_code=504)
         return JSONResponse({"status": "ok", "message": result})
 
-    async def report_now() -> Response:
+    async def report_now(request: Request) -> Response:
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
         loop = deps.bot_loop_getter()
         if loop is None:
             return JSONResponse({"error": "bot not ready"}, status_code=409)
@@ -744,6 +933,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/healthz")(healthz)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    _ = app.get("/api/auth/status")(auth_status)
+    _ = app.get("/api/auth/login")(auth_login)
+    _ = app.get("/api/auth/callback")(auth_callback)
+    _ = app.post("/api/auth/logout")(auth_logout)
     _ = app.get("/api/status")(status)
     _ = app.get("/api/settings")(get_settings)
     _ = app.put("/api/settings")(put_settings)

@@ -256,6 +256,52 @@ code,
   box-shadow: 0 0 8px rgba(209, 168, 74, 0.65);
 }
 
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-default);
+}
+
+.user-chip__name {
+  color: var(--text-primary);
+  font-weight: 650;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-chip__role {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-gold-soft);
+}
+
+.user-chip__logout {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font: inherit;
+  font-family: inherit;
+  padding: 0;
+}
+
+.user-chip__logout:hover {
+  color: var(--status-error);
+}
+
+/* Member (read-only) OAuth view: Settings and Actions are admin-only. */
+.is-member .card--settings,
+.is-member .card--actions {
+  display: none;
+}
+
 /* --- Page intro -------------------------------------------------------------- */
 
 .page-intro {
@@ -1482,6 +1528,21 @@ tr.is-inactive td {
 
 .token-dialog::backdrop {
   background: rgba(4, 6, 4, 0.72);
+}
+
+/* Fallback for browsers without <dialog>.showModal(): fixed full-screen
+   overlay centering the dialog box. */
+.token-dialog--inline {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  max-width: none;
+  max-height: none;
+  width: 100%;
 }
 
 .token-dialog__form {

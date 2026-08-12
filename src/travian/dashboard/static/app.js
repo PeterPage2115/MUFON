@@ -181,6 +181,74 @@
   var TOKEN_KEY = "dashboard_token";
   var tokenDialogShown = false;
 
+  // OAuth callback lands on /?session=<token> — adopt it into localStorage
+  // and drop the parameter (the UI then authenticates like any token).
+  var urlParams = new URLSearchParams(window.location.search);
+  var urlSession = urlParams.get("session");
+  if (urlSession) {
+    localStorage.setItem(TOKEN_KEY, urlSession);
+  }
+  if (urlSession || urlParams.get("auth_error")) {
+    history.replaceState({}, "", window.location.pathname);
+  }
+
+  var authState = { method: "token", user: null };
+
+  function renderUserChip() {
+    var chip = document.getElementById("user-chip");
+    if (!chip) return;
+    chip.textContent = "";
+    if (authState.method !== "oauth" || !authState.user) {
+      chip.hidden = true;
+      return;
+    }
+    chip.hidden = false;
+
+    var name = document.createElement("span");
+    name.className = "user-chip__name";
+    name.textContent = authState.user.name;
+
+    var role = document.createElement("span");
+    role.className = "user-chip__role";
+    role.textContent = authState.user.admin ? "admin" : "member";
+
+    var logout = document.createElement("button");
+    logout.type = "button";
+    logout.className = "user-chip__logout";
+    logout.textContent = "Log out";
+    logout.addEventListener("click", function () {
+      request("POST", "/api/auth/logout")
+        .catch(function () {}) // 401 on an already-dead session is fine
+        .then(function () {
+          localStorage.removeItem(TOKEN_KEY);
+          window.location.reload();
+        });
+    });
+
+    chip.appendChild(name);
+    chip.appendChild(role);
+    chip.appendChild(logout);
+  }
+
+  function loadAuthStatus() {
+    return fetch("/api/auth/status", { headers: { Accept: "application/json" } })
+      .then(function (res) {
+        return res.status === 200 ? res.json() : null;
+      })
+      .catch(function () {
+        return null;
+      })
+      .then(function (data) {
+        if (!data) return;
+        authState.method = data.method;
+        authState.user = data.user || null;
+        renderUserChip();
+        if (authState.user && !authState.user.admin) {
+          document.body.classList.add("is-member");
+        }
+      });
+  }
+
   function ensureTokenDialog() {
     var existing = document.getElementById("token-dialog");
     if (existing) return existing;
@@ -219,9 +287,35 @@
     if (tokenDialogShown) return;
     tokenDialogShown = true;
     var dialog = ensureTokenDialog();
-    if (typeof dialog.showModal === "function") dialog.showModal();
-    var input = document.getElementById("token-input");
-    if (input) input.focus();
+    // Auth-aware content: oauth mode offers the Discord login (the token
+    // field is meaningless there); token mode keeps the classic form.
+    fetch("/api/auth/status", { headers: { Accept: "application/json" } })
+      .then(function (res) {
+        return res.status === 200 ? res.json() : null;
+      })
+      .catch(function () {
+        return null;
+      })
+      .then(function (data) {
+        var form = dialog.querySelector("#token-form");
+        if (!form) return;
+        if (data && data.method === "oauth") {
+          form.innerHTML =
+            '<p class="overline">Sign in required</p>' +
+            '<p class="token-dialog__copy">This dashboard is protected. Sign in with your Discord account.</p>' +
+            '<a class="button button--primary" href="/api/auth/login">Sign in with Discord</a>';
+          return;
+        }
+        var input = document.getElementById("token-input");
+        if (input) input.focus();
+      });
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      // Fallback for browsers without <dialog> support: inline overlay.
+      dialog.setAttribute("open", "");
+      dialog.classList.add("token-dialog--inline");
+    }
   }
 
   /* --- toasts ---------------------------------------------------------------- */
@@ -1635,6 +1729,7 @@
     loadStatus();
     loadSettings();
     loadLogs();
+    loadAuthStatus();
     window.setInterval(loadLogs, LOG_REFRESH_MS);
 
     els.fetchButton.addEventListener("click", function () {
