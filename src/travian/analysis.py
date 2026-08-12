@@ -14,6 +14,7 @@ value minus the previous date's, ``None`` for the first date (the same
 semantics as ``metrics.compute_deltas``).
 """
 
+from datetime import date
 from typing import cast
 
 from travian.models import AllianceDay, RegionDay, RegionStat, SummaryDay
@@ -93,16 +94,27 @@ def standings_series(days: list[AllianceDay], our_tags: set[str]) -> list[dict[s
 def summary_history(days: list[SummaryDay]) -> list[dict[str, object]]:
     """Per-date headline history with day-over-day deltas.
 
-    Each row: ``{date, villages, population, players, vp, villages_delta,
-    population_delta, players_delta, vp_delta}`` — deltas vs the previous
-    date, ``None`` for the first date (``compute_deltas`` semantics).
+    Each row: ``{date, previous_date, elapsed_days, villages, population,
+    players, vp, villages_delta, population_delta, players_delta,
+    vp_delta}`` — deltas vs the previous date, ``None`` for the first date
+    (``compute_deltas`` semantics). ``previous_date``/``elapsed_days`` carry
+    the ACTUAL comparison horizon (the calendar difference between the two
+    snapshot dates, even when it is 1), so the UI can honestly mark deltas
+    computed across a gap — the delta values themselves are unchanged.
     """
     rows: list[dict[str, object]] = []
     prev: SummaryDay | None = None
     for day in days:
+        previous_date: str | None = None
+        elapsed_days: int | None = None
+        if prev is not None:
+            previous_date = prev.date
+            elapsed_days = (date.fromisoformat(day.date) - date.fromisoformat(prev.date)).days
         rows.append(
             {
                 "date": day.date,
+                "previous_date": previous_date,
+                "elapsed_days": elapsed_days,
                 "villages": day.villages,
                 "population": day.population,
                 "players": day.players,

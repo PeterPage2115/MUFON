@@ -19,6 +19,7 @@ from travian.models import (
     AllianceDay,
     RegionDay,
     SummaryDay,
+    VillageHistoryPoint,
     VillageRow,
 )
 from travian.store import (
@@ -36,9 +37,11 @@ from travian.store import (
     recent_logs,
     region_days,
     save_snapshot,
+    search_villages,
     set_settings,
     snapshot_counts,
     summary_days,
+    village_history,
 )
 
 
@@ -483,3 +486,109 @@ def test_recent_logs_limits_when_n_smaller_than_count(conn: sqlite3.Connection) 
 
 def test_recent_logs_empty_when_no_logs(conn: sqlite3.Connection) -> None:
     assert recent_logs(conn) == []
+
+
+# --- village explorer -------------------------------------------------------
+
+
+class TestSearchVillages:
+    def test_matches_name_and_player_literally(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-09",
+            [make_row(1, name="Alpha Keep", player_name="Skipper"), make_row(2, name="Beta Camp", player_name="Ranger")],
+        )
+
+        by_name = search_villages(conn, "2026-08-09", "alpha", 50)
+        by_player = search_villages(conn, "2026-08-09", "Ranger", 50)
+
+        assert [row.village_id for row in by_name] == [1]  # NOCASE
+        assert [row.village_id for row in by_player] == [2]
+
+    def test_positive_and_negative_coords_both_separators(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-09",
+            [make_row(1, x=7, y=7), make_row(2, x=-3, y=-2), make_row(3, x=9, y=9)],
+        )
+
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "7|7", 50)] == [1]
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "7,7", 50)] == [1]
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", " 7 | 7 ", 50)] == [1]
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "-3,-2", 50)] == [2]
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "-3 | -2", 50)] == [2]
+
+    def test_like_metacharacters_are_escaped(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-09",
+            [make_row(1, name="100%_win"), make_row(2, name="1000_win"), make_row(3, name="back\\slash")],
+        )
+
+        # "100%_win" must match only the literal row, not the "1000_win" row.
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "100%_win", 50)] == [1]
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "back\\slash", 50)] == [3]
+
+    def test_results_sorted_by_population_then_limited(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-09",
+            [
+                make_row(1, name="Keep A", population=100),
+                make_row(2, name="Keep B", population=300),
+                make_row(3, name="Keep C", population=200),
+            ],
+        )
+
+        rows = search_villages(conn, "2026-08-09", "Keep", 2)
+
+        assert [row.village_id for row in rows] == [2, 3]  # pop DESC, then limit
+
+    def test_search_scoped_to_snapshot_date(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(1, name="Old Keep")])
+        save_snapshot(conn, "2026-08-09", [make_row(2, name="New Keep")])
+
+        assert [row.village_id for row in search_villages(conn, "2026-08-09", "Keep", 50)] == [2]
+
+
+class TestVillageHistory:
+    def test_observations_chronologically_ascending(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(7, population=100, player_name="Old Owner", alliance_tag="OLD")])
+        save_snapshot(conn, "2026-08-09", [make_row(7, population=150, player_name="New Owner", alliance_tag="NEW")])
+        save_snapshot(conn, "2026-08-10", [make_row(7, population=180, player_name="New Owner", alliance_tag="NEW")])
+
+        points = village_history(conn, 7, 30)
+
+        assert [p.snapshot_date for p in points] == ["2026-08-08", "2026-08-09", "2026-08-10"]
+        assert points[-1].population == 180
+        assert points[0].player_name == "Old Owner"
+        assert points[-1] == VillageHistoryPoint(
+            snapshot_date="2026-08-10",
+            name=points[-1].name,
+            x=points[-1].x,
+            y=points[-1].y,
+            player_name="New Owner",
+            alliance_tag="NEW",
+            population=180,
+        )
+
+    def test_days_caps_newest_observations(self, conn: sqlite3.Connection) -> None:
+        for day in ("2026-08-06", "2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10"):
+            save_snapshot(conn, day, [make_row(7, population=100)])
+
+        points = village_history(conn, 7, days=2)
+
+        assert [p.snapshot_date for p in points] == ["2026-08-09", "2026-08-10"]
+
+    def test_deleted_village_keeps_history_without_latest_observation(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(4)])
+        save_snapshot(conn, "2026-08-09", [])  # village gone from the map
+
+        points = village_history(conn, 4, 30)
+
+        assert [p.snapshot_date for p in points] == ["2026-08-08"]  # still has history
+
+    def test_unknown_id_returns_empty(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-09", [make_row(1)])
+
+        assert village_history(conn, 999, 30) == []

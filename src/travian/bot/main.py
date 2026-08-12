@@ -90,6 +90,14 @@ DECISIONS (documented for the plan):
   ``asyncio.run_coroutine_threadsafe``; actions before ``on_ready`` → 409
   "bot not ready".
 
+- **Settings→scheduler sync (iteration 2)**: the dashboard factory is bound
+  to the concrete ``TravianBot``; ``PUT /api/settings`` schedule changes are
+  dispatched onto the bot loop via ``run_coroutine_threadsafe`` and land in
+  ``TravianBot._reschedule`` (compares fetch/report ``(hour, minute, tz)``
+  tuples, reschedules only changed jobs). ``on_ready`` re-reads the settings
+  table before creating triggers, so saves made before startup are honored
+  without a reschedule.
+
 allow: SIZE_OK — the plan pins ``bot/main.py`` as the single bot module
 (tasks 9-11 reference only this file plus ``commands.py``), so config merge,
 run functions, jobs, the bot class and the entry point share this file by
@@ -177,6 +185,13 @@ REPORT_STATUS_NO_DATA: Final[RunReportStatus] = "no data yet"
 REPORT_STATUS_NO_ALLIANCE: Final[RunReportStatus] = "no alliance"
 REPORT_STATUS_CHANNEL_NOT_FOUND: Final[RunReportStatus] = "channel not found"
 REPORT_STATUS_FAILED: Final[RunReportStatus] = "failed"
+
+#: Dashboard settings→scheduler sync outcomes (iteration 2):
+#: - ``applied`` — at least one trigger was rescheduled from the saved config;
+#: - ``unchanged`` — the saved schedule matches the running triggers;
+#: - ``pending`` — the bot loop/scheduler does not exist yet, the bot's
+#:   ``on_ready`` will read the saved config when it starts.
+type SchedulerSyncResult = Literal["applied", "unchanged", "pending"]
 
 #: The bot's running event loop, set by ``on_ready`` — task 12 dispatches the
 #: dashboard's actions onto it via ``asyncio.run_coroutine_threadsafe``.
@@ -788,6 +803,18 @@ class _Scheduler(Protocol):
 
     def get_jobs(self) -> list[_SchedulerJob]: ...
 
+    def reschedule_job(self, job_id: str, trigger: CronTrigger) -> _SchedulerJob: ...
+
+
+def _fetch_trigger(cfg: MergedConfig) -> CronTrigger:
+    """The ``job_fetch`` CronTrigger for ``cfg`` (own ZoneInfo, as at startup)."""
+    return CronTrigger(hour=cfg.fetch_hour, minute=cfg.fetch_minute, timezone=ZoneInfo(cfg.fetch_tz))
+
+
+def _report_trigger(cfg: MergedConfig) -> CronTrigger:
+    """The ``job_report`` CronTrigger for ``cfg`` (own ZoneInfo, as at startup)."""
+    return CronTrigger(hour=cfg.report_hour, minute=cfg.report_minute, timezone=ZoneInfo(cfg.report_tz))
+
 
 class TravianBot(discord.Client):
     """The discord client: owns the command tree and the job scheduler."""
@@ -810,47 +837,79 @@ class TravianBot(discord.Client):
         _ = await self.tree.sync()
         logger.info("synced %d application commands", len(self.tree.get_commands()))
         if self.scheduler is None:
-            self._start_scheduler()
+            # Settings saved before on_ready (e.g. via the dashboard while the
+            # bot was still logging in) are honored: the triggers start from
+            # the CURRENT table, not the constructor's config snapshot.
+            cfg = await asyncio.to_thread(_current_config)
+            self._start_scheduler(cfg)
 
-    def _start_scheduler(self) -> None:
+    def _start_scheduler(self, cfg: MergedConfig) -> None:
         """Create and start the AsyncIOScheduler with the fetch/report jobs.
 
         Must run on the bot's loop (it is — called from ``on_ready``). Each
         trigger carries its own timezone; the scheduler default timezone is
-        the fetch zone.
+        the fetch zone. ``cfg`` becomes the bot's reference config for
+        :meth:`_reschedule` (the trigger builders are shared with it, so
+        startup and rescheduling can never diverge).
         """
         # cast via object: apscheduler is untyped, so direct AsyncIOScheduler ->
         # _Scheduler has no structural overlap; object is the sanctioned bridge.
-        scheduler = cast(_Scheduler, cast(object, AsyncIOScheduler(timezone=ZoneInfo(self.cfg.fetch_tz))))
-        scheduler.add_job(
-            job_fetch,
-            CronTrigger(
-                hour=self.cfg.fetch_hour,
-                minute=self.cfg.fetch_minute,
-                timezone=ZoneInfo(self.cfg.fetch_tz),
-            ),
-            id="job_fetch",
-        )
-        scheduler.add_job(
-            job_report,
-            CronTrigger(
-                hour=self.cfg.report_hour,
-                minute=self.cfg.report_minute,
-                timezone=ZoneInfo(self.cfg.report_tz),
-            ),
-            id="job_report",
-        )
+        scheduler = cast(_Scheduler, cast(object, AsyncIOScheduler(timezone=ZoneInfo(cfg.fetch_tz))))
+        scheduler.add_job(job_fetch, _fetch_trigger(cfg), id="job_fetch")
+        scheduler.add_job(job_report, _report_trigger(cfg), id="job_report")
         scheduler.start()
         logger.info(
             "scheduler started: job_fetch %02d:%02d %s, job_report %02d:%02d %s",
+            cfg.fetch_hour,
+            cfg.fetch_minute,
+            cfg.fetch_tz,
+            cfg.report_hour,
+            cfg.report_minute,
+            cfg.report_tz,
+        )
+        self.scheduler = scheduler
+        self.cfg = cfg
+
+    def _reschedule(self, cfg: MergedConfig) -> bool:
+        """Apply ``cfg`` to the running scheduler — BOT LOOP ONLY.
+
+        Compares the fetch and report ``(hour, minute, tz)`` tuples against
+        the config the jobs were last built from; only jobs whose tuple
+        changed are rescheduled. Returns True when at least one trigger
+        changed. ``self.cfg`` always becomes ``cfg`` (even without a
+        scheduler, so a later comparison starts from the saved state).
+        """
+        scheduler = self.scheduler
+        if scheduler is None:
+            self.cfg = cfg
+            return False
+        changed = False
+        if (cfg.fetch_hour, cfg.fetch_minute, cfg.fetch_tz) != (
             self.cfg.fetch_hour,
             self.cfg.fetch_minute,
             self.cfg.fetch_tz,
+        ):
+            _ = scheduler.reschedule_job("job_fetch", trigger=_fetch_trigger(cfg))
+            changed = True
+        if (cfg.report_hour, cfg.report_minute, cfg.report_tz) != (
             self.cfg.report_hour,
             self.cfg.report_minute,
             self.cfg.report_tz,
-        )
-        self.scheduler = scheduler
+        ):
+            _ = scheduler.reschedule_job("job_report", trigger=_report_trigger(cfg))
+            changed = True
+        self.cfg = cfg
+        if changed:
+            logger.info(
+                "scheduler rescheduled: job_fetch %02d:%02d %s, job_report %02d:%02d %s",
+                cfg.fetch_hour,
+                cfg.fetch_minute,
+                cfg.fetch_tz,
+                cfg.report_hour,
+                cfg.report_minute,
+                cfg.report_tz,
+            )
+        return changed
 
 
 # --- dashboard bootstrap (task 12) ------------------------------------------------
@@ -868,14 +927,26 @@ class _DashboardThread(threading.Thread):
         self.server: uvicorn.Server = server
 
 
-def _dashboard_app_factory(env: Mapping[str, str]) -> Callable[[], FastAPI]:
+def _dashboard_app_factory(env: Mapping[str, str], bot: TravianBot) -> Callable[[], FastAPI]:
     """Factory wiring the REAL functions into the dashboard app.
 
     ``get_config``/``get_status`` reuse ``_current_config`` (the shared config
     getter of the run functions — it reads ``os.environ``, which IS ``env`` in
     production); ``bot_loop_getter`` reads the module global set by
     ``on_ready`` — actions before login → 409 "bot not ready".
+    ``sync_scheduler_on_bot_loop`` is the single settings→scheduler sync
+    callback, closed over THIS ``bot``; ``put_settings`` dispatches it onto
+    the bot loop (never awaited on the uvicorn loop).
     """
+
+    async def sync_scheduler_on_bot_loop() -> SchedulerSyncResult:
+        cfg = await asyncio.to_thread(_current_config)
+        if bot.scheduler is None:
+            return "pending"
+        if bot._reschedule(cfg):
+            _log_entry("config", "info", "scheduler rescheduled from dashboard settings")
+            return "applied"
+        return "unchanged"
 
     def factory() -> FastAPI:
         return create_app(
@@ -886,6 +957,7 @@ def _dashboard_app_factory(env: Mapping[str, str]) -> Callable[[], FastAPI]:
                 bot_loop_getter=lambda: bot_loop,
                 get_config=_current_config,
                 env=env,
+                sync_scheduler_fn=sync_scheduler_on_bot_loop,
             )
         )
 
@@ -942,14 +1014,17 @@ def main() -> None:
     validate_config(cfg)
 
     global current_bot
-    current_bot = TravianBot(cfg)
+    bot = TravianBot(cfg)
+    current_bot = bot
     # T12 dashboard bootstrap: uvicorn in a daemon thread (factory mode — the
     # app is created at serve start inside the thread). POST /api/actions/*
     # dispatches run_fetch/run_report onto this loop via
     # asyncio.run_coroutine_threadsafe(coro, bot_loop) — bot_loop is set by
-    # on_ready once the loop is running; actions before that → 409.
-    _ = start_dashboard(_dashboard_app_factory(env), env)
-    current_bot.run(cfg.discord_token)
+    # on_ready once the loop is running; actions before that → 409. The
+    # factory is bound to THIS bot so settings saves can reschedule its
+    # scheduler on the bot loop.
+    _ = start_dashboard(_dashboard_app_factory(env, bot), env)
+    bot.run(cfg.discord_token)
 
 
 if __name__ == "__main__":

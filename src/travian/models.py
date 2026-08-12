@@ -39,6 +39,22 @@ class VillageRow(BaseModel):
     is_harbor: bool
     victory_points: int
 
+class VillageHistoryPoint(BaseModel):
+    """One stored observation of a village (the village explorer's history).
+
+    Not part of ``VillageRow`` on purpose: that stays the single-row contract
+    of one map.sql snapshot line; this model adds the snapshot date that
+    makes a point an observation.
+    """
+
+    snapshot_date: str
+    name: str
+    x: int
+    y: int
+    player_name: str
+    alliance_tag: str
+    population: int
+
 
 class SnapshotDates(BaseModel):
     """Latest and previous snapshot dates (ISO ``YYYY-MM-DD``), if any."""

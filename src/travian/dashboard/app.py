@@ -45,6 +45,17 @@ Endpoints:
   deltas (``None`` on the oldest date).
 - ``GET /api/analysis/players?alliance=<tag>`` — latest-pair top players:
   population / growth / new-villages rankings (10 each).
+- ``GET /api/analysis/villages?q=&limit=50`` — village explorer search over
+  the LATEST snapshot (whole map, no alliance filter): ``x|y``/``x,y`` as
+  exact coordinates, otherwise a literal case-insensitive substring search
+  over name/player. Empty ``q`` → current ``snapshot_date`` + empty results.
+- ``GET /api/analysis/villages/{id}/history?days=30`` — chronologically
+  ascending stored observations of one village (name/owner/alliance/pop per
+  snapshot); unknown id → 404. ``present_in_latest`` is false for villages
+  already gone from the latest snapshot.
+- ``PUT /api/settings`` adds top-level ``schedule_sync`` —
+  ``not_needed|applied|unchanged|pending|failed`` — reporting whether the
+  running bot's scheduler was rescheduled from the saved schedule keys.
 - ``GET /api/analysis/regions|events|deltas|players?alliance=<tag>`` —
   per-alliance filtering (``combined``/absent = union of ``ALLIANCE_TAGS``;
   unknown tag → 422 listing the valid tags).
@@ -98,7 +109,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Final, Protocol, TypedDict, cast
+from typing import Annotated, Final, Literal, Protocol, TypedDict, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -137,6 +148,13 @@ ALLOWED_SETTINGS_KEYS: Final = frozenset(
 _ACTION_TIMEOUT: Final = 300.0  # fetch worst case ≈ 190 s with retries
 _DEFAULT_SQLITE_PATH: Final = "/data/travian.db"  # shared default (bot/main.py)
 _MAX_LOG_WINDOW: Final = 500
+#: Timeout for a settings-triggered scheduler sync dispatched onto the bot
+#: loop — short: the sync is one config re-read + two comparisons.
+_SCHEDULE_SYNC_TIMEOUT: Final = 10.0
+#: Settings keys whose change requires a running-bot scheduler sync.
+_SCHEDULE_KEYS: Final = frozenset(
+    {"FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ", "REPORT_HOUR", "REPORT_MINUTE", "REPORT_TZ"}
+)
 
 
 class StatusData(TypedDict):
@@ -235,6 +253,20 @@ class ConfigProtocol(Protocol):
 
 ConfigGetter = Callable[[], ConfigProtocol]
 
+class SyncSchedulerFn(Protocol):
+    """The settings→scheduler sync surface — injected by ``main.py``, bound
+    to the concrete bot, and dispatched onto the bot loop by ``put_settings``
+    (never awaited on the uvicorn loop).
+
+    Returns ``applied`` (a trigger was rescheduled), ``unchanged`` (the saved
+    schedule matches the running one) or ``pending`` (no bot scheduler yet —
+    the bot's ``on_ready`` reads the saved config when it starts).
+    """
+
+    async def __call__(self) -> Literal["applied", "unchanged", "pending"]: ...
+
+
+
 
 @dataclass(frozen=True)
 class DashboardDeps:
@@ -247,6 +279,9 @@ class DashboardDeps:
     - ``bot_loop_getter`` — returns the bot's event loop (``bot.main.bot_loop``),
       None until ``on_ready`` has run.
     - ``get_config`` — the merged config getter (real: ``bot.main._current_config``).
+    - ``sync_scheduler_fn`` — optional settings→scheduler sync callback (real:
+      the bound callback inside ``bot.main._dashboard_app_factory``); None in
+      test constructions, where ``put_settings`` then reports ``pending``.
     - ``env`` — the process environment (``DASHBOARD_*``, ``SQLITE_PATH``).
     """
 
@@ -256,7 +291,7 @@ class DashboardDeps:
     bot_loop_getter: Callable[[], asyncio.AbstractEventLoop | None]
     get_config: ConfigGetter
     env: Mapping[str, str]
-
+    sync_scheduler_fn: SyncSchedulerFn | None = None
 
 # --- helpers ------------------------------------------------------------------
 
@@ -384,8 +419,13 @@ def _resolve_alliance_ids(
 
 
 def _event_dict(event: VillageEvent) -> dict[str, object]:
-    """One village event in the events-browser payload shape."""
+    """One village event in the events-browser payload shape.
+
+    ``village_id`` lets the UI open the village history unambiguously, even
+    with repeated names and for ``lost_deleted`` villages.
+    """
     return {
+        "village_id": event.village_id,
         "village_name": event.village_name,
         "x": event.x,
         "y": event.y,
@@ -736,7 +776,48 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 conn.close()
             return _settings_payload(deps.get_config())
 
-        return JSONResponse(await asyncio.to_thread(write))
+        settings = await asyncio.to_thread(write)
+        body: dict[str, object] = dict(settings)
+        body["schedule_sync"] = await _sync_scheduler(validated)
+        return JSONResponse(body)
+
+    async def _sync_scheduler(validated: dict[str, store.JsonValue]) -> str:
+        """Sync the running bot's scheduler after a settings write.
+
+        Only schedule keys trigger a sync; everything else is ``not_needed``.
+        The callback NEVER runs on this (uvicorn) loop: it is dispatched onto
+        the bot loop via ``run_coroutine_threadsafe`` and awaited through a
+        shielded wrapped future with a short timeout. On timeout/exception the
+        saved config is KEPT (the bot will pick it up on restart) and a
+        ``config/error`` log entry records the failure.
+        """
+        if not _SCHEDULE_KEYS.intersection(validated):
+            return "not_needed"
+        sync_fn = deps.sync_scheduler_fn
+        loop = deps.bot_loop_getter()
+        if sync_fn is None or loop is None:
+            # No bot loop yet (or tests without a callback): the starting bot
+            # reads the saved config in on_ready.
+            return "pending"
+
+        def log_failure(reason: str) -> None:
+            conn = store.connect(db_path)
+            try:
+                store.append_log(conn, "config", "error", f"scheduler sync failed: {reason}")
+            finally:
+                conn.close()
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(sync_fn(), loop)
+            return await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)), timeout=_SCHEDULE_SYNC_TIMEOUT
+            )
+        except TimeoutError:
+            log_failure(f"timed out after {_SCHEDULE_SYNC_TIMEOUT:.0f}s")
+            return "failed"
+        except Exception as exc:  # noqa: BLE001 — a failed sync must never undo the saved config
+            log_failure(f"{type(exc).__name__}: {exc}")
+            return "failed"
 
     async def fetch_now(request: Request) -> Response:
         if not _admin_ok(request):
@@ -960,6 +1041,78 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
+    async def analysis_villages(
+        q: str = "",
+        limit: Annotated[int, Query(ge=1, le=50)] = 50,
+    ) -> dict[str, object]:
+        """Village explorer search over the LATEST snapshot (whole map).
+
+        Deliberately NOT filtered by ``ALLIANCE_TAGS``: the explorer is intel
+        about the current map, while the segmented alliance filter scopes only
+        regions/events/changes/players. Empty/whitespace ``q`` returns the
+        current ``snapshot_date`` with an empty result list (no full scan).
+        """
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                latest = store.load_latest(conn)
+                snapshot_date = latest.snapshot_date if latest is not None else None
+                if snapshot_date is None or not q.strip():
+                    return {"snapshot_date": snapshot_date, "results": []}
+                results: list[dict[str, object]] = []
+                for row in store.search_villages(conn, snapshot_date, q, limit):
+                    results.append(
+                        {
+                            "village_id": row.village_id,
+                            "name": row.name,
+                            "x": row.x,
+                            "y": row.y,
+                            "region": row.region,
+                            "population": row.population,
+                            "player_name": row.player_name,
+                            "alliance_tag": row.alliance_tag,
+                            "is_capital": row.is_capital,
+                            "is_city": row.is_city,
+                            "is_harbor": row.is_harbor,
+                        }
+                    )
+                return {"snapshot_date": snapshot_date, "results": results}
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_village_history(
+        village_id: int,
+        days: Annotated[int, Query(ge=1, le=60)] = 30,
+    ) -> dict[str, object]:
+        """Chronological stored observations of one village.
+
+        ``present_in_latest`` is true only when the newest observation has the
+        latest snapshot's date — a village deleted from the map still returns
+        its useful history with the flag false. Unknown ids → 404.
+        """
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                latest = store.load_latest(conn)
+                if latest is None:
+                    raise HTTPException(status_code=404, detail=f"unknown village id {village_id}")
+                history = store.village_history(conn, village_id, days)
+                if not history:
+                    raise HTTPException(status_code=404, detail=f"unknown village id {village_id}")
+                return {
+                    "village_id": village_id,
+                    "latest_snapshot_date": latest.snapshot_date,
+                    "present_in_latest": history[-1].snapshot_date == latest.snapshot_date,
+                    "history": [point.model_dump() for point in history],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
     _ = app.get("/healthz")(healthz)
@@ -981,4 +1134,6 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/api/analysis/events")(analysis_events)
     _ = app.get("/api/analysis/deltas")(analysis_deltas)
     _ = app.get("/api/analysis/players")(analysis_players)
+    _ = app.get("/api/analysis/villages")(analysis_villages)
+    _ = app.get("/api/analysis/villages/{village_id}/history")(analysis_village_history)
     return app

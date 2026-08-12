@@ -137,6 +137,8 @@ class TestSummaryHistory:
         assert rows == [
             {
                 "date": "2026-08-07",
+                "previous_date": None,
+                "elapsed_days": None,
                 "villages": 10,
                 "population": 1000,
                 "players": 5,
@@ -148,6 +150,8 @@ class TestSummaryHistory:
             },
             {
                 "date": "2026-08-08",
+                "previous_date": "2026-08-07",
+                "elapsed_days": 1,
                 "villages": 12,
                 "population": 1100,
                 "players": 5,
@@ -159,6 +163,8 @@ class TestSummaryHistory:
             },
             {
                 "date": "2026-08-09",
+                "previous_date": "2026-08-08",
+                "elapsed_days": 1,
                 "villages": 11,
                 "population": 1050,
                 "players": 4,
@@ -169,6 +175,25 @@ class TestSummaryHistory:
                 "vp_delta": -5,
             },
         ]
+
+    def test_gap_carries_previous_date_and_elapsed_days(self) -> None:
+        """A six-day gap is reported as context; the delta stays the plain
+        subtraction (presentation change, not a metric change)."""
+        days = [
+            SummaryDay(date="2026-08-02", villages=10, population=1000, players=5, vp=90),
+            SummaryDay(date="2026-08-08", villages=16, population=1600, players=6, vp=95),
+        ]
+
+        rows = summary_history(days)
+
+        assert rows[0]["previous_date"] is None
+        assert rows[0]["elapsed_days"] is None
+        assert rows[1]["previous_date"] == "2026-08-02"
+        assert rows[1]["elapsed_days"] == 6
+        assert rows[1]["villages_delta"] == 6  # unchanged subtraction
+        assert rows[1]["population_delta"] == 600
+        assert rows[1]["players_delta"] == 1
+        assert rows[1]["vp_delta"] == 5
 
     def test_empty_input(self) -> None:
         assert summary_history([]) == []

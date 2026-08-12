@@ -738,6 +738,9 @@ class TestBot:
     def test_on_ready_syncs_and_starts_scheduler(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
             bot = bot_main.TravianBot(_cfg())
+            # on_ready re-reads the current config; pin it to a fixed value so
+            # the test stays independent of the environment's settings table.
+            monkeypatch.setattr(bot_main, "_current_config", lambda: _cfg())
 
             async def fake_sync() -> list[object]:
                 return []
@@ -748,6 +751,39 @@ class TestBot:
                 assert bot.scheduler is not None
                 assert {job.id for job in bot.scheduler.get_jobs()} == {"job_fetch", "job_report"}
                 assert bot_main.bot_loop is asyncio.get_running_loop()
+            finally:
+                bot.scheduler.shutdown(wait=False)  # type: ignore[union-attr]
+
+        asyncio.run(scenario())
+
+    def test_on_ready_starts_scheduler_from_saved_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Triggers must start from the CURRENT table — a save made before
+        ``on_ready`` (bot still logging in) is honored without a reschedule."""
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        store.set_settings(conn, {"FETCH_HOUR": 4, "FETCH_MINUTE": 45})
+        conn.close()
+        monkeypatch.setenv("SQLITE_PATH", str(_db_path(tmp_path)))
+
+        async def scenario() -> None:
+            bot = bot_main.TravianBot(_cfg())  # constructor config: defaults
+
+            async def fake_sync() -> list[object]:
+                return []
+
+            monkeypatch.setattr(bot.tree, "sync", fake_sync)
+            await bot.on_ready()
+            try:
+                assert bot.scheduler is not None
+                jobs = {job.id: job for job in bot.scheduler.get_jobs()}
+                fetch_trigger = jobs["job_fetch"].trigger
+                assert isinstance(fetch_trigger, CronTrigger)
+                assert _field(fetch_trigger, "hour") == 4
+                assert _field(fetch_trigger, "minute") == 45
+                assert bot.cfg.fetch_hour == 4
+                assert bot.cfg.fetch_minute == 45
             finally:
                 bot.scheduler.shutdown(wait=False)  # type: ignore[union-attr]
 
@@ -765,7 +801,7 @@ class TestBot:
 
         async def scenario() -> None:
             bot = bot_main.TravianBot(cfg)
-            bot._start_scheduler()
+            bot._start_scheduler(cfg)
             assert bot.scheduler is not None
             try:
                 jobs = {job.id: job for job in bot.scheduler.get_jobs()}
@@ -785,6 +821,80 @@ class TestBot:
                 bot.scheduler.shutdown(wait=False)  # type: ignore[union-attr]
 
         asyncio.run(scenario())
+
+
+class FakeScheduler:
+    """Scheduler fake for ``_reschedule``: records every reschedule call."""
+
+    def __init__(self) -> None:
+        self.reschedules: list[tuple[str, CronTrigger]] = []
+        self._jobs: dict[str, CronTrigger] = {}
+
+    def add_job(self, func: object, trigger: CronTrigger, *, id: str) -> None:
+        self._jobs[id] = trigger
+
+    def start(self) -> None: ...
+
+    def shutdown(self, *, wait: bool = True) -> None: ...
+
+    def get_jobs(self) -> list[object]:
+        return []
+
+    def reschedule_job(self, job_id: str, trigger: CronTrigger) -> object:
+        self.reschedules.append((job_id, trigger))
+        self._jobs[job_id] = trigger
+        return object()
+
+
+class TestReschedule:
+    def test_fetch_change_reschedules_only_fetch(self) -> None:
+        bot = bot_main.TravianBot(_cfg())
+        fake = FakeScheduler()
+        bot.scheduler = fake  # pyright: ignore[reportAttributeAccessIssue]
+
+        changed = bot._reschedule(_cfg(fetch_hour=7))
+
+        assert changed is True
+        assert [job_id for job_id, _ in fake.reschedules] == ["job_fetch"]
+        assert _field(fake.reschedules[0][1], "hour") == 7
+
+    def test_report_change_reschedules_only_report(self) -> None:
+        bot = bot_main.TravianBot(_cfg())
+        fake = FakeScheduler()
+        bot.scheduler = fake  # pyright: ignore[reportAttributeAccessIssue]
+
+        changed = bot._reschedule(_cfg(report_hour=11, report_minute=30))
+
+        assert changed is True
+        assert [job_id for job_id, _ in fake.reschedules] == ["job_report"]
+        assert _field(fake.reschedules[0][1], "hour") == 11
+        assert _field(fake.reschedules[0][1], "minute") == 30
+
+    def test_tz_change_reschedules_both_halves_independently(self) -> None:
+        bot = bot_main.TravianBot(_cfg())
+        fake = FakeScheduler()
+        bot.scheduler = fake  # pyright: ignore[reportAttributeAccessIssue]
+
+        changed = bot._reschedule(_cfg(fetch_hour=5, report_tz="Europe/London"))
+
+        assert changed is True
+        assert [job_id for job_id, _ in fake.reschedules] == ["job_fetch", "job_report"]
+
+    def test_identical_config_no_reschedule(self) -> None:
+        bot = bot_main.TravianBot(_cfg())
+        fake = FakeScheduler()
+        bot.scheduler = fake  # pyright: ignore[reportAttributeAccessIssue]
+
+        assert bot._reschedule(_cfg()) is False
+        assert fake.reschedules == []
+        assert bot.cfg == _cfg()  # reference config updated regardless
+
+    def test_no_scheduler_updates_cfg_without_reschedule(self) -> None:
+        bot = bot_main.TravianBot(_cfg())
+        assert bot.scheduler is None
+
+        assert bot._reschedule(_cfg(fetch_hour=6)) is False
+        assert bot.cfg.fetch_hour == 6
 
 
 # --- entry point ----------------------------------------------------------------

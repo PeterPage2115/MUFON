@@ -9,7 +9,7 @@
     <title>Travian Report Bot · Command Center</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/app.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4" defer></script>
+    <script src="/static/vendor/chart.umd.min.js" defer></script>
   </head>
   <body class="auth-pending">
     <a class="skip-link" href="#main-content">Skip to dashboard</a>
@@ -73,12 +73,13 @@
               </div>
             </header>
 
-            <div class="tab-bar" id="analysis-tabs" role="tablist" aria-label="Analysis views">
+            <div class="tab-bar tab-bar--analysis" id="analysis-tabs" role="tablist" aria-label="Analysis views">
               <button class="tab-bar__tab" role="tab" id="tab-regions" aria-controls="panel-regions" aria-selected="true" tabindex="0">Regions</button>
               <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
               <button class="tab-bar__tab" role="tab" id="tab-players" aria-controls="panel-players" aria-selected="false" tabindex="-1">Players</button>
               <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
               <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
+              <button class="tab-bar__tab" role="tab" id="tab-villages" aria-controls="panel-villages" aria-selected="false" tabindex="-1">Villages</button>
             </div>
 
             <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
@@ -234,6 +235,78 @@
                 </table>
               </div>
             </section>
+
+            <section class="analysis-panel" id="panel-villages" role="tabpanel" aria-labelledby="tab-villages" hidden>
+              <div class="village-search">
+                <label class="overline" for="village-search-input">Search by village, player or coordinates</label>
+                <input id="village-search-input" type="search" autocomplete="off" spellcheck="false"
+                  placeholder="e.g. Village 7, Player 12, 7|7, -3, -2" aria-describedby="village-search-help">
+                <p class="field-help" id="village-search-help">Exact coordinates x|y or x,y; otherwise the village name and owner are searched.</p>
+              </div>
+              <div class="data-table__wrap" data-villages-table hidden>
+                <table class="data-table" aria-label="Village search results">
+                  <thead>
+                    <tr>
+                      <th class="th--left" scope="col">Village</th>
+                      <th class="th--num" scope="col">Coordinates</th>
+                      <th class="th--num" scope="col">Population</th>
+                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--left" scope="col">Alliance</th>
+                      <th class="th--left" scope="col">Flags</th>
+                    </tr>
+                  </thead>
+                  <tbody data-villages-body></tbody>
+                </table>
+              </div>
+              <p class="empty-state" data-villages-empty hidden>Search by village, player or coordinates.</p>
+              <article class="village-detail" id="village-detail" hidden aria-label="Village history">
+                <header class="village-detail__head">
+                  <div>
+                    <p class="overline">Stored observations</p>
+                    <h3 id="village-detail-name">—</h3>
+                  </div>
+                  <span class="village-detail__absent" data-village-absent hidden>No longer present in latest snapshot.</span>
+                </header>
+                <dl class="village-detail__meta" data-village-meta>
+                  <div>
+                    <dt>Coordinates</dt>
+                    <dd data-village-coords>—</dd>
+                  </div>
+                  <div>
+                    <dt>Latest owner</dt>
+                    <dd data-village-player>—</dd>
+                  </div>
+                  <div>
+                    <dt>Alliance</dt>
+                    <dd data-village-alliance>—</dd>
+                  </div>
+                </dl>
+                <div class="chart-card" data-village-chart hidden>
+                  <div class="chart-card__head">
+                    <p class="overline">Population history</p>
+                  </div>
+                  <div class="chart-card__canvas">
+                    <canvas id="analysis-chart-village" role="img" aria-label="Village population over time"></canvas>
+                  </div>
+                </div>
+                <div class="data-table__wrap" data-village-history-table hidden>
+                  <table class="data-table" aria-label="Stored village observations">
+                    <thead>
+                      <tr>
+                        <th class="th--left" scope="col">Snapshot</th>
+                        <th class="th--left" scope="col">Name</th>
+                        <th class="th--num" scope="col">Population</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--left" scope="col">Alliance</th>
+                      </tr>
+                    </thead>
+                    <tbody data-village-history-body></tbody>
+                  </table>
+                </div>
+                <p class="village-detail__note" data-village-detail-note hidden></p>
+                <p class="village-detail__error" data-village-detail-error role="alert" hidden></p>
+              </article>
+            </section>
           </article>
         </div>
       </section>
@@ -246,7 +319,7 @@
                 <p class="overline">Snapshot overview</p>
                 <h2 id="status-title">Status</h2>
               </div>
-              <span class="card-state card-state--healthy"><span class="status-dot" aria-hidden="true"></span>Watching</span>
+              <span class="card-state card-state--healthy"><span class="status-dot" aria-hidden="true"></span><span data-status-state-label>Watching</span></span>
             </header>
 
             <div class="metric-grid" aria-live="polite" aria-busy="true">
@@ -298,7 +371,7 @@
                 <p class="overline">Recent activity</p>
                 <h2 id="logs-title">Job log</h2>
               </div>
-              <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s</span>
+              <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s · UTC</span>
             </header>
             <ol class="log-list" id="job-log" aria-live="polite" aria-busy="true">
               <li class="log-empty">Loading recent activity…</li>

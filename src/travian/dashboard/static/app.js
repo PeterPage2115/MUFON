@@ -78,7 +78,21 @@
     if (!iso) return "—";
     var d = new Date(iso);
     if (isNaN(d.getTime())) return "—";
-    return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    try {
+      // Unambiguous wall-clock: log entries carry UTC ISO timestamps, so the
+      // timezone must be pinned — local formatting would silently shift them.
+      return (
+        new Intl.DateTimeFormat("en-GB", {
+          timeZone: "UTC",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        }).format(d) + " UTC"
+      );
+    } catch (_e) {
+      return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + " UTC";
+    }
   }
 
   /* --- API client ---------------------------------------------------------- */
@@ -173,6 +187,12 @@
     },
     logs: function () {
       return request("GET", "/api/logs?n=" + LOG_LIMIT);
+    },
+    villageHistory: function (villageId, days) {
+      return request(
+        "GET",
+        "/api/analysis/villages/" + encodeURIComponent(villageId) + "/history?days=" + encodeURIComponent(days)
+      );
     },
   };
 
@@ -423,6 +443,11 @@
 
     var alertBox = els.statusAlert;
     var errors = data.errors || [];
+    // The card badge describes the ``_recent_errors`` data (recent job-log
+    // errors), NOT the /healthz probe — "Watching" stays honest while the
+    // alert box carries the details.
+    var stateLabel = document.querySelector("[data-status-state-label]");
+    var stateBadge = stateLabel ? stateLabel.closest(".card-state") : null;
     if (errors.length) {
       alertBox.textContent = "";
       var head = document.createElement("span");
@@ -438,8 +463,18 @@
         .join("\n");
       alertBox.appendChild(lines);
       alertBox.classList.remove("is-hidden");
+      if (stateBadge) {
+        stateBadge.classList.remove("card-state--healthy");
+        stateBadge.classList.add("card-state--attention");
+        setText(stateLabel, "Attention · " + errors.length + " recent error" + (errors.length === 1 ? "" : "s"));
+      }
     } else {
       alertBox.classList.add("is-hidden");
+      if (stateBadge) {
+        stateBadge.classList.remove("card-state--attention");
+        stateBadge.classList.add("card-state--healthy");
+        setText(stateLabel, "Watching");
+      }
     }
 
     allianceTags = data.alliance_tags || [];
@@ -669,11 +704,12 @@
       if (colorText && colorText.value !== hex) colorText.value = hex;
     }
 
-    // Clear stale validation state after a successful reload.
+    // Clear stale validation state after a successful reload. The feedback
+    // line is NOT cleared here: submitSettings' refresh follows a save whose
+    // schedule_sync message must survive (loadSettings clears it on load).
     SETTINGS_KEYS.forEach(function (key) {
       setFieldError(key, "");
     });
-    setFeedback("", "");
   }
 
   function setFeedback(text, kind) {
@@ -708,10 +744,32 @@
 
     api
       .saveSettings(payload)
-      .then(function () {
+      .then(function (body) {
         saved = true;
-        setFeedback("Settings saved.", "success");
-        showToast("Settings saved", "The bot will pick up the new schedule on the next run.", "success");
+        // The response's schedule_sync reports what actually happened to the
+        // running bot's scheduler — the feedback must match reality.
+        var sync = body && body.schedule_sync;
+        var feedback;
+        if (sync === "applied") {
+          feedback = "Settings saved. Schedule updated.";
+        } else if (sync === "pending") {
+          feedback = "Settings saved. Schedule will apply when the bot starts.";
+        } else if (sync === "failed") {
+          feedback = "Settings saved, but scheduler refresh failed. Restart the bot.";
+        } else {
+          feedback = "Settings saved.";
+        }
+        if (sync === "failed") {
+          setFeedback(feedback, "error");
+          showToast("Settings saved", "Scheduler refresh failed. Restart the bot.", "error");
+        } else {
+          setFeedback(feedback, "success");
+          showToast(
+            "Settings saved",
+            sync === "applied" ? "The scheduler picked up the new schedule." : "Changes are stored.",
+            "success"
+          );
+        }
         return Promise.all([api.settings(), api.status()]);
       })
       .then(function (results) {
@@ -888,8 +946,7 @@
     }
 
     setText(els.logCount, entries.length + (entries.length === 1 ? " entry" : " entries"));
-    var now = new Date();
-    setText(els.logUpdated, "updated " + pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" + pad(now.getSeconds()));
+    setText(els.logUpdated, "updated " + formatTime(new Date().toISOString()));
     els.logFooter.classList.add("is-live");
     list.setAttribute("aria-busy", "false");
   }
@@ -915,6 +972,10 @@
     regionsDates: [],
     regionsSeries: {},
     standingsPayload: null,
+    villageQuerySeq: 0, // monotonically rising: stale search responses are ignored
+    villageDebounce: null,
+    villageHistorySeq: 0, // same guard for history responses
+    villageDays: 30,
   };
   var allianceTags = [];
   var activatedTabs = {};
@@ -960,6 +1021,23 @@
         gainedCount: document.querySelector("[data-events-gained-count]"),
         lostCount: document.querySelector("[data-events-lost-count]"),
         changesBody: document.querySelector("[data-changes-body]"),
+        villagesInput: document.getElementById("village-search-input"),
+        villagesTable: document.querySelector("[data-villages-table]"),
+        villagesBody: document.querySelector("[data-villages-body]"),
+        villagesEmpty: document.querySelector("[data-villages-empty]"),
+        villageDetail: document.getElementById("village-detail"),
+        villageDetailName: document.getElementById("village-detail-name"),
+        villageAbsent: document.querySelector("[data-village-absent]"),
+        villageMeta: document.querySelector("[data-village-meta]"),
+        villageCoords: document.querySelector("[data-village-coords]"),
+        villagePlayer: document.querySelector("[data-village-player]"),
+        villageAlliance: document.querySelector("[data-village-alliance]"),
+        villageChartCard: document.querySelector("[data-village-chart]"),
+        villageCanvas: document.getElementById("analysis-chart-village"),
+        villageHistoryTable: document.querySelector("[data-village-history-table]"),
+        villageHistoryBody: document.querySelector("[data-village-history-body]"),
+        villageDetailNote: document.querySelector("[data-village-detail-note]"),
+        villageDetailError: document.querySelector("[data-village-detail-error]"),
       };
     }
     return analysisEls;
@@ -1606,9 +1684,15 @@
     var li = document.createElement("li");
     li.className = "event-line " + (gained ? "event-line--gained" : "event-line--lost");
 
-    var name = document.createElement("span");
+    // The name is a semantic button: clicking opens the village's history in
+    // the Villages tab (no fetch/report trigger, no alliance-filter change).
+    var name = document.createElement("button");
+    name.type = "button";
     name.className = "event-line__name";
     name.textContent = ev.village_name;
+    name.addEventListener("click", function () {
+      openVillageFromEvent(ev);
+    });
     li.appendChild(name);
 
     var coords = document.createElement("span");
@@ -1669,6 +1753,280 @@
       });
   }
 
+  /* Villages tab (explorer + owner history) */
+
+  function setVillagesPrompt(message) {
+    var els = analysisElements();
+    els.villagesTable.hidden = true;
+    els.villageDetail.hidden = true;
+    els.villagesEmpty.hidden = false;
+    setText(els.villagesEmpty, message);
+  }
+
+  // The initial tab activation renders only the prompt — a request is issued
+  // solely for actual query text (no full-map scan on tab open).
+  function loadVillages() {
+    var els = analysisElements();
+    var query = (els.villagesInput.value || "").trim();
+    if (!query) {
+      setPanelBusy("villages", true);
+      setVillagesPrompt("Search by village, player or coordinates.");
+      setPanelBusy("villages", false);
+      return;
+    }
+    return requestVillages(query);
+  }
+
+  // One search request per query; the rising sequence makes late responses
+  // (and superseded inputs) silently ignored.
+  function requestVillages(query) {
+    var seq = ++analysisState.villageQuerySeq;
+    setPanelBusy("villages", true);
+    return api
+      .analysis("villages", { q: query, limit: 50 })
+      .then(function (payload) {
+        if (seq !== analysisState.villageQuerySeq) return;
+        renderVillages(payload);
+        setPanelBusy("villages", false);
+      })
+      .catch(function (err) {
+        if (seq !== analysisState.villageQuerySeq) return;
+        setPanelBusy("villages", false);
+        showToast("Village search failed", err.message, "error");
+      });
+  }
+
+  function wireVillagesSearch() {
+    var els = analysisElements();
+    els.villagesInput.addEventListener("input", function () {
+      window.clearTimeout(analysisState.villageDebounce);
+      analysisState.villageDebounce = window.setTimeout(function () {
+        var query = (els.villagesInput.value || "").trim();
+        if (!query) {
+          analysisState.villageQuerySeq += 1; // invalidate any in-flight search
+          setVillagesPrompt("Search by village, player or coordinates.");
+          setPanelBusy("villages", false);
+          return;
+        }
+        requestVillages(query);
+      }, 250);
+    });
+  }
+
+  function renderVillages(payload) {
+    var els = analysisElements();
+    var results = payload.results || [];
+    if (!results.length) {
+      setVillagesPrompt("No villages found.");
+      return;
+    }
+    els.villagesEmpty.hidden = true;
+    els.villageDetail.hidden = true;
+    els.villagesTable.hidden = false;
+    els.villagesBody.textContent = "";
+    results.forEach(function (row) {
+      els.villagesBody.appendChild(villageResultRow(row));
+    });
+  }
+
+  function villageResultRow(row) {
+    var tr = document.createElement("tr");
+
+    var tdName = document.createElement("td");
+    tdName.className = "village-name";
+    var open = document.createElement("button");
+    open.type = "button";
+    open.className = "village-open";
+    open.textContent = row.name;
+    open.setAttribute("aria-label", "Open history for " + row.name);
+    open.addEventListener("click", function () {
+      openVillageHistory(row.village_id, row.name);
+    });
+    tdName.appendChild(open);
+
+    var tdCoords = document.createElement("td");
+    tdCoords.className = "num";
+    tdCoords.textContent = row.x + "|" + row.y;
+
+    var tdPop = document.createElement("td");
+    tdPop.className = "num";
+    tdPop.textContent = fmtInt(row.population);
+
+    var tdPlayer = document.createElement("td");
+    tdPlayer.className = "player-name";
+    tdPlayer.textContent = row.player_name || "—";
+
+    var tdAlliance = document.createElement("td");
+    tdAlliance.textContent = row.alliance_tag || "—";
+
+    var tdFlags = document.createElement("td");
+    tdFlags.className = "village-flags";
+    [["Capital", row.is_capital], ["City", row.is_city], ["Harbor", row.is_harbor]].forEach(function (pair) {
+      if (!pair[1]) return;
+      var chip = document.createElement("span");
+      chip.className = "village-flag";
+      chip.textContent = pair[0];
+      tdFlags.appendChild(chip);
+    });
+    if (!tdFlags.children.length) {
+      tdFlags.textContent = "—";
+      tdFlags.classList.add("faint");
+    }
+
+    tr.appendChild(tdName);
+    tr.appendChild(tdCoords);
+    tr.appendChild(tdPop);
+    tr.appendChild(tdPlayer);
+    tr.appendChild(tdAlliance);
+    tr.appendChild(tdFlags);
+    return tr;
+  }
+
+  function openVillageFromEvent(ev) {
+    var tab = document.getElementById("tab-villages");
+    if (tab) {
+      activateTab(tab);
+    }
+    openVillageHistory(ev.village_id, ev.village_name);
+  }
+
+  function openVillageHistory(villageId, villageName) {
+    var els = analysisElements();
+    var seq = ++analysisState.villageHistorySeq;
+    els.villageDetail.hidden = false;
+    els.villageDetailError.hidden = true;
+    els.villageAbsent.hidden = true;
+    els.villageMeta.hidden = true;
+    els.villageChartCard.hidden = true;
+    els.villageHistoryTable.hidden = true;
+    els.villageDetailNote.hidden = false;
+    setText(els.villageDetailNote, "Loading…");
+    setText(els.villageDetailName, villageName || "Village " + villageId);
+    api
+      .villageHistory(villageId, analysisState.villageDays)
+      .then(function (payload) {
+        if (seq !== analysisState.villageHistorySeq) return;
+        renderVillageHistory(payload);
+      })
+      .catch(function (err) {
+        if (seq !== analysisState.villageHistorySeq) return;
+        els.villageDetailNote.hidden = true;
+        els.villageDetailError.hidden = false;
+        setText(
+          els.villageDetailError,
+          err.status === 404 ? "No stored history for this village." : err.message
+        );
+        showToast("Village history failed", err.message, "error");
+      });
+  }
+
+  function renderVillageHistory(payload) {
+    var els = analysisElements();
+    var history = payload.history || [];
+    els.villageDetailError.hidden = true;
+    els.villageDetailNote.hidden = true;
+    if (!history.length) {
+      els.villageDetailError.hidden = false;
+      setText(els.villageDetailError, "No stored history for this village.");
+      return;
+    }
+    var latest = history[history.length - 1];
+    setText(els.villageCoords, latest.x + "|" + latest.y);
+    setText(els.villagePlayer, latest.player_name || "—");
+    setText(els.villageAlliance, latest.alliance_tag || "—");
+    els.villageMeta.hidden = false;
+    els.villageAbsent.hidden = payload.present_in_latest !== false;
+
+    els.villageHistoryTable.hidden = false;
+    els.villageHistoryBody.textContent = "";
+    history.forEach(function (point) {
+      els.villageHistoryBody.appendChild(villageHistoryRow(point));
+    });
+
+    if (history.length === 1) {
+      els.villageChartCard.hidden = true;
+      els.villageDetailNote.hidden = false;
+      setText(els.villageDetailNote, "Only one stored observation; no trend chart.");
+      return;
+    }
+    renderVillageChart(history, latest.name);
+  }
+
+  function villageHistoryRow(point) {
+    var tr = document.createElement("tr");
+    var tdDate = document.createElement("td");
+    tdDate.className = "date-cell";
+    tdDate.textContent = point.snapshot_date;
+    var tdName = document.createElement("td");
+    tdName.textContent = point.name;
+    var tdPop = document.createElement("td");
+    tdPop.className = "num";
+    tdPop.textContent = fmtInt(point.population);
+    var tdPlayer = document.createElement("td");
+    tdPlayer.className = "player-name";
+    tdPlayer.textContent = point.player_name || "—";
+    var tdAlliance = document.createElement("td");
+    tdAlliance.textContent = point.alliance_tag || "—";
+    tr.appendChild(tdDate);
+    tr.appendChild(tdName);
+    tr.appendChild(tdPop);
+    tr.appendChild(tdPlayer);
+    tr.appendChild(tdAlliance);
+    return tr;
+  }
+
+  // One gold population line chart per village; updated in place on reopen.
+  function renderVillageChart(history, name) {
+    var els = analysisElements();
+    if (!window.Chart) {
+      els.villageChartCard.hidden = true;
+      els.villageDetailNote.hidden = false;
+      setText(els.villageDetailNote, "Chart library unavailable.");
+      return;
+    }
+    els.villageChartCard.hidden = false;
+    var labels = history.map(function (p) {
+      return p.snapshot_date;
+    });
+    var data = history.map(function (p) {
+      return p.population;
+    });
+    els.villageCanvas.setAttribute("aria-label", "Population history for " + name);
+    var chart = analysisState.charts.village;
+    if (chart) {
+      chart.data.labels = labels;
+      chart.data.datasets[0].label = name;
+      chart.data.datasets[0].data = data;
+      chart.update();
+      chart.resize();
+      return;
+    }
+    chart = new Chart(els.villageCanvas.getContext("2d"), {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: name,
+            data: data,
+            borderColor: cssVar("--accent-gold", "#d1a84a"),
+            backgroundColor: "rgba(209,168,74,0.12)",
+            fill: true,
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            tension: 0.3,
+            spanGaps: false,
+          },
+        ],
+      },
+      options: baseChartOpts(),
+    });
+    chart.options.plugins.legend.display = false;
+    analysisState.charts.village = chart;
+  }
+
+
   function changeRow(row) {
     var tr = document.createElement("tr");
     var tdDate = document.createElement("td");
@@ -1676,13 +2034,13 @@
     tdDate.textContent = row.date;
     tr.appendChild(tdDate);
     tr.appendChild(numCell(fmtInt(row.villages)));
-    tr.appendChild(deltaCell(row.villages_delta));
+    tr.appendChild(deltaCell(row.villages_delta, row.previous_date, row.elapsed_days));
     tr.appendChild(numCell(fmtInt(row.population)));
-    tr.appendChild(deltaCell(row.population_delta));
+    tr.appendChild(deltaCell(row.population_delta, row.previous_date, row.elapsed_days));
     tr.appendChild(numCell(fmtInt(row.players)));
-    tr.appendChild(deltaCell(row.players_delta));
+    tr.appendChild(deltaCell(row.players_delta, row.previous_date, row.elapsed_days));
     tr.appendChild(numCell(fmtInt(row.vp)));
-    tr.appendChild(deltaCell(row.vp_delta));
+    tr.appendChild(deltaCell(row.vp_delta, row.previous_date, row.elapsed_days));
     return tr;
   }
 
@@ -1693,21 +2051,33 @@
     return td;
   }
 
-  function deltaCell(d) {
+  function deltaCell(d, previousDate, elapsedDays) {
     var td = document.createElement("td");
     td.className = "num";
     if (d === null || d === undefined) {
       td.textContent = "\u2014";
       td.classList.add("faint");
-    } else if (d > 0) {
-      td.textContent = "+" + fmtInt(d);
-      td.classList.add("is-positive");
-    } else if (d < 0) {
-      td.textContent = "\u2212" + fmtInt(Math.abs(d));
-      td.classList.add("is-negative");
     } else {
-      td.textContent = "\u00b10";
-      td.classList.add("faint");
+      if (d > 0) {
+        td.textContent = "+" + fmtInt(d);
+        td.classList.add("is-positive");
+      } else if (d < 0) {
+        td.textContent = "\u2212" + fmtInt(Math.abs(d));
+        td.classList.add("is-negative");
+      } else {
+        td.textContent = "\u00b10";
+        td.classList.add("faint");
+      }
+      // Honest horizon: a delta computed across a multi-day gap is marked,
+      // with the actual comparison date in the tooltip. First/adjacent
+      // snapshots carry no marker.
+      if (elapsedDays > 1) {
+        var gap = document.createElement("span");
+        gap.className = "delta-gap";
+        gap.textContent = " (" + elapsedDays + " d)";
+        td.appendChild(gap);
+        td.title = "Compared with " + previousDate;
+      }
     }
     return td;
   }
@@ -1767,12 +2137,12 @@
         var rows = payload && payload.rows ? payload.rows : [];
         if (!rows.length) return;
         var snapshot = rows[rows.length - 1].date;
-        var headers = ["Date", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
+        var headers = ["Date", "Previous snapshot", "Days elapsed", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
         exportCsv(
           "changes-" + snapshot + ".csv",
           headers,
           rows.map(function (r) {
-            return [r.date, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
+            return [r.date, r.previous_date, r.elapsed_days, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
           })
         );
       },
@@ -1806,6 +2176,7 @@
     players: loadPlayers,
     events: loadEvents,
     changes: loadChanges,
+    villages: loadVillages,
   };
 
   function activateTab(tab) {
@@ -1820,6 +2191,8 @@
     });
     var name = tab.id.replace("tab-", "");
     activeTabName = name;
+    // Six tabs can overflow on narrow screens — keep the chosen one visible.
+    tab.scrollIntoView({ block: "nearest", inline: "nearest" });
     if (!activatedTabs[name]) {
       activatedTabs[name] = true;
       tabLoaders[name]();
@@ -1917,6 +2290,7 @@
     wireMetricToggle();
     wireEventsControls();
     wireAllianceSwitch();
+    wireVillagesSearch();
     wireExportButtons();
     // Regions is the default tab — its payload is fetched at init.
     activateTab(document.getElementById("tab-regions"));
@@ -2053,9 +2427,15 @@
   }
 
   function loadSettings() {
-    return api.settings().then(renderSettingsForm).catch(function (err) {
-      showToast("Settings unavailable", err.message, "error");
-    });
+    return api
+      .settings()
+      .then(function (settings) {
+        setFeedback("", ""); // fresh load clears stale save feedback
+        renderSettingsForm(settings);
+      })
+      .catch(function (err) {
+        showToast("Settings unavailable", err.message, "error");
+      });
   }
 
   function wireForm() {

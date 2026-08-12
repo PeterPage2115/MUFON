@@ -30,6 +30,7 @@ than in a split module.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,7 +38,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict, cast
 
-from travian.models import AllianceDay, RegionDay, SummaryDay, VillageRow
+from travian.models import AllianceDay, RegionDay, SummaryDay, VillageHistoryPoint, VillageRow
+
+#: Full coordinate query: ``x|y`` or ``x,y`` with optional padding and signs.
+_COORD_RE = re.compile(r"^(-?\d+)\s*[|,]\s*(-?\d+)$")
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -194,6 +198,27 @@ def save_snapshot(
         _ = conn.executemany(_VILLAGE_UPSERT, values)
 
 
+def _row_to_village(row: _VillageColumns) -> VillageRow:
+    """Map one ``villages`` row to :class:`VillageRow` (round-trips save_snapshot)."""
+    return VillageRow(
+        village_id=row["village_id"],
+        x=row["x"],
+        y=row["y"],
+        tribe=row["tribe"],
+        name=row["name"],
+        player_id=row["player_id"],
+        player_name=row["player_name"],
+        alliance_id=row["alliance_id"],
+        alliance_tag=row["alliance_tag"],
+        population=row["population"],
+        region=row["region"],
+        is_capital=bool(row["is_capital"]),
+        is_city=bool(row["is_city"]),
+        is_harbor=bool(row["is_harbor"]),
+        victory_points=row["victory_points"],
+    )
+
+
 def load_villages(conn: sqlite3.Connection, date: str) -> list[VillageRow]:
     """All villages of ``date`` as ``VillageRow``, ordered by village_id.
 
@@ -206,23 +231,79 @@ def load_villages(conn: sqlite3.Connection, date: str) -> list[VillageRow]:
             (date,),
         ).fetchall(),
     )
+    return [_row_to_village(row) for row in rows]
+
+
+def _parse_coords(query: str) -> tuple[int, int] | None:
+    """``(x, y)`` for a full ``x|y`` / ``x,y`` coordinate query, else None."""
+    match = _COORD_RE.match(query)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _escape_like(text: str) -> str:
+    """Escape ``\\``, ``%`` and ``_`` so LIKE matches the text literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_villages(conn: sqlite3.Connection, snapshot_date: str, query: str, limit: int) -> list[VillageRow]:
+    """Villages of ``snapshot_date`` matching ``query``, population DESC.
+
+    A full ``x|y`` or ``x,y`` (spaces allowed, negatives allowed) is an exact
+    coordinate match; anything else is a literal case-insensitive substring
+    search over ``name`` and ``player_name``. Ties break on ``village_id``.
+    """
+    trimmed = query.strip()
+    coords = _parse_coords(trimmed)
+    if coords is not None:
+        x, y = coords
+        rows = cast(
+            list[_VillageColumns],
+            conn.execute(
+                "SELECT * FROM villages WHERE snapshot_date = ? AND x = ? AND y = ? "
+                "ORDER BY population DESC, village_id ASC LIMIT ?",
+                (snapshot_date, x, y, limit),
+            ).fetchall(),
+        )
+    else:
+        pattern = "%" + _escape_like(trimmed) + "%"
+        rows = cast(
+            list[_VillageColumns],
+            conn.execute(
+                "SELECT * FROM villages WHERE snapshot_date = ? AND ("
+                "name LIKE ? ESCAPE '\\' COLLATE NOCASE OR "
+                "player_name LIKE ? ESCAPE '\\' COLLATE NOCASE"
+                ") ORDER BY population DESC, village_id ASC LIMIT ?",
+                (snapshot_date, pattern, pattern, limit),
+            ).fetchall(),
+        )
+    return [_row_to_village(row) for row in rows]
+
+
+def village_history(conn: sqlite3.Connection, village_id: int, days: int) -> list[VillageHistoryPoint]:
+    """The newest ``days`` stored observations of ``village_id``, ASC by date.
+
+    One point per snapshot date the village existed in — a village removed
+    from the map simply has no row on later dates.
+    """
+    rows = cast(
+        list[_VillageColumns],
+        conn.execute(
+            "SELECT * FROM villages WHERE village_id = ? ORDER BY snapshot_date DESC LIMIT ?",
+            (village_id, days),
+        ).fetchall(),
+    )
+    rows.reverse()
     return [
-        VillageRow(
-            village_id=row["village_id"],
+        VillageHistoryPoint(
+            snapshot_date=row["snapshot_date"],
+            name=row["name"],
             x=row["x"],
             y=row["y"],
-            tribe=row["tribe"],
-            name=row["name"],
-            player_id=row["player_id"],
             player_name=row["player_name"],
-            alliance_id=row["alliance_id"],
             alliance_tag=row["alliance_tag"],
             population=row["population"],
-            region=row["region"],
-            is_capital=bool(row["is_capital"]),
-            is_city=bool(row["is_city"]),
-            is_harbor=bool(row["is_harbor"]),
-            victory_points=row["victory_points"],
         )
         for row in rows
     ]

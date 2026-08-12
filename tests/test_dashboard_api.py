@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -65,6 +65,24 @@ class FakeRunReport:
         return self.result
 
 
+class FakeSyncScheduler:
+    """Async fake of the settings→scheduler callback; records the loop each
+    call ran on (must be the bot loop, never the TestClient loop)."""
+
+    def __init__(self, result: Literal["applied", "unchanged", "pending"] = "applied") -> None:
+        self.result: Literal["applied", "unchanged", "pending"] = result
+        self.calls: list[asyncio.AbstractEventLoop] = []
+
+    async def __call__(self) -> Literal["applied", "unchanged", "pending"]:
+        self.calls.append(asyncio.get_running_loop())
+        return self.result
+
+
+class RaisingSyncScheduler:
+    async def __call__(self) -> Literal["applied", "unchanged", "pending"]:
+        raise RuntimeError("boom")
+
+
 class LoopThread:
     """A real asyncio event loop running in a background thread (the "bot loop")."""
 
@@ -76,7 +94,6 @@ class LoopThread:
     def stop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2)
-
 
 def _row(
     village_id: int,
@@ -149,6 +166,7 @@ def _deps(
     run_report: FakeRunReport | None = None,
     loop: asyncio.AbstractEventLoop | None = None,
     get_status: Callable[[], dashboard_app.StatusData] | None = None,
+    sync_scheduler_fn: dashboard_app.SyncSchedulerFn | None = None,
 ) -> DashboardDeps:
     env = dict(env)
     env["SQLITE_PATH"] = str(db)  # app endpoints open the db via env, like main()
@@ -160,6 +178,7 @@ def _deps(
         bot_loop_getter=lambda: loop,
         get_config=get_config,
         env=env,
+        sync_scheduler_fn=sync_scheduler_fn,
     )
 
 
@@ -171,9 +190,18 @@ def _app(
     run_report: FakeRunReport | None = None,
     loop: asyncio.AbstractEventLoop | None = None,
     get_status: Callable[[], dashboard_app.StatusData] | None = None,
+    sync_scheduler_fn: dashboard_app.SyncSchedulerFn | None = None,
 ) -> FastAPI:
     return create_app(
-        _deps(db, env, run_fetch=run_fetch, run_report=run_report, loop=loop, get_status=get_status)
+        _deps(
+            db,
+            env,
+            run_fetch=run_fetch,
+            run_report=run_report,
+            loop=loop,
+            get_status=get_status,
+            sync_scheduler_fn=sync_scheduler_fn,
+        )
     )
 
 
@@ -263,6 +291,24 @@ class TestIndex:
         with TestClient(_app(db, _env())) as client:
             resp = client.get("/")
         assert resp.status_code == 404
+
+
+class TestStaticAssets:
+    def test_chartjs_served_locally_without_cdn(self, tmp_path: Path) -> None:
+        """Offline contract: the index references the vendored Chart.js and no
+        CDN host, and the vendored file is served with 200."""
+        db = tmp_path / "s.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            index = client.get("/")
+            chart = client.get("/static/vendor/chart.umd.min.js")
+        assert index.status_code == 200
+        assert "/static/vendor/chart.umd.min.js" in index.text
+        assert "cdn.jsdelivr.net" not in index.text
+        assert "https://cdn" not in index.text
+        assert chart.status_code == 200
+        assert chart.headers["content-type"].startswith(("application/javascript", "text/javascript"))
+        assert b"Chart.js v4" in chart.content
 
 
 # --- GET /api/status -----------------------------------------------------------
@@ -501,6 +547,74 @@ class TestPutSettings:
             resp = client.put("/api/settings", json={"FETCH_HOUR": 5, "DISCORD_TOKEN": "x"})
         assert resp.status_code == 422
         assert _db_settings(db) == {}  # the valid key was NOT written
+
+    def test_non_schedule_write_returns_not_needed(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"REPORT_EMBED_COLOR": 0x2ECC71})
+        assert resp.status_code == 200
+        assert resp.json()["schedule_sync"] == "not_needed"
+
+    def test_schedule_write_without_loop_returns_pending(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:  # no loop, no sync fn
+            resp = client.put("/api/settings", json={"FETCH_HOUR": 5})
+        assert resp.status_code == 200
+        assert resp.json()["schedule_sync"] == "pending"
+        assert resp.json()["FETCH_HOUR"] == 5  # settings payload intact
+
+    def test_schedule_sync_runs_on_bot_loop(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        loop_thread = LoopThread()
+        fake = FakeSyncScheduler()
+        try:
+            with TestClient(_app(db, _env(), loop=loop_thread.loop, sync_scheduler_fn=fake)) as client:
+                resp = client.put("/api/settings", json={"FETCH_HOUR": 5})
+            assert resp.status_code == 200
+            assert resp.json()["schedule_sync"] == "applied"
+            assert fake.calls == [loop_thread.loop]  # bot loop, NOT the TestClient loop
+        finally:
+            loop_thread.stop()
+
+    def test_schedule_sync_unchanged_result_passthrough(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        loop_thread = LoopThread()
+        fake = FakeSyncScheduler(result="unchanged")
+        try:
+            with TestClient(_app(db, _env(), loop=loop_thread.loop, sync_scheduler_fn=fake)) as client:
+                resp = client.put("/api/settings", json={"FETCH_MINUTE": 30})
+            assert resp.json()["schedule_sync"] == "unchanged"
+        finally:
+            loop_thread.stop()
+
+    def test_schedule_sync_failure_keeps_setting_and_logs_error(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        loop_thread = LoopThread()
+        try:
+            with TestClient(_app(db, _env(), loop=loop_thread.loop, sync_scheduler_fn=RaisingSyncScheduler())) as client:
+                resp = client.put("/api/settings", json={"FETCH_HOUR": 6})
+            assert resp.status_code == 200
+            assert resp.json()["schedule_sync"] == "failed"
+            assert _db_settings(db)["FETCH_HOUR"] == 6  # saved config NOT rolled back
+            conn = store.connect(db)
+            try:
+                logs = store.recent_logs(conn, 10)
+            finally:
+                conn.close()
+            assert any(
+                entry["job"] == "config"
+                and entry["level"] == "error"
+                and entry["message"].startswith("scheduler sync failed: ")
+                for entry in logs
+            )
+        finally:
+            loop_thread.stop()
+
 
 
 # --- POST /api/actions/* -------------------------------------------------------
@@ -811,12 +925,14 @@ class TestAnalysisEvents:
         assert [e["village_name"] for e in payload["gained"]] == ["Village 7"]
         assert [e["village_name"] for e in payload["lost"]] == ["Village 4"]
         gained = payload["gained"][0]
+        assert gained["village_id"] == 7  # additive field for history lookup
         assert gained["x"] == 7
         assert gained["y"] == 7
         assert gained["region"] == "Testland"
         assert gained["event"] == "gained"
         assert gained["owner_tag"] is None
         assert gained["owner_player"] == "Player 7"
+        assert payload["lost"][0]["village_id"] == 4
         assert payload["lost"][0]["event"] == "lost_deleted"
         assert payload["lost"][0]["owner_tag"] is None
         assert payload["lost"][0]["owner_player"] is None
@@ -1082,6 +1198,118 @@ class TestAnalysisPlayers:
                 "growth": [],
                 "new_villages": [],
             }
+
+
+class TestAnalysisVillages:
+    def test_empty_db_returns_null_snapshot_and_no_results(self, tmp_path: Path) -> None:
+        db = tmp_path / "v.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/villages", params={"q": "anything"}).json()
+
+        assert payload == {"snapshot_date": None, "results": []}
+
+    def test_empty_query_returns_snapshot_without_scan(self, tmp_path: Path) -> None:
+        db = tmp_path / "v.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/villages", params={"q": "   "}).json()
+
+        assert payload["snapshot_date"] == SNAPSHOT_DATE
+        assert payload["results"] == []
+
+    def test_search_by_name_and_coordinates(self, tmp_path: Path) -> None:
+        db = tmp_path / "v.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            by_name = client.get("/api/analysis/villages", params={"q": "Village 1"}).json()
+            by_coords = client.get("/api/analysis/villages", params={"q": "1|1"}).json()
+
+        assert by_name["snapshot_date"] == SNAPSHOT_DATE
+        assert [row["village_id"] for row in by_name["results"]] == [1]
+        assert [row["village_id"] for row in by_coords["results"]] == [1]
+        fields = {
+            "village_id",
+            "name",
+            "x",
+            "y",
+            "region",
+            "population",
+            "player_name",
+            "alliance_tag",
+            "is_capital",
+            "is_city",
+            "is_harbor",
+        }
+        assert set(by_name["results"][0]) == fields
+        assert by_name["results"][0]["name"] == "Village 1"
+        assert by_name["results"][0]["population"] == 100
+        assert by_name["results"][0]["is_capital"] is False
+
+    def test_limit_clamped_and_no_match_empty(self, tmp_path: Path) -> None:
+        db = tmp_path / "v.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/villages", params={"q": "x", "limit": 0}).status_code == 422
+            assert client.get("/api/analysis/villages", params={"q": "x", "limit": 51}).status_code == 422
+            no_match = client.get("/api/analysis/villages", params={"q": "zzz-no-match"}).json()
+
+        assert no_match["snapshot_date"] == SNAPSHOT_DATE
+        assert no_match["results"] == []
+
+    def test_not_filtered_by_alliance_tags(self, tmp_path: Path) -> None:
+        """The explorer covers the whole map; ENEMY villages are searchable
+        even though the analysis alliance filter would exclude them."""
+        db = tmp_path / "v.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/villages", params={"q": "8|8"}).json()
+
+        assert [row["village_id"] for row in payload["results"]] == [8]
+        assert payload["results"][0]["alliance_tag"] == "ENEMY"
+
+
+class TestAnalysisVillageHistory:
+    def test_history_chronological_and_present(self, tmp_path: Path) -> None:
+        db = tmp_path / "vh.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/villages/7/history", params={"days": 60}).json()
+
+        assert payload["village_id"] == 7
+        assert payload["latest_snapshot_date"] == "2026-08-09"
+        assert payload["present_in_latest"] is True
+        assert [point["snapshot_date"] for point in payload["history"]] == ["2026-08-09"]
+        point = payload["history"][0]
+        assert set(point) == {"snapshot_date", "name", "x", "y", "player_name", "alliance_tag", "population"}
+        assert point["name"] == "Village 7"
+        assert point["player_name"] == "Player 7"
+
+    def test_deleted_village_history_present_in_latest_false(self, tmp_path: Path) -> None:
+        db = tmp_path / "vh.db"
+        _seed_analysis_db(db)  # village 4 exists 08-08 only
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/villages/4/history").json()
+
+        assert payload["present_in_latest"] is False
+        assert [point["snapshot_date"] for point in payload["history"]] == ["2026-08-08"]
+
+    def test_unknown_village_404(self, tmp_path: Path) -> None:
+        db = tmp_path / "vh.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/villages/999/history")
+
+        assert res.status_code == 404
+        assert res.json()["detail"] == "unknown village id 999"
+
+    def test_days_clamped(self, tmp_path: Path) -> None:
+        db = tmp_path / "vh.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/villages/1/history", params={"days": 0}).status_code == 422
+            assert client.get("/api/analysis/villages/1/history", params={"days": 61}).status_code == 422
+
 
 
 class TestAuthModes:

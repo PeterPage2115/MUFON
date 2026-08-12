@@ -476,6 +476,11 @@ code,
   box-shadow: 0 0 8px rgba(145, 189, 120, 0.55);
 }
 
+.card-state--attention .status-dot {
+  background: var(--status-error);
+  box-shadow: 0 0 8px rgba(212, 119, 105, 0.55);
+}
+
 .card__footer {
   padding: var(--space-3) var(--space-6);
   border-top: 1px solid var(--border-default);
@@ -1356,6 +1361,11 @@ tr.is-inactive td {
   white-space: nowrap;
 }
 
+.delta-gap {
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
 .table-loading {
   color: var(--text-faint);
   text-align: center;
@@ -1534,11 +1544,30 @@ tr.is-inactive td {
 }
 
 .event-line__name {
+  /* A semantic button now (opens the village history) — reset the UA
+     button chrome and keep the exact link-like look the span had. */
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   font-weight: 650;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.event-line__name:hover {
+  color: var(--accent-gold-soft);
+  text-decoration: underline;
+}
+
+.event-line__name:focus-visible {
+  outline: 2px solid var(--accent-gold-soft);
+  outline-offset: 2px;
 }
 
 .event-line__coords {
@@ -1585,6 +1614,143 @@ tr.is-inactive td {
   padding: var(--space-8) var(--space-4);
   text-align: center;
 }
+
+/* --- Village explorer (search + history) --------------------------------------- */
+
+.village-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 480px;
+}
+
+.village-search input {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+  padding: var(--space-2) var(--space-3);
+}
+
+.village-search input:hover {
+  border-color: var(--border-strong);
+}
+
+.village-search input:focus {
+  outline: 2px solid var(--accent-gold-soft);
+  outline-offset: 1px;
+  border-color: var(--border-strong);
+}
+
+.village-name {
+  white-space: nowrap;
+}
+
+.village-open {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent-gold-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.village-open:hover {
+  text-decoration: underline;
+}
+
+.village-open:focus-visible {
+  outline: 2px solid var(--accent-gold-soft);
+  outline-offset: 2px;
+}
+
+.village-flags {
+  white-space: nowrap;
+}
+
+.village-flag {
+  display: inline-block;
+  margin-inline-end: var(--space-1);
+  padding: 1px var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.village-detail {
+  margin-top: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-input);
+  background: var(--surface-secondary);
+}
+
+.village-detail__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.village-detail__head h3 {
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.village-detail__absent {
+  color: var(--status-warning);
+  font-size: 0.8125rem;
+}
+
+.village-detail__meta {
+  display: flex;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  margin: var(--space-3) 0;
+}
+
+.village-detail__meta dt {
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.village-detail__meta dd {
+  margin: 2px 0 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.village-detail .chart-card {
+  margin-top: var(--space-3);
+  border: 1px solid var(--border-default);
+}
+
+.village-detail .data-table__wrap {
+  margin-top: var(--space-3);
+}
+
+.village-detail__note {
+  margin-top: var(--space-3);
+  color: var(--text-faint);
+  font-size: 0.875rem;
+}
+
+.village-detail__error {
+  margin-top: var(--space-3);
+  color: var(--status-error);
+  font-size: 0.875rem;
+}
+
 
 /* --- Token dialog (LAN mode) ----------------------------------------------------- */
 
@@ -1772,6 +1938,17 @@ tr.is-inactive td {
 
   .tab-bar {
     padding-inline: var(--space-3);
+  }
+
+  /* Six analysis tabs must not squeeze their labels: the bar scrolls
+     horizontally instead (activateTab keeps the chosen tab in view). */
+  .tab-bar--analysis {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tab-bar--analysis .tab-bar__tab {
+    flex: 0 0 auto;
   }
 
   .analysis-controls {
