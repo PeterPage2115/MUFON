@@ -40,8 +40,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     # SQLite lives on the travian-data volume mounted at /data.
     SQLITE_PATH=/data/travian.db \
     # Loopback by default; docker-compose overrides to 0.0.0.0 (the port is
-    # published loopback-only on the HOST, so the dashboard never leaves
-    # localhost).
+    # then published on ALL host interfaces — auth must come from .env:
+    # token mode or complete OAuth mode, see docker-compose.yml).
     DASHBOARD_BIND=127.0.0.1
 
 # Non-root runtime user; /data is the volume mount point and must be writable.
@@ -56,8 +56,9 @@ USER appuser
 # with a REAL DISCORD_TOKEN (main() exits 1 on validation failure BEFORE the
 # dashboard thread starts). Without a valid env the container reports
 # unhealthy; that is the intended signal. /healthz is deliberately
-# token-free (the API routes may require DASHBOARD_TOKEN when the dashboard
-# is exposed on the LAN — the healthcheck must not need the secret).
+# auth-free (the API routes may require a token or an OAuth session when
+# the dashboard is exposed on the LAN — the healthcheck must not need the
+# secret).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
 

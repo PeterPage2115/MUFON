@@ -230,6 +230,8 @@
     chip.appendChild(logout);
   }
 
+  // Resolves to the decoded auth status (or null when the request fails);
+  // the bootstrap waits for it before starting any protected request.
   function loadAuthStatus() {
     return fetch("/api/auth/status", { headers: { Accept: "application/json" } })
       .then(function (res) {
@@ -239,13 +241,15 @@
         return null;
       })
       .then(function (data) {
-        if (!data) return;
-        authState.method = data.method;
-        authState.user = data.user || null;
-        renderUserChip();
-        if (authState.user && !authState.user.admin) {
-          document.body.classList.add("is-member");
+        if (data) {
+          authState.method = data.method;
+          authState.user = data.user || null;
+          renderUserChip();
+          document.body.classList.toggle("is-member", !!(authState.user && !authState.user.admin));
         }
+        // Auth resolution is complete — reveal whatever the session allows.
+        document.body.classList.remove("auth-pending");
+        return data;
       });
   }
 
@@ -1945,12 +1949,14 @@
     els.settingsForm.addEventListener("submit", submitSettings);
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    wireForm();
+  // Auth-gated bootstrap: protected requests start only after
+  // /api/auth/status settles, so a member's denied settings call can never
+  // emit its misleading admin-required toast. `includeSettings` is true for
+  // admins, token mode and no-auth mode; a confirmed OAuth member gets the
+  // read-only flows (status, logs, analysis) only.
+  function startDashboardData(includeSettings) {
     loadStatus();
-    loadSettings();
     loadLogs();
-    loadAuthStatus();
     window.setInterval(loadLogs, LOG_REFRESH_MS);
     // Live dashboard: status and the active analysis tab refresh every
     // minute; a busy panel (in-flight load) is skipped, never double-fired.
@@ -1970,5 +1976,26 @@
     });
 
     wireAnalysis();
+    if (includeSettings) loadSettings();
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    wireForm();
+    loadAuthStatus().then(function (status) {
+      if (status && status.method === "oauth") {
+        if (!status.user) {
+          // Confirmed OAuth session missing — ask for login before any
+          // protected request; the callback reload re-enters this bootstrap
+          // with the adopted session token.
+          showTokenDialog();
+          return;
+        }
+        // OAuth member: read-only (admin users pass includeSettings=true).
+        startDashboardData(status.user.admin);
+        return;
+      }
+      // Token / no-auth mode (or an unknown status): full dashboard.
+      startDashboardData(true);
+    });
   });
 })();

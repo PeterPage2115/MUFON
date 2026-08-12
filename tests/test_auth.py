@@ -141,8 +141,8 @@ def _member(roles: list[str]) -> dict[str, object]:
     return {"roles": roles}
 
 
-def _guild(guild_id: str, permissions: object) -> dict[str, object]:
-    return {"id": guild_id, "permissions": permissions}
+def _guild(guild_id: str, permissions: object, *, owner: bool = False) -> dict[str, object]:
+    return {"id": guild_id, "permissions": permissions, "owner": owner}
 
 
 class TestResolveAdmin:
@@ -154,6 +154,14 @@ class TestResolveAdmin:
 
     def test_no_admin_role_configured(self) -> None:
         assert auth.resolve_admin(_member(["555"]), [], "100", admin_role_id=None) == (True, False)
+
+    def test_owner_grants_admin(self) -> None:
+        guilds = [_guild("100", "0", owner=True)]
+        assert auth.resolve_admin(_member([]), guilds, "100", admin_role_id=555) == (True, True)
+
+    def test_administrator_bit_grants_admin(self) -> None:
+        guilds = [_guild("100", "8")]  # Administrator = 1 << 3
+        assert auth.resolve_admin(_member([]), guilds, "100", admin_role_id=555) == (True, True)
 
     def test_manage_guild_bit_grants_admin(self) -> None:
         guilds = [_guild("100", "32")]  # Manage Server = 1 << 5
@@ -185,3 +193,6 @@ class TestResolveAdmin:
 class TestConstants:
     def test_manage_guild_bit_is_0x20(self) -> None:
         assert auth.MANAGE_GUILD_BIT == 1 << 5
+
+    def test_administrator_bit_is_0x08(self) -> None:
+        assert auth.ADMINISTRATOR_BIT == 1 << 3

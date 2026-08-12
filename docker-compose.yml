@@ -10,21 +10,25 @@ services:
     env_file: .env
     environment:
       # Bind INSIDE the container: must be 0.0.0.0 for the port publish to
-      # work. Access control is the DASHBOARD_TOKEN (set it in .env): the
-      # API routes require Authorization: Bearer <DASHBOARD_TOKEN> whenever
-      # the dashboard is reachable beyond loopback.
+      # work. Access control is either the DASHBOARD_TOKEN (token mode) or
+      # a complete Discord OAuth configuration (oauth mode, see .env): the
+      # API routes require a valid session/Bearer token whenever the
+      # dashboard is reachable beyond loopback. DASHBOARD_AUTH_MODE=none is
+      # UNSAFE with this all-interface port mapping — never use it here.
       DASHBOARD_BIND: "0.0.0.0"
       # With DASHBOARD_BIND=0.0.0.0 and DASHBOARD_LOOPBACK_ONLY != "true"
-      # the API requires the token (see app.py _auth_required). The static
-      # UI and /healthz stay public so the browser can load the page and
-      # the container HEALTHCHECK works without the secret.
+      # the API requires auth (see app.py _auth_required). The static UI
+      # and /healthz stay public so the browser can load the page and the
+      # container HEALTHCHECK works without the secret.
       DASHBOARD_LOOPBACK_ONLY: "false"
       # Container system time (tools like `date`). Python timezones come from
       # the pip tzdata package — FETCH_TZ/REPORT_TZ are independent of this.
       TZ: Europe/Warsaw
     ports:
-      # Published on all interfaces — the DASHBOARD_TOKEN env (see .env) is
-      # the access control. Do NOT remove the token when this port is open.
+      # Published on all host interfaces — keep either token mode with a
+      # real DASHBOARD_TOKEN or complete OAuth mode (all OAUTH_* keys set)
+      # in .env. Do NOT run this mapping with DASHBOARD_AUTH_MODE=none or an
+      # empty token.
       - "8099:8090"
     volumes:
       # SQLite data survives container recreation.

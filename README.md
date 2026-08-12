@@ -71,9 +71,10 @@ Discord account (member = read-only view, admin = full control).
   whoever holds the token is admin.
 - **Discord OAuth mode** (recommended for the alliance): members log in
   with their Discord account — any member of the guild sees the dashboard
-  read-only (Settings/Actions hidden), holders of `ADMIN_ROLE_ID` (or
-  Manage Server permission) get full control. Actions are rate-limited
-  (6 per minute per user).
+  read-only (Settings/Actions hidden), while the server owner, Discord
+  Administrator / Manage Server permission holders, and `ADMIN_ROLE_ID`
+  holders get full control. Actions are rate-limited (6 per minute per
+  user).
 - **Loopback mode**: no auth at all, only meaningful when the dashboard is
   bound to a loopback address.
 - The dashboard is designed for **LAN** use (see Deployment); it is not a
@@ -99,7 +100,7 @@ default. Settings edited in the dashboard are stored in the DB and
 | `CHANNEL_ID` | *(required)* | Channel where the daily report is posted. |
 | `ALLIANCE_TAGS` | *(empty)* | Comma-separated alliance tags, e.g. `UFO,PR-U`. Empty → daily report skipped with a warning. |
 | `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** card. OUR tags (`ALLIANCE_TAGS`) are bold; empty → no Standings card. |
-| `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server) and the dashboard admin role in OAuth mode. |
+| `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server) and the dashboard admin role in OAuth mode. Dashboard admins in OAuth mode are `ADMIN_ROLE_ID` holders, the server owner, and Discord Administrator / Manage Server permission holders. |
 | `FETCH_HOUR` | `0` | Hour (24h) of the daily map.sql fetch. |
 | `FETCH_MINUTE` | `15` | Minute of the daily map.sql fetch. |
 | `FETCH_TZ` | `Europe/London` | IANA timezone of the fetch schedule. |
@@ -138,7 +139,7 @@ env:
 | `DASHBOARD_AUTH_MODE` | Behavior |
 |---|---|
 | `token` (default) | Every API call needs `Authorization: Bearer <DASHBOARD_TOKEN>` (constant-time comparison). Whoever holds the token is admin. |
-| `oauth` | Discord OAuth login; guild members get a read-only view, `ADMIN_ROLE_ID` / Manage Server holders get full control. Actions rate-limited (6/minute/user). |
+| `oauth` | Discord OAuth login; guild members get a read-only view (Settings/Actions hidden). Full control goes to `ADMIN_ROLE_ID` holders, the server owner, and Discord Administrator / Manage Server permission holders. Actions rate-limited (6/minute/user). |
 | `none` | No auth — only sensible with a loopback bind. |
 
 With `DASHBOARD_AUTH_MODE` unset, the legacy heuristic applies: non-loopback
@@ -158,9 +159,10 @@ bind with `DASHBOARD_LOOPBACK_ONLY != "true"` → `token`, otherwise `none`.
    `OAUTH_GUILD_ID` (right-click the server → Copy Server ID with Developer
    Mode enabled).
 5. Set `DASHBOARD_AUTH_MODE=oauth` plus the three `OAUTH_*` keys and
-   restart. Members log in with **Sign in with Discord**; the first member
-   to log in must hold `ADMIN_ROLE_ID` or Manage Server permission to
-   configure the dashboard.
+   restart. Members log in with **Sign in with Discord**; the first person
+   to log in must be the server owner, a Discord Administrator / Manage
+   Server permission holder, or an `ADMIN_ROLE_ID` holder to configure the
+   dashboard.
 
 Notes: OAuth sessions live in memory (TTL 7 days) — restarting the bot logs
 everyone out. If an `OAUTH_*` key is missing while `oauth` is requested, the

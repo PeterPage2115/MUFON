@@ -26,6 +26,8 @@ import httpx
 DISCORD_API: Final = "https://discord.com/api/v10"
 #: ``Manage Server`` permission bit (1 << 5) in Discord's permission bitfield.
 MANAGE_GUILD_BIT: Final = 1 << 5
+#: ``Administrator`` permission bit (1 << 3) in Discord's permission bitfield.
+ADMINISTRATOR_BIT: Final = 1 << 3
 
 _SESSION_TTL: Final = timedelta(days=7)
 _HTTP_TIMEOUT: Final = 10.0
@@ -219,27 +221,34 @@ def resolve_admin(
     """(is_member, is_admin) for the dashboard login.
 
     With a member object (member endpoint OK): membership confirmed; admin =
-    ``admin_role_id`` in the member's roles OR the ``Manage Server`` bit in
-    the guilds-list entry. With ``member=None`` (endpoint 404): membership
-    falls back to the guilds list, and admin can only come from the
-    ``Manage Server`` bit — never from a role check (roles are unknown).
+    ``admin_role_id`` in the member's roles OR the matching guilds-list
+    entry. With ``member=None`` (endpoint 404): membership falls back to the
+    guilds list, and admin can only come from the matching entry — never
+    from a role check (roles are unknown). A guilds-list entry grants admin
+    when it marks the user as the guild ``owner`` or its decimal-string
+    ``permissions`` include the ``Administrator`` or ``Manage Server`` bits.
     """
     guild_id_str = str(guild_id)
 
-    def manage_guild_entry() -> bool:
+    def guild_entry_admin() -> bool:
         entry = next((g for g in guilds if str(g.get("id", "")) == guild_id_str), None)
-        permissions = entry.get("permissions") if entry is not None else None
+        if entry is None:
+            return False
+        if entry.get("owner") is True:
+            return True
+        permissions = entry.get("permissions")
         if not isinstance(permissions, str):
             return False
         try:
-            return (int(permissions) & MANAGE_GUILD_BIT) != 0
+            bits = int(permissions)
         except ValueError:
             return False
+        return (bits & (ADMINISTRATOR_BIT | MANAGE_GUILD_BIT)) != 0
 
     if member is None:
         if not any(str(g.get("id", "")) == guild_id_str for g in guilds):
             return False, False
-        return True, manage_guild_entry()
+        return True, guild_entry_admin()
 
     roles: set[str] = set()
     roles_raw = member.get("roles", [])
@@ -247,4 +256,4 @@ def resolve_admin(
         for item in cast(list[object], roles_raw):
             roles.add(str(item))
     has_role = admin_role_id is not None and str(admin_role_id) in roles
-    return True, has_role or manage_guild_entry()
+    return True, has_role or guild_entry_admin()

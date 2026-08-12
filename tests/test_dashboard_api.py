@@ -1142,6 +1142,7 @@ class TestOAuthFlow:
         monkeypatch,
         *,
         member: object = _MEMBER_MISSING,
+        guilds: list[dict[str, object]] | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> TestClient:
         db = tmp_path / "oa.db"
@@ -1150,6 +1151,7 @@ class TestOAuthFlow:
         if member is self._MEMBER_MISSING:
             member = {"roles": []}
         member_obj = cast(dict[str, object] | None, member)
+        guilds_list = guilds if guilds is not None else []
         self.exchange_calls: list[tuple[str, str, str, str]] = []
 
         def fake_exchange(client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict[str, object]:
@@ -1159,7 +1161,7 @@ class TestOAuthFlow:
         monkeypatch.setattr(dashboard_auth, "exchange_code", fake_exchange)
         monkeypatch.setattr(dashboard_auth, "fetch_user", lambda token: {"id": "u1", "username": "Tester"})
         monkeypatch.setattr(dashboard_auth, "fetch_guild_member", lambda token, guild_id: member_obj)
-        monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: [])
+        monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: guilds_list)
         return TestClient(_app(db, env, loop=loop), follow_redirects=False)
 
     def test_login_redirects_to_discord_with_state(self, tmp_path: Path, monkeypatch) -> None:
@@ -1262,6 +1264,25 @@ class TestOAuthFlow:
                 assert res.json() == {"status": "ok", "message": "completed"}
         finally:
             loop.stop()
+
+    def test_manage_guild_permission_grants_admin_with_member_response(self, tmp_path: Path, monkeypatch) -> None:
+        # The member endpoint succeeds (no roles), but the guilds list entry
+        # carries Manage Server (32) — that alone must grant admin.
+        client = self._client(
+            tmp_path, monkeypatch, member={"roles": []}, guilds=[{"id": "100", "permissions": "32"}]
+        )
+        with client:
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+            assert res.status_code == 302
+            token = res.headers["location"].split("session=", 1)[1]
+            headers = {"Authorization": f"Bearer {token}"}
+
+            assert client.get("/api/auth/status", headers=headers).json()["user"] == {
+                "name": "Tester",
+                "admin": True,
+            }
+            assert client.get("/api/settings", headers=headers).status_code == 200
 
     def test_callback_not_a_member(self, tmp_path: Path, monkeypatch) -> None:
         client = self._client(tmp_path, monkeypatch, member=None)  # member endpoint 404s, guilds empty

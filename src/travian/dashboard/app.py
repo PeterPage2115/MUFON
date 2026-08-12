@@ -682,12 +682,11 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 return RedirectResponse("/?#auth_error=login_failed", status_code=302)
             user = await asyncio.to_thread(auth.fetch_user, access_token_raw)
             member = await asyncio.to_thread(auth.fetch_guild_member, access_token_raw, deps.env.get("OAUTH_GUILD_ID", ""))
-            # Member-endpoint fallback: the guilds list alone can still prove
-            # membership (and carries the Manage Server permission bit).
-            if member is None:
-                guilds = await asyncio.to_thread(auth.fetch_guilds, access_token_raw)
-            else:
-                guilds = []
+            # The guilds list is fetched in every path: besides the
+            # member-endpoint fallback it carries the owner flag and the
+            # permission bitfield (Administrator / Manage Server) that
+            # resolve_admin uses to grant dashboard admin status.
+            guilds = await asyncio.to_thread(auth.fetch_guilds, access_token_raw)
         except Exception:  # noqa: BLE001 — any OAuth failure is a login failure, never a crash
             return RedirectResponse("/?#auth_error=login_failed", status_code=302)
         guild_id_raw = deps.env.get("OAUTH_GUILD_ID", "")
