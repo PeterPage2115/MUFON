@@ -233,7 +233,14 @@
   // Resolves to the decoded auth status (or null when the request fails);
   // the bootstrap waits for it before starting any protected request.
   function loadAuthStatus() {
-    return fetch("/api/auth/status", { headers: { Accept: "application/json" } })
+    // Send the stored bearer too: in oauth mode the server resolves the
+    // session user only from the Authorization header. Without it the
+    // callback's freshly adopted ?session=<token> would read back as
+    // user:null and the login dialog would reopen despite HTTP 200.
+    var headers = { Accept: "application/json" };
+    var token = localStorage.getItem(TOKEN_KEY);
+    if (token) headers.Authorization = "Bearer " + token;
+    return fetch("/api/auth/status", { headers: headers })
       .then(function (res) {
         return res.status === 200 ? res.json() : null;
       })
@@ -295,7 +302,12 @@
     var dialog = ensureTokenDialog();
     // Auth-aware content: oauth mode offers the Discord login (the token
     // field is meaningless there); token mode keeps the classic form.
-    fetch("/api/auth/status", { headers: { Accept: "application/json" } })
+    // Same bearer handling as loadAuthStatus — the header only ever
+    // refines the response, it never downgrades the dialog choice.
+    var headers = { Accept: "application/json" };
+    var token = localStorage.getItem(TOKEN_KEY);
+    if (token) headers.Authorization = "Bearer " + token;
+    fetch("/api/auth/status", { headers: headers })
       .then(function (res) {
         return res.status === 200 ? res.json() : null;
       })
