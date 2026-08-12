@@ -326,6 +326,27 @@ class TestLoadMergedConfig:
         finally:
             conn.close()
 
+    def test_color_env_out_of_range_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(ValueError, match="between 0x000000 and 0xFFFFFF"):
+                bot_main.load_merged_config(conn, {"REPORT_EMBED_COLOR": "0x1000000"})
+            with pytest.raises(ValueError, match="between 0x000000 and 0xFFFFFF"):
+                bot_main.load_merged_config(conn, {"REPORT_EMBED_COLOR": "-1"})
+        finally:
+            conn.close()
+
+    def test_color_db_out_of_range_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"REPORT_EMBED_COLOR": 0x1000000})
+        try:
+            with pytest.raises(ValueError, match="between 0x000000 and 0xFFFFFF"):
+                bot_main.load_merged_config(conn, {})
+        finally:
+            conn.close()
+
     def test_bad_channel_id_raises(self) -> None:
         conn = store.connect(":memory:")
         store.init_schema(conn)

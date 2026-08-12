@@ -412,11 +412,6 @@ code,
   box-shadow: 0 0 8px rgba(145, 189, 120, 0.55);
 }
 
-.card-state--warning .status-dot {
-  background: var(--status-warning);
-  box-shadow: 0 0 8px rgba(214, 165, 82, 0.55);
-}
-
 .card__footer {
   padding: var(--space-3) var(--space-6);
   border-top: 1px solid var(--border-default);
@@ -1077,11 +1072,6 @@ code,
   box-shadow: 0 0 10px rgba(212, 119, 105, 0.5);
 }
 
-.toast--info .toast__marker {
-  background: var(--accent-gold);
-  box-shadow: 0 0 10px rgba(209, 168, 74, 0.5);
-}
-
 .toast__body {
   font-size: 0.875rem;
   color: var(--text-primary);
@@ -1535,10 +1525,6 @@ tr.is-inactive td {
   .card--actions,
   .card--logs {
     grid-column: span 6;
-  }
-
-  .metric-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .analysis-layout--regions,

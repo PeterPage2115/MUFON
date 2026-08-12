@@ -1419,7 +1419,6 @@
       var on = t === tab;
       t.setAttribute("aria-selected", String(on));
       t.tabIndex = on ? 0 : -1;
-      t.classList.toggle("is-active", on);
     });
     els.panels.forEach(function (panel) {
       panel.hidden = panel.id !== tab.getAttribute("aria-controls");

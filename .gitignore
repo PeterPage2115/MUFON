@@ -24,6 +24,8 @@ __pycache__/
 # Agent tooling (never commit)
 .codegraph/
 .playwright-mcp/
+# opencode tool artifact (stays on disk, never committed)
+/WATCHDOG.yml
 .omo/boulder.json
 .omo/start-work/
 .omo/run-continuation/

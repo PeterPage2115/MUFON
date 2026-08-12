@@ -1,12 +1,27 @@
 # travian-discord-report-bot — CI.
 #
-# Two jobs:
-#   (a) build-push — builds the image and pushes it to GHCR
-#       (ghcr.io/peterpage2115/mufon) on every push to `main`; tags:
+# Jobs:
+#   (a) quality — the quality gate on every push to `main` and every PR
+#       against `main`: pytest, ruff, basedpyright.
+#   (b) build-push — after quality passes, builds the image and pushes it to
+#       GHCR (ghcr.io/peterpage2115/mufon) on every push to `main`; tags:
 #       `latest` + the 40-char commit sha. The GHCR package is PUBLIC —
 #       the server pulls it anonymously, no `docker login` needed
-#       (see README "Updating").
-#   (b) secret-scan — runs on EVERY push and pull request, unconditionally.
+#       (see README "Updating"). PRs never push an image.
+#   (c) smoke — after build-push, on `main` pushes only: boots the freshly
+#       pushed image with FAKE bot env and polls GET /healthz until 200.
+#       Confirms the alpine image starts, tzdata is present and the
+#       dashboard binds (the healthcheck path) — without a real Discord
+#       token. NOTE: the real entrypoint cannot be used here — an invalid
+#       DISCORD_TOKEN makes discord.py raise LoginFailure and exit(1) before
+#       the dashboard finishes binding (measured locally), so the smoke run
+#       overrides CMD with the dashboard bootstrap (init_schema → merged
+#       config → validate_config → uvicorn), i.e. main() minus the bot login.
+#       The container binds 0.0.0.0 (published loopback-only on the host —
+#       docker forwards to the container interface, not its loopback, so a
+#       127.0.0.1-bound uvicorn would never answer the probe; /healthz is
+#       public by design, the smoke carries no real data).
+#   (d) secret-scan — runs on EVERY push and pull request, unconditionally.
 #       Gitleaks is the primary scanner; a plain grep for a
 #       DISCORD_TOKEN-shaped value (20+ chars, so the EMPTY placeholder in
 #       .env.example never trips it) is the fallback. If either finds
@@ -15,14 +30,36 @@ name: build
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies (frozen lockfile, dev group)
+        run: uv sync --frozen --dev
+
+      - name: Test suite
+        run: uv run pytest -q
+
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: basedpyright type check
+        run: uv run basedpyright src
+
   build-push:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,6 +82,70 @@ jobs:
           tags: |
             ghcr.io/peterpage2115/mufon:latest
             ghcr.io/peterpage2115/mufon:${{ github.sha }}
+
+  smoke:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull the freshly pushed image
+        run: docker pull ghcr.io/peterpage2115/mufon:${{ github.sha }}
+
+      - name: Boot dashboard and poll /healthz
+        shell: bash
+        run: |
+          # 0.0.0.0 inside the ephemeral container: docker port-publishing
+          # forwards to the container interface, not its loopback, so a
+          # 127.0.0.1-bound uvicorn would never answer the host probe. The
+          # host publish stays loopback-only and /healthz is public by
+          # design, so this bind never exposes anything.
+          container=$(docker run -d \
+          --env DISCORD_TOKEN=test-token \
+          --env CHANNEL_ID=1 \
+          --env DASHBOARD_BIND=0.0.0.0 \
+          --env DASHBOARD_PORT=8090 \
+          --env SQLITE_PATH=/tmp/smoke.db \
+          --publish 127.0.0.1:8090:8090 \
+          ghcr.io/peterpage2115/mufon:${{ github.sha }} \
+          python -c "\
+          import os, uvicorn
+          from travian import store
+          from travian.bot import main as m
+          from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
+          conn = store.connect(os.environ['SQLITE_PATH'])
+          store.init_schema(conn)
+          conn.close()
+          cfg = m._current_config()
+          m.validate_config(cfg)
+          deps = DashboardDeps(
+              get_status=make_status_provider(os.environ['SQLITE_PATH'], m._current_config),
+              run_fetch_fn=m.run_fetch,
+              run_report_fn=m.run_report,
+              bot_loop_getter=lambda: None,
+              get_config=m._current_config,
+              env=os.environ,
+          )
+          uvicorn.run(create_app(deps), host=os.environ.get('DASHBOARD_BIND', '127.0.0.1'), port=int(os.environ.get('DASHBOARD_PORT', '8090')), log_level='warning')")
+          echo "container: $container"
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:8090/healthz" > /dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+              echo "::error::smoke container exited before /healthz responded"
+              docker logs "$container"
+              break
+            fi
+            sleep 1
+          done
+          docker rm -f "$container" > /dev/null 2>&1 || true
+          if [ -z "$ok" ]; then
+            echo "::error::/healthz never returned 200 within 60s"
+            exit 1
+          fi
+          echo "smoke OK: /healthz returned 200"
 
   secret-scan:
     runs-on: ubuntu-latest

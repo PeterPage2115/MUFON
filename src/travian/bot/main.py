@@ -312,13 +312,17 @@ def _as_str(key: str, raw: object) -> str:
 
 def _as_color(key: str, raw: object) -> int:
     if isinstance(raw, int) and not isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
+        color = raw
+    elif isinstance(raw, str):
         try:
-            return int(raw, 0)  # accepts both "0x2ECC71" and decimal
+            color = int(raw, 0)  # accepts both "0x2ECC71" and decimal
         except ValueError:
             raise ValueError(f"setting {key}: expected an integer color, got {raw!r}") from None
-    raise ValueError(f"setting {key}: expected an integer color, got {raw!r}")
+    else:
+        raise TypeError(f"setting {key}: expected an integer color, got {raw!r}")
+    if not 0 <= color <= 0xFFFFFF:
+        raise ValueError(f"setting {key}: color must be between 0x000000 and 0xFFFFFF, got {color!r}")
+    return color
 
 
 def _as_tags(key: str, raw: object) -> list[str]:
