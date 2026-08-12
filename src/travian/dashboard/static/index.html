@@ -44,8 +44,8 @@
       <section class="page-intro" aria-labelledby="page-title">
         <div>
           <p class="overline">Daily server pulse</p>
-          <h1 id="page-title">Keep the alliance report ready.</h1>
-          <p class="page-intro__copy">Watch the latest map snapshot, tune the schedule, and run a report without leaving the command line behind.</p>
+          <h1 id="page-title">Alliance intelligence</h1>
+          <p class="page-intro__copy">Track control, movement, and standings from the latest snapshots.</p>
         </div>
         <div class="page-intro__signal" aria-label="Dashboard refresh status">
           <span class="signal-line" aria-hidden="true"></span>
@@ -53,378 +53,394 @@
         </div>
       </section>
 
-      <div class="dashboard-grid">
-        <article class="card card--status" aria-labelledby="status-title">
-          <header class="card__header">
-            <div>
-              <p class="overline">Snapshot overview</p>
-              <h2 id="status-title">Status</h2>
-            </div>
-            <span class="card-state card-state--healthy"><span class="status-dot" aria-hidden="true"></span>Watching</span>
-          </header>
+      <div class="tab-bar tab-bar--views" id="dashboard-view-tabs" role="tablist" aria-label="Dashboard views">
+        <button class="tab-bar__tab" role="tab" id="dashboard-tab-intelligence" aria-controls="dashboard-panel-intelligence" aria-selected="true" tabindex="0">Intelligence</button>
+        <button class="tab-bar__tab" role="tab" id="dashboard-tab-overview" aria-controls="dashboard-panel-overview" aria-selected="false" tabindex="-1">Overview</button>
+        <button class="tab-bar__tab" role="tab" id="dashboard-tab-operations" aria-controls="dashboard-panel-operations" aria-selected="false" tabindex="-1" hidden data-admin-only>Operations</button>
+      </div>
 
-          <div class="metric-grid" aria-live="polite" aria-busy="true">
-            <div class="metric-tile metric-tile--accent">
-              <span class="metric-label">Villages</span>
-              <strong class="metric-value" data-status-value="villages">—</strong>
-              <span class="metric-note">in latest snapshot</span>
-            </div>
-            <div class="metric-tile">
-              <span class="metric-label">Players</span>
-              <strong class="metric-value" data-status-value="players">—</strong>
-              <span class="metric-note">represented in map data</span>
-            </div>
-            <div class="metric-tile">
-              <span class="metric-label">Alliances</span>
-              <strong class="metric-value" data-status-value="alliances">—</strong>
-              <span class="metric-note">with a registered presence</span>
-            </div>
-            <div class="metric-tile">
-              <span class="metric-label">Population</span>
-              <strong class="metric-value" data-status-value="total_population">—</strong>
-              <span class="metric-note">total across the map</span>
-            </div>
-          </div>
-
-          <div class="schedule-grid">
-            <div class="schedule-row">
-              <span class="metric-label">Next fetch</span>
-              <strong data-status-value="next_fetch">—</strong>
-              <span class="schedule-zone" data-status-value="fetch_tz">—</span>
-            </div>
-            <div class="schedule-row">
-              <span class="metric-label">Next report</span>
-              <strong data-status-value="next_report">—</strong>
-              <span class="schedule-zone" data-status-value="report_tz">—</span>
-            </div>
-          </div>
-
-          <footer class="card__footer status-footer">
-            <span><span class="metric-label">Snapshot date</span> <strong data-status-value="snapshot_date">—</strong></span>
-            <span><span class="metric-label">Source</span> <strong data-status-value="snapshot_source">—</strong></span>
-          </footer>
-          <div class="status-alert is-hidden" data-status-errors role="status" aria-live="polite"></div>
-        </article>
-
-        <article class="card card--settings" aria-labelledby="settings-title">
-          <header class="card__header">
-            <div>
-              <p class="overline">Bot configuration</p>
-              <h2 id="settings-title">Settings</h2>
-            </div>
-            <span class="card-caption">Saved to SQLite</span>
-          </header>
-
-          <form id="settings-form" novalidate>
-            <div class="form-grid">
-              <div class="field field--wide" data-field="ALLIANCE_TAGS">
-                <label for="ALLIANCE_TAGS">Alliance tags</label>
-                <textarea id="ALLIANCE_TAGS" name="ALLIANCE_TAGS" rows="2" autocomplete="off" aria-describedby="ALLIANCE_TAGS-help ALLIANCE_TAGS-error" data-setting-key="ALLIANCE_TAGS"></textarea>
-                <p class="field-help" id="ALLIANCE_TAGS-help">Separate tags with commas or one tag per line.</p>
-                <p class="field-error" id="ALLIANCE_TAGS-error" role="alert"></p>
+      <section class="dashboard-panel" id="dashboard-panel-intelligence" role="tabpanel" aria-labelledby="dashboard-tab-intelligence">
+        <div class="dashboard-grid">
+          <article class="card card--analysis" aria-labelledby="analysis-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Region &amp; alliance history</p>
+                <h2 id="analysis-title">Analysis</h2>
               </div>
-
-              <div class="field field--wide" data-field="TRACKED_ALLIANCES">
-                <label for="TRACKED_ALLIANCES">Tracked alliances (Standings)</label>
-                <textarea id="TRACKED_ALLIANCES" name="TRACKED_ALLIANCES" rows="3" autocomplete="off" aria-describedby="TRACKED_ALLIANCES-help TRACKED_ALLIANCES-error" data-setting-key="TRACKED_ALLIANCES"></textarea>
-                <p class="field-help" id="TRACKED_ALLIANCES-help">Alliances compared in the report's Standings field (ours are bold). Include allies and enemies; leave empty to hide the field.</p>
-                <p class="field-error" id="TRACKED_ALLIANCES-error" role="alert"></p>
+              <div class="analysis-header-side">
+                <span class="card-caption" data-analysis-range hidden>Last 30 days</span>
+                <div class="segmented" id="analysis-alliance-filter" role="group" aria-label="Alliance filter" hidden></div>
               </div>
+            </header>
 
-              <div class="field" data-field="CHANNEL_ID">
-                <label for="CHANNEL_ID">Channel ID</label>
-                <input id="CHANNEL_ID" name="CHANNEL_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="CHANNEL_ID-help CHANNEL_ID-error" data-setting-key="CHANNEL_ID">
-                <p class="field-help" id="CHANNEL_ID-help">Discord channel used for daily reports.</p>
-                <p class="field-error" id="CHANNEL_ID-error" role="alert"></p>
+            <div class="tab-bar" id="analysis-tabs" role="tablist" aria-label="Analysis views">
+              <button class="tab-bar__tab" role="tab" id="tab-regions" aria-controls="panel-regions" aria-selected="true" tabindex="0">Regions</button>
+              <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
+              <button class="tab-bar__tab" role="tab" id="tab-players" aria-controls="panel-players" aria-selected="false" tabindex="-1">Players</button>
+              <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+              <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
+            </div>
+
+            <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
+              <div class="analysis-toolbar">
+                <p class="overline">Latest snapshot vs previous</p>
+                <button class="button button--outline button--small" type="button" data-export="regions" disabled>Export CSV</button>
               </div>
-
-              <div class="field" data-field="ADMIN_ROLE_ID">
-                <label for="ADMIN_ROLE_ID">Admin role ID <span class="optional">Optional</span></label>
-                <input id="ADMIN_ROLE_ID" name="ADMIN_ROLE_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="ADMIN_ROLE_ID-help ADMIN_ROLE_ID-error" data-setting-key="ADMIN_ROLE_ID">
-                <p class="field-help" id="ADMIN_ROLE_ID-help">Allows the <code>/raport</code> command.</p>
-                <p class="field-error" id="ADMIN_ROLE_ID-error" role="alert"></p>
-              </div>
-
-              <fieldset class="schedule-fieldset field--wide">
-                <legend>Fetch schedule</legend>
-                <div class="schedule-controls">
-                  <div class="field" data-field="FETCH_HOUR">
-                    <label for="FETCH_HOUR">Hour</label>
-                    <input id="FETCH_HOUR" name="FETCH_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="FETCH_HOUR-error" data-setting-key="FETCH_HOUR">
-                    <p class="field-error" id="FETCH_HOUR-error" role="alert"></p>
+              <div class="analysis-layout--regions">
+                <div class="data-table__wrap">
+                  <table class="data-table data-table--regions" aria-label="Region control summary">
+                    <thead>
+                      <tr>
+                        <th class="th--left" scope="col">Region</th>
+                        <th class="th--left" scope="col">Control</th>
+                        <th class="th--num" scope="col">Share</th>
+                        <th class="th--num" scope="col">Pop</th>
+                        <th class="th--num" scope="col">Δ %</th>
+                        <th class="th--num" scope="col">To 50%</th>
+                      </tr>
+                    </thead>
+                    <tbody data-regions-body></tbody>
+                  </table>
+                </div>
+                <div class="chart-card">
+                  <div class="chart-card__head">
+                    <p class="overline">Share over time</p>
+                    <label class="overline" for="analysis-region-select">Region</label>
+                    <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
                   </div>
-                  <div class="field" data-field="FETCH_MINUTE">
-                    <label for="FETCH_MINUTE">Minute</label>
-                    <input id="FETCH_MINUTE" name="FETCH_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="FETCH_MINUTE-error" data-setting-key="FETCH_MINUTE">
-                    <p class="field-error" id="FETCH_MINUTE-error" role="alert"></p>
+                  <div class="chart-card__canvas">
+                    <canvas id="analysis-chart-regions" role="img" aria-label="Share of population over time"></canvas>
                   </div>
-                  <div class="field field--zone" data-field="FETCH_TZ">
-                    <label for="FETCH_TZ">Timezone</label>
-                    <input id="FETCH_TZ" name="FETCH_TZ" type="text" autocomplete="off" placeholder="Europe/London" aria-describedby="FETCH_TZ-error" data-setting-key="FETCH_TZ">
-                    <p class="field-error" id="FETCH_TZ-error" role="alert"></p>
+                  <div class="region-top" id="region-top" hidden>
+                    <p class="overline" id="region-top-title"></p>
+                    <ol class="region-top__list" id="region-top-list"></ol>
                   </div>
                 </div>
-              </fieldset>
-
-              <fieldset class="schedule-fieldset field--wide">
-                <legend>Report schedule</legend>
-                <div class="schedule-controls">
-                  <div class="field" data-field="REPORT_HOUR">
-                    <label for="REPORT_HOUR">Hour</label>
-                    <input id="REPORT_HOUR" name="REPORT_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="REPORT_HOUR-error" data-setting-key="REPORT_HOUR">
-                    <p class="field-error" id="REPORT_HOUR-error" role="alert"></p>
-                  </div>
-                  <div class="field" data-field="REPORT_MINUTE">
-                    <label for="REPORT_MINUTE">Minute</label>
-                    <input id="REPORT_MINUTE" name="REPORT_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="REPORT_MINUTE-error" data-setting-key="REPORT_MINUTE">
-                    <p class="field-error" id="REPORT_MINUTE-error" role="alert"></p>
-                  </div>
-                  <div class="field field--zone" data-field="REPORT_TZ">
-                    <label for="REPORT_TZ">Timezone</label>
-                    <input id="REPORT_TZ" name="REPORT_TZ" type="text" autocomplete="off" placeholder="Europe/Warsaw" aria-describedby="REPORT_TZ-error" data-setting-key="REPORT_TZ">
-                    <p class="field-error" id="REPORT_TZ-error" role="alert"></p>
-                  </div>
-                </div>
-              </fieldset>
-
-              <div class="field field--wide" data-field="REPORT_EMBED_COLOR">
-                <label for="REPORT_EMBED_COLOR_TEXT">Report embed color</label>
-                <div class="color-control">
-                  <input id="REPORT_EMBED_COLOR" name="REPORT_EMBED_COLOR" type="color" value="#d1a84a" aria-label="Choose report embed color" data-setting-key="REPORT_EMBED_COLOR">
-                  <input id="REPORT_EMBED_COLOR_TEXT" name="REPORT_EMBED_COLOR_TEXT" type="text" value="#D1A84A" inputmode="text" autocomplete="off" spellcheck="false" aria-describedby="REPORT_EMBED_COLOR-help REPORT_EMBED_COLOR-error">
-                </div>
-                <p class="field-help" id="REPORT_EMBED_COLOR-help">Six-digit hexadecimal color, for example #D1A84A.</p>
-                <p class="field-error" id="REPORT_EMBED_COLOR-error" role="alert"></p>
               </div>
-            </div>
+            </section>
 
-            <div class="form-actions">
-              <button class="button button--primary" type="submit" id="save-settings" data-label="Save settings">
-                <span class="button-label">Save settings</span>
-                <span class="button-spinner" aria-hidden="true"></span>
-              </button>
-              <p class="form-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
-            </div>
-          </form>
-        </article>
-
-        <article class="card card--actions" aria-labelledby="actions-title">
-          <header class="card__header">
-            <div>
-              <p class="overline">Manual controls</p>
-              <h2 id="actions-title">Actions</h2>
-            </div>
-            <span class="card-caption">Runs on bot loop</span>
-          </header>
-          <p class="card-intro">Trigger the same jobs used by the scheduler. Buttons stay locked while a run is in flight.</p>
-          <div class="action-stack">
-            <button class="button button--primary button--wide" type="button" id="fetch-action" data-action="fetch" data-label="Fetch now">
-              <span class="button-label">Fetch now</span>
-              <span class="button-spinner" aria-hidden="true"></span>
-            </button>
-            <button class="button button--outline button--wide" type="button" id="report-action" data-action="report" data-label="Send report now">
-              <span class="button-label">Send report now</span>
-              <span class="button-spinner" aria-hidden="true"></span>
-            </button>
-          </div>
-          <div class="action-feedback" id="action-feedback" role="status" aria-live="polite">
-            <span class="feedback-marker" aria-hidden="true"></span>
-            <span>Ready when you are.</span>
-          </div>
-        </article>
-
-        <article class="card card--logs" aria-labelledby="logs-title">
-          <header class="card__header">
-            <div>
-              <p class="overline">Recent activity</p>
-              <h2 id="logs-title">Job log</h2>
-            </div>
-            <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s</span>
-          </header>
-          <ol class="log-list" id="job-log" aria-live="polite" aria-busy="true">
-            <li class="log-empty">Loading recent activity…</li>
-          </ol>
-          <footer class="card__footer log-footer">
-            <span id="log-count">Waiting for the first refresh</span>
-            <span class="mono" id="log-updated">—</span>
-          </footer>
-        </article>
-
-        <article class="card card--analysis" aria-labelledby="analysis-title">
-          <header class="card__header">
-            <div>
-              <p class="overline">Region &amp; alliance history</p>
-              <h2 id="analysis-title">Analysis</h2>
-            </div>
-            <div class="analysis-header-side">
-              <span class="card-caption" data-analysis-range hidden>Last 30 days</span>
-              <div class="segmented" id="analysis-alliance-filter" role="group" aria-label="Alliance filter" hidden></div>
-            </div>
-          </header>
-
-          <div class="tab-bar" role="tablist" aria-label="Analysis views">
-            <button class="tab-bar__tab" role="tab" id="tab-regions" aria-controls="panel-regions" aria-selected="true" tabindex="0">Regions</button>
-            <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
-            <button class="tab-bar__tab" role="tab" id="tab-players" aria-controls="panel-players" aria-selected="false" tabindex="-1">Players</button>
-            <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
-            <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
-          </div>
-
-          <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
-            <div class="analysis-toolbar">
-              <p class="overline">Latest snapshot vs previous</p>
-              <button class="button button--outline button--small" type="button" data-export="regions" disabled>Export CSV</button>
-            </div>
-            <div class="analysis-layout--regions">
-              <div class="data-table__wrap">
-                <table class="data-table data-table--regions" aria-label="Region control summary">
-                  <thead>
-                    <tr>
-                      <th class="th--left" scope="col">Region</th>
-                      <th class="th--left" scope="col">Control</th>
-                      <th class="th--num" scope="col">Share</th>
-                      <th class="th--num" scope="col">Pop</th>
-                      <th class="th--num" scope="col">Δ %</th>
-                      <th class="th--num" scope="col">To 50%</th>
-                    </tr>
-                  </thead>
-                  <tbody data-regions-body></tbody>
-                </table>
-              </div>
+            <section class="analysis-panel" id="panel-alliances" role="tabpanel" aria-labelledby="tab-alliances" hidden>
               <div class="chart-card">
                 <div class="chart-card__head">
-                  <p class="overline">Share over time</p>
-                  <label class="overline" for="analysis-region-select">Region</label>
-                  <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
+                  <p class="overline">Tracked alliances</p>
+                  <div class="segmented" role="group" aria-label="Chart metric">
+                    <button class="segmented__btn" type="button" aria-pressed="true" data-metric="population">Population</button>
+                    <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
+                  </div>
                 </div>
                 <div class="chart-card__canvas">
-                  <canvas id="analysis-chart-regions" role="img" aria-label="Share of population over time"></canvas>
-                </div>
-                <div class="region-top" id="region-top" hidden>
-                  <p class="overline" id="region-top-title"></p>
-                  <ol class="region-top__list" id="region-top-list"></ol>
+                  <canvas id="analysis-chart-standings" role="img" aria-label="Alliance population over time"></canvas>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          <section class="analysis-panel" id="panel-alliances" role="tabpanel" aria-labelledby="tab-alliances" hidden>
-            <div class="chart-card">
-              <div class="chart-card__head">
-                <p class="overline">Tracked alliances</p>
-                <div class="segmented" role="group" aria-label="Chart metric">
-                  <button class="segmented__btn" type="button" aria-pressed="true" data-metric="population">Population</button>
-                  <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
+            <section class="analysis-panel" id="panel-players" role="tabpanel" aria-labelledby="tab-players" hidden>
+              <div class="players-grid">
+                <div class="data-table__wrap">
+                  <table class="data-table" aria-label="Top players by population">
+                    <thead>
+                      <tr>
+                        <th class="th--num" scope="col">Rank</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--num" scope="col">Population</th>
+                      </tr>
+                    </thead>
+                    <tbody data-players-population></tbody>
+                  </table>
+                </div>
+                <div class="data-table__wrap">
+                  <table class="data-table" aria-label="Top players by growth">
+                    <thead>
+                      <tr>
+                        <th class="th--num" scope="col">Rank</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--num" scope="col">Growth</th>
+                      </tr>
+                    </thead>
+                    <tbody data-players-growth></tbody>
+                  </table>
+                </div>
+                <div class="data-table__wrap">
+                  <table class="data-table" aria-label="Top players by new villages">
+                    <thead>
+                      <tr>
+                        <th class="th--num" scope="col">Rank</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--num" scope="col">New villages</th>
+                      </tr>
+                    </thead>
+                    <tbody data-players-new></tbody>
+                  </table>
                 </div>
               </div>
-              <div class="chart-card__canvas">
-                <canvas id="analysis-chart-standings" role="img" aria-label="Alliance population over time"></canvas>
-              </div>
-            </div>
-          </section>
+            </section>
 
-          <section class="analysis-panel" id="panel-players" role="tabpanel" aria-labelledby="tab-players" hidden>
-            <div class="players-grid">
+            <section class="analysis-panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Gained + lost between the selected dates</p>
+                <button class="button button--outline button--small" type="button" data-export="events" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls">
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-events-from">From</label>
+                  <select id="analysis-events-from" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-events-to">To</label>
+                  <select id="analysis-events-to" class="analysis-select"></select>
+                </div>
+                <p class="analysis-controls__error" role="alert" hidden></p>
+              </div>
+              <div class="events-grid" hidden>
+                <div class="event-list">
+                  <div class="event-list__head">
+                    <p class="overline">New villages</p>
+                    <span class="event-list__count mono is-positive">· <span data-events-gained-count>0</span></span>
+                  </div>
+                  <ul class="event-list__items" data-events-gained></ul>
+                </div>
+                <div class="event-list">
+                  <div class="event-list__head">
+                    <p class="overline">Lost villages</p>
+                    <span class="event-list__count mono is-negative">· <span data-events-lost-count>0</span></span>
+                  </div>
+                  <ul class="event-list__items" data-events-lost></ul>
+                </div>
+              </div>
+              <p class="empty-state" data-events-empty hidden></p>
+            </section>
+
+            <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Daily headline history</p>
+                <button class="button button--outline button--small" type="button" data-export="changes" disabled>Export CSV</button>
+              </div>
               <div class="data-table__wrap">
-                <table class="data-table" aria-label="Top players by population">
+                <table class="data-table" aria-label="Daily change history">
                   <thead>
                     <tr>
-                      <th class="th--num" scope="col">Rank</th>
-                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--left" scope="col">Date</th>
+                      <th class="th--num" scope="col">Villages</th>
+                      <th class="th--num" scope="col">Δ</th>
                       <th class="th--num" scope="col">Population</th>
+                      <th class="th--num" scope="col">Δ</th>
+                      <th class="th--num" scope="col">Players</th>
+                      <th class="th--num" scope="col">Δ</th>
+                      <th class="th--num" scope="col">VP</th>
+                      <th class="th--num" scope="col">Δ</th>
                     </tr>
                   </thead>
-                  <tbody data-players-population></tbody>
+                  <tbody data-changes-body></tbody>
                 </table>
               </div>
-              <div class="data-table__wrap">
-                <table class="data-table" aria-label="Top players by growth">
-                  <thead>
-                    <tr>
-                      <th class="th--num" scope="col">Rank</th>
-                      <th class="th--left" scope="col">Player</th>
-                      <th class="th--num" scope="col">Growth</th>
-                    </tr>
-                  </thead>
-                  <tbody data-players-growth></tbody>
-                </table>
-              </div>
-              <div class="data-table__wrap">
-                <table class="data-table" aria-label="Top players by new villages">
-                  <thead>
-                    <tr>
-                      <th class="th--num" scope="col">Rank</th>
-                      <th class="th--left" scope="col">Player</th>
-                      <th class="th--num" scope="col">New villages</th>
-                    </tr>
-                  </thead>
-                  <tbody data-players-new></tbody>
-                </table>
-              </div>
-            </div>
-          </section>
+            </section>
+          </article>
+        </div>
+      </section>
 
-          <section class="analysis-panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
-            <div class="analysis-toolbar">
-              <p class="overline">Gained + lost between the selected dates</p>
-              <button class="button button--outline button--small" type="button" data-export="events" disabled>Export CSV</button>
-            </div>
-            <div class="analysis-controls">
-              <div class="analysis-control">
-                <label class="overline" for="analysis-events-from">From</label>
-                <select id="analysis-events-from" class="analysis-select"></select>
+      <section class="dashboard-panel" id="dashboard-panel-overview" role="tabpanel" aria-labelledby="dashboard-tab-overview" hidden>
+        <div class="dashboard-grid">
+          <article class="card card--status" aria-labelledby="status-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Snapshot overview</p>
+                <h2 id="status-title">Status</h2>
               </div>
-              <div class="analysis-control">
-                <label class="overline" for="analysis-events-to">To</label>
-                <select id="analysis-events-to" class="analysis-select"></select>
-              </div>
-              <p class="analysis-controls__error" role="alert" hidden></p>
-            </div>
-            <div class="events-grid" hidden>
-              <div class="event-list">
-                <div class="event-list__head">
-                  <p class="overline">New villages</p>
-                  <span class="event-list__count mono is-positive">· <span data-events-gained-count>0</span></span>
-                </div>
-                <ul class="event-list__items" data-events-gained></ul>
-              </div>
-              <div class="event-list">
-                <div class="event-list__head">
-                  <p class="overline">Lost villages</p>
-                  <span class="event-list__count mono is-negative">· <span data-events-lost-count>0</span></span>
-                </div>
-                <ul class="event-list__items" data-events-lost></ul>
-              </div>
-            </div>
-            <p class="empty-state" data-events-empty hidden></p>
-          </section>
+              <span class="card-state card-state--healthy"><span class="status-dot" aria-hidden="true"></span>Watching</span>
+            </header>
 
-          <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
-            <div class="analysis-toolbar">
-              <p class="overline">Daily headline history</p>
-              <button class="button button--outline button--small" type="button" data-export="changes" disabled>Export CSV</button>
+            <div class="metric-grid" aria-live="polite" aria-busy="true">
+              <div class="metric-tile metric-tile--accent">
+                <span class="metric-label">Villages</span>
+                <strong class="metric-value" data-status-value="villages">—</strong>
+                <span class="metric-note">in latest snapshot</span>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Players</span>
+                <strong class="metric-value" data-status-value="players">—</strong>
+                <span class="metric-note">represented in map data</span>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Alliances</span>
+                <strong class="metric-value" data-status-value="alliances">—</strong>
+                <span class="metric-note">with a registered presence</span>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Population</span>
+                <strong class="metric-value" data-status-value="total_population">—</strong>
+                <span class="metric-note">total across the map</span>
+              </div>
             </div>
-            <div class="data-table__wrap">
-              <table class="data-table" aria-label="Daily change history">
-                <thead>
-                  <tr>
-                    <th class="th--left" scope="col">Date</th>
-                    <th class="th--num" scope="col">Villages</th>
-                    <th class="th--num" scope="col">Δ</th>
-                    <th class="th--num" scope="col">Population</th>
-                    <th class="th--num" scope="col">Δ</th>
-                    <th class="th--num" scope="col">Players</th>
-                    <th class="th--num" scope="col">Δ</th>
-                    <th class="th--num" scope="col">VP</th>
-                    <th class="th--num" scope="col">Δ</th>
-                  </tr>
-                </thead>
-                <tbody data-changes-body></tbody>
-              </table>
+
+            <div class="schedule-grid">
+              <div class="schedule-row">
+                <span class="metric-label">Next fetch</span>
+                <strong data-status-value="next_fetch">—</strong>
+                <span class="schedule-zone" data-status-value="fetch_tz">—</span>
+              </div>
+              <div class="schedule-row">
+                <span class="metric-label">Next report</span>
+                <strong data-status-value="next_report">—</strong>
+                <span class="schedule-zone" data-status-value="report_tz">—</span>
+              </div>
             </div>
-          </section>
-        </article>
-      </div>
+
+            <footer class="card__footer status-footer">
+              <span><span class="metric-label">Snapshot date</span> <strong data-status-value="snapshot_date">—</strong></span>
+              <span><span class="metric-label">Source</span> <strong data-status-value="snapshot_source">—</strong></span>
+            </footer>
+            <div class="status-alert is-hidden" data-status-errors role="status" aria-live="polite"></div>
+          </article>
+
+          <article class="card card--logs" aria-labelledby="logs-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Recent activity</p>
+                <h2 id="logs-title">Job log</h2>
+              </div>
+              <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s</span>
+            </header>
+            <ol class="log-list" id="job-log" aria-live="polite" aria-busy="true">
+              <li class="log-empty">Loading recent activity…</li>
+            </ol>
+            <footer class="card__footer log-footer">
+              <span id="log-count">Waiting for the first refresh</span>
+              <span class="mono" id="log-updated">—</span>
+            </footer>
+          </article>
+        </div>
+      </section>
+
+      <section class="dashboard-panel" id="dashboard-panel-operations" role="tabpanel" aria-labelledby="dashboard-tab-operations" hidden data-admin-only>
+        <div class="dashboard-grid">
+          <article class="card card--actions" aria-labelledby="actions-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Manual controls</p>
+                <h2 id="actions-title">Actions</h2>
+              </div>
+              <span class="card-caption">Runs on bot loop</span>
+            </header>
+            <p class="card-intro">Trigger the same jobs used by the scheduler. Buttons stay locked while a run is in flight.</p>
+            <div class="action-stack">
+              <button class="button button--primary button--wide" type="button" id="fetch-action" data-action="fetch" data-label="Fetch now">
+                <span class="button-label">Fetch now</span>
+                <span class="button-spinner" aria-hidden="true"></span>
+              </button>
+              <button class="button button--outline button--wide" type="button" id="report-action" data-action="report" data-label="Send report now">
+                <span class="button-label">Send report now</span>
+                <span class="button-spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+            <div class="action-feedback" id="action-feedback" role="status" aria-live="polite">
+              <span class="feedback-marker" aria-hidden="true"></span>
+              <span>Ready when you are.</span>
+            </div>
+          </article>
+
+          <article class="card card--settings" aria-labelledby="settings-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Bot configuration</p>
+                <h2 id="settings-title">Settings</h2>
+              </div>
+              <span class="card-caption">Saved to SQLite</span>
+            </header>
+
+            <form id="settings-form" novalidate>
+              <div class="form-grid">
+                <div class="field field--wide" data-field="ALLIANCE_TAGS">
+                  <label for="ALLIANCE_TAGS">Alliance tags</label>
+                  <textarea id="ALLIANCE_TAGS" name="ALLIANCE_TAGS" rows="2" autocomplete="off" aria-describedby="ALLIANCE_TAGS-help ALLIANCE_TAGS-error" data-setting-key="ALLIANCE_TAGS"></textarea>
+                  <p class="field-help" id="ALLIANCE_TAGS-help">Separate tags with commas or one tag per line.</p>
+                  <p class="field-error" id="ALLIANCE_TAGS-error" role="alert"></p>
+                </div>
+
+                <div class="field field--wide" data-field="TRACKED_ALLIANCES">
+                  <label for="TRACKED_ALLIANCES">Tracked alliances (Standings)</label>
+                  <textarea id="TRACKED_ALLIANCES" name="TRACKED_ALLIANCES" rows="3" autocomplete="off" aria-describedby="TRACKED_ALLIANCES-help TRACKED_ALLIANCES-error" data-setting-key="TRACKED_ALLIANCES"></textarea>
+                  <p class="field-help" id="TRACKED_ALLIANCES-help">Alliances compared in the report's Standings field (ours are bold). Include allies and enemies; leave empty to hide the field.</p>
+                  <p class="field-error" id="TRACKED_ALLIANCES-error" role="alert"></p>
+                </div>
+
+                <div class="field" data-field="CHANNEL_ID">
+                  <label for="CHANNEL_ID">Channel ID</label>
+                  <input id="CHANNEL_ID" name="CHANNEL_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="CHANNEL_ID-help CHANNEL_ID-error" data-setting-key="CHANNEL_ID">
+                  <p class="field-help" id="CHANNEL_ID-help">Discord channel used for daily reports.</p>
+                  <p class="field-error" id="CHANNEL_ID-error" role="alert"></p>
+                </div>
+
+                <div class="field" data-field="ADMIN_ROLE_ID">
+                  <label for="ADMIN_ROLE_ID">Admin role ID <span class="optional">Optional</span></label>
+                  <input id="ADMIN_ROLE_ID" name="ADMIN_ROLE_ID" type="number" inputmode="numeric" step="1" autocomplete="off" aria-describedby="ADMIN_ROLE_ID-help ADMIN_ROLE_ID-error" data-setting-key="ADMIN_ROLE_ID">
+                  <p class="field-help" id="ADMIN_ROLE_ID-help">Allows the <code>/raport</code> command.</p>
+                  <p class="field-error" id="ADMIN_ROLE_ID-error" role="alert"></p>
+                </div>
+
+                <fieldset class="schedule-fieldset field--wide">
+                  <legend>Fetch schedule</legend>
+                  <div class="schedule-controls">
+                    <div class="field" data-field="FETCH_HOUR">
+                      <label for="FETCH_HOUR">Hour</label>
+                      <input id="FETCH_HOUR" name="FETCH_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="FETCH_HOUR-error" data-setting-key="FETCH_HOUR">
+                      <p class="field-error" id="FETCH_HOUR-error" role="alert"></p>
+                    </div>
+                    <div class="field" data-field="FETCH_MINUTE">
+                      <label for="FETCH_MINUTE">Minute</label>
+                      <input id="FETCH_MINUTE" name="FETCH_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="FETCH_MINUTE-error" data-setting-key="FETCH_MINUTE">
+                      <p class="field-error" id="FETCH_MINUTE-error" role="alert"></p>
+                    </div>
+                    <div class="field field--zone" data-field="FETCH_TZ">
+                      <label for="FETCH_TZ">Timezone</label>
+                      <input id="FETCH_TZ" name="FETCH_TZ" type="text" autocomplete="off" placeholder="Europe/London" aria-describedby="FETCH_TZ-error" data-setting-key="FETCH_TZ">
+                      <p class="field-error" id="FETCH_TZ-error" role="alert"></p>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <fieldset class="schedule-fieldset field--wide">
+                  <legend>Report schedule</legend>
+                  <div class="schedule-controls">
+                    <div class="field" data-field="REPORT_HOUR">
+                      <label for="REPORT_HOUR">Hour</label>
+                      <input id="REPORT_HOUR" name="REPORT_HOUR" type="number" min="0" max="23" inputmode="numeric" step="1" aria-describedby="REPORT_HOUR-error" data-setting-key="REPORT_HOUR">
+                      <p class="field-error" id="REPORT_HOUR-error" role="alert"></p>
+                    </div>
+                    <div class="field" data-field="REPORT_MINUTE">
+                      <label for="REPORT_MINUTE">Minute</label>
+                      <input id="REPORT_MINUTE" name="REPORT_MINUTE" type="number" min="0" max="59" inputmode="numeric" step="1" aria-describedby="REPORT_MINUTE-error" data-setting-key="REPORT_MINUTE">
+                      <p class="field-error" id="REPORT_MINUTE-error" role="alert"></p>
+                    </div>
+                    <div class="field field--zone" data-field="REPORT_TZ">
+                      <label for="REPORT_TZ">Timezone</label>
+                      <input id="REPORT_TZ" name="REPORT_TZ" type="text" autocomplete="off" placeholder="Europe/Warsaw" aria-describedby="REPORT_TZ-error" data-setting-key="REPORT_TZ">
+                      <p class="field-error" id="REPORT_TZ-error" role="alert"></p>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <div class="field field--wide" data-field="REPORT_EMBED_COLOR">
+                  <label for="REPORT_EMBED_COLOR_TEXT">Report embed color</label>
+                  <div class="color-control">
+                    <input id="REPORT_EMBED_COLOR" name="REPORT_EMBED_COLOR" type="color" value="#d1a84a" aria-label="Choose report embed color" data-setting-key="REPORT_EMBED_COLOR">
+                    <input id="REPORT_EMBED_COLOR_TEXT" name="REPORT_EMBED_COLOR_TEXT" type="text" value="#D1A84A" inputmode="text" autocomplete="off" spellcheck="false" aria-describedby="REPORT_EMBED_COLOR-help REPORT_EMBED_COLOR-error">
+                  </div>
+                  <p class="field-help" id="REPORT_EMBED_COLOR-help">Six-digit hexadecimal color, for example #D1A84A.</p>
+                  <p class="field-error" id="REPORT_EMBED_COLOR-error" role="alert"></p>
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button class="button button--primary" type="submit" id="save-settings" data-label="Save settings">
+                  <span class="button-label">Save settings</span>
+                  <span class="button-spinner" aria-hidden="true"></span>
+                </button>
+                <p class="form-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+              </div>
+            </form>
+          </article>
+        </div>
+      </section>
     </main>
 
     <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="true"></div>

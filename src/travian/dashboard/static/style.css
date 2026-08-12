@@ -296,16 +296,6 @@ code,
   color: var(--status-error);
 }
 
-/* Settings and Actions are admin-only: hidden while authentication is
-   unknown (.auth-pending — removed once /api/auth/status settles) and for
-   a confirmed member (.is-member). */
-.is-member .card--settings,
-.is-member .card--actions,
-.auth-pending .card--settings,
-.auth-pending .card--actions {
-  display: none;
-}
-
 /* --- Page intro -------------------------------------------------------------- */
 
 .page-intro {
@@ -362,6 +352,21 @@ code,
   gap: var(--space-6);
 }
 
+/* --- Dashboard views ------------------------------------------------------------ */
+
+/* Panels are toggled with the hidden attribute; an explicit rule keeps the
+   [hidden] boundary even for cards that set their own display. */
+.dashboard-panel[hidden] {
+  display: none;
+}
+
+/* Top-level navigation reuses the analysis tab-bar language; only the
+   outside-card placement differs (no card inset, spacing to its panel). */
+.tab-bar--views {
+  padding-inline: 0;
+  margin-bottom: var(--space-6);
+}
+
 .card {
   grid-column: span 6;
   background: var(--surface-secondary);
@@ -374,20 +379,20 @@ code,
 }
 
 .card--status {
-  grid-column: span 7;
+  grid-column: span 12;
   border-left: 3px solid var(--accent-gold);
 }
 
 .card--settings {
-  grid-column: span 5;
+  grid-column: span 8;
 }
 
 .card--actions {
-  grid-column: span 5;
+  grid-column: span 4;
 }
 
 .card--logs {
-  grid-column: span 7;
+  grid-column: span 12;
 }
 
 .card:nth-child(2) {
@@ -1657,10 +1662,8 @@ tr.is-inactive td {
 /* --- Responsive --------------------------------------------------------------------------- */
 
 @media (max-width: 1100px) {
-  .card--status,
-  .card--settings,
   .card--actions,
-  .card--logs {
+  .card--settings {
     grid-column: span 6;
   }
 

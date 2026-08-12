@@ -923,7 +923,9 @@
       analysisEls = {
         range: document.querySelector("[data-analysis-range]"),
         allianceFilter: document.getElementById("analysis-alliance-filter"),
-        tabs: Array.prototype.slice.call(document.querySelectorAll(".tab-bar__tab")),
+        // Only the analysis sub-tabs — the top-level dashboard view tabs live
+        // in #dashboard-view-tabs and are wired separately.
+        tabs: Array.prototype.slice.call(document.querySelectorAll("#analysis-tabs .tab-bar__tab")),
         panels: Array.prototype.slice.call(document.querySelectorAll(".analysis-panel")),
         regionsBody: document.querySelector("[data-regions-body]"),
         regionSelect: document.getElementById("analysis-region-select"),
@@ -1908,6 +1910,127 @@
     activateTab(document.getElementById("tab-regions"));
   }
 
+  /* --- dashboard views ------------------------------------------------------------ */
+
+  var dashboardState = {
+    activeView: "intelligence",
+    canManage: true,
+    analysisInitialized: false,
+    operationsInitialized: false,
+  };
+
+  function dashboardElements() {
+    return {
+      tablist: document.getElementById("dashboard-view-tabs"),
+      tabs: Array.prototype.slice.call(document.querySelectorAll("#dashboard-view-tabs .tab-bar__tab")),
+      panels: Array.prototype.slice.call(document.querySelectorAll(".dashboard-panel")),
+      operationsTab: document.getElementById("dashboard-tab-operations"),
+      operationsPanel: document.getElementById("dashboard-panel-operations"),
+    };
+  }
+
+  function canManageFromAuth(status) {
+    // Token / no-auth mode — or an unresolved status — is manageable; only a
+    // confirmed OAuth admin gains the operational controls.
+    return status ? status.method !== "oauth" || Boolean(status.user && status.user.admin) : true;
+  }
+
+  function setDashboardAccess(canManage) {
+    dashboardState.canManage = canManage;
+    var els = dashboardElements();
+    // A member never sees the Operations tab; the panel stays hidden and no
+    // settings/action request is ever issued. The panel opens only through
+    // activateDashboardView, which re-checks the same gate.
+    if (els.operationsTab) els.operationsTab.hidden = !canManage;
+    if (!canManage && els.operationsPanel) els.operationsPanel.hidden = true;
+  }
+
+  function activateDashboardView(name) {
+    if (name === "operations" && !dashboardState.canManage) return;
+    var els = dashboardElements();
+    var tab = document.getElementById("dashboard-tab-" + name);
+    var panel = document.getElementById("dashboard-panel-" + name);
+    if (!tab || !panel) return;
+    els.tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+    });
+    els.panels.forEach(function (p) {
+      p.hidden = p !== panel;
+    });
+    dashboardState.activeView = name;
+    onDashboardViewActivated(name);
+  }
+
+  function onDashboardViewActivated(name) {
+    if (name === "intelligence") {
+      // Lazy analysis: wire it (and its default Regions request) exactly
+      // once, then re-measure charts — one created or updated while the
+      // panel was hidden keeps a zero-size canvas.
+      if (!dashboardState.analysisInitialized) {
+        dashboardState.analysisInitialized = true;
+        wireAnalysis();
+      }
+      Object.keys(analysisState.charts).forEach(function (chartName) {
+        var chart = analysisState.charts[chartName];
+        if (chart && chart.resize) chart.resize();
+      });
+      return;
+    }
+    if (name === "operations" && dashboardState.canManage) {
+      // First selection only: manual actions are wired and Settings loaded
+      // for a manageable user; both stay untouched for members.
+      if (!dashboardState.operationsInitialized) {
+        dashboardState.operationsInitialized = true;
+        wireActionButtons();
+        loadSettings();
+      }
+    }
+  }
+
+  function wireDashboardViews() {
+    var els = dashboardElements();
+    els.tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        activateDashboardView(tab.id.replace("dashboard-tab-", ""));
+      });
+      tab.addEventListener("keydown", function (event) {
+        // Arrow/Home/End navigation walks only the visible top-level tabs,
+        // so a hidden Operations tab is never keyboard-activatable.
+        var visible = els.tabs.filter(function (t) {
+          return !t.hidden;
+        });
+        var index = visible.indexOf(tab);
+        if (index === -1) return;
+        var target = null;
+        if (event.key === "ArrowRight") {
+          target = visible[(index + 1) % visible.length];
+        } else if (event.key === "ArrowLeft") {
+          target = visible[(index - 1 + visible.length) % visible.length];
+        } else if (event.key === "Home") {
+          target = visible[0];
+        } else if (event.key === "End") {
+          target = visible[visible.length - 1];
+        }
+        if (target) {
+          event.preventDefault();
+          target.focus();
+          activateDashboardView(target.id.replace("dashboard-tab-", ""));
+        }
+      });
+    });
+  }
+
+  function wireActionButtons() {
+    els.fetchButton.addEventListener("click", function () {
+      runAction("fetch");
+    });
+    els.reportButton.addEventListener("click", function () {
+      runAction("report");
+    });
+  }
+
   /* --- init --------------------------------------------------------------------- */
 
   function loadStatus() {
@@ -1951,37 +2074,41 @@
 
   // Auth-gated bootstrap: protected requests start only after
   // /api/auth/status settles, so a member's denied settings call can never
-  // emit its misleading admin-required toast. `includeSettings` is true for
+  // emit its misleading admin-required toast. `canManage` is true for
   // admins, token mode and no-auth mode; a confirmed OAuth member gets the
   // read-only flows (status, logs, analysis) only.
-  function startDashboardData(includeSettings) {
+  function startDashboardData(canManage) {
+    setDashboardAccess(canManage);
+    // Status and Job log power the top bar and Overview — they load
+    // immediately and keep their existing refresh cadence in every view.
     loadStatus();
     loadLogs();
     window.setInterval(loadLogs, LOG_REFRESH_MS);
-    // Live dashboard: status and the active analysis tab refresh every
-    // minute; a busy panel (in-flight load) is skipped, never double-fired.
+    // Live status refreshes every minute regardless of the active view.
     window.setInterval(loadStatus, 60000);
+    // The active-analysis refresh runs only while Intelligence is active:
+    // hidden panels have nothing to keep warm, and a hidden-panel update
+    // would size the chart at zero width.
     window.setInterval(function () {
+      if (dashboardState.activeView !== "intelligence") return;
       var panel = document.getElementById("panel-" + activeTabName);
       if (!panel || panel.getAttribute("aria-busy") === "true") return;
       var loader = tabLoaders[activeTabName];
       if (loader) loader();
     }, 60000);
-
-    els.fetchButton.addEventListener("click", function () {
-      runAction("fetch");
-    });
-    els.reportButton.addEventListener("click", function () {
-      runAction("report");
-    });
-
-    wireAnalysis();
-    if (includeSettings) loadSettings();
+    // Intelligence is the initial view — analysis wires itself (and issues
+    // its default Regions request) on this first activation, exactly once.
+    activateDashboardView("intelligence");
   }
 
   document.addEventListener("DOMContentLoaded", function () {
     wireForm();
+    wireDashboardViews();
     loadAuthStatus().then(function (status) {
+      var canManage = canManageFromAuth(status);
+      // Resolve the Operations gate before branching: a pending login
+      // (oauth without a session) must not expose the admin-only view.
+      setDashboardAccess(canManage);
       if (status && status.method === "oauth") {
         if (!status.user) {
           // Confirmed OAuth session missing — ask for login before any
@@ -1990,12 +2117,12 @@
           showTokenDialog();
           return;
         }
-        // OAuth member: read-only (admin users pass includeSettings=true).
-        startDashboardData(status.user.admin);
+        // OAuth member: read-only (admin users pass canManage=true).
+        startDashboardData(canManage);
         return;
       }
       // Token / no-auth mode (or an unknown status): full dashboard.
-      startDashboardData(true);
+      startDashboardData(canManage);
     });
   });
 })();
