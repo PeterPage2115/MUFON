@@ -20,6 +20,7 @@ dev = [
     "pytest",
     "ruff",
     "basedpyright",
+    "playwright",
 ]
 
 [build-system]
@@ -39,3 +40,7 @@ pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "browser: browser smoke tests (require `uv run playwright install chromium`)",
+]
+

@@ -520,7 +520,7 @@
       // Active tabs refetch with the new filter; inactive ones reset so the
       // next activation loads with it (their loaders preserve the selection
       // across refetches — regions keeps the region, events keeps from/to).
-      ["regions", "events", "changes"].forEach(function (name) {
+      ["regions", "events", "changes", "players"].forEach(function (name) {
         if (!activatedTabs[name]) return;
         var panel = document.getElementById("panel-" + name);
         if (panel && panel.getAttribute("aria-busy") === "true") return;
@@ -969,9 +969,12 @@
     region: null,
     from: null,
     to: null,
+    eventsLimit: 200,
     regionsDates: [],
     regionsSeries: {},
     standingsPayload: null,
+    standingsSelection: null, // null = first load (derive from defaults); [] = explicit empty
+    standingsDefaults: [],
     villageQuerySeq: 0, // monotonically rising: stale search responses are ignored
     villageDebounce: null,
     villageHistorySeq: 0, // same guard for history responses
@@ -1007,8 +1010,16 @@
         regionTopTitle: document.getElementById("region-top-title"),
         regionTopList: document.getElementById("region-top-list"),
         standingsCanvas: document.getElementById("analysis-chart-standings"),
+        standingsSearch: document.getElementById("analysis-standings-search"),
+        standingsOptions: document.getElementById("analysis-standings-options"),
+        standingsApply: document.getElementById("analysis-standings-apply"),
+        standingsReset: document.getElementById("analysis-standings-reset"),
+        eventsLimit: document.getElementById("analysis-events-limit"),
+        eventsExportNote: document.getElementById("analysis-events-export-note"),
+        standingsFeedback: document.getElementById("analysis-standings-feedback"),
         metricButtons: Array.prototype.slice.call(document.querySelectorAll(".segmented__btn")),
         playersPopulation: document.querySelector("[data-players-population]"),
+        playersVp: document.querySelector("[data-players-vp]"),
         playersGrowth: document.querySelector("[data-players-growth]"),
         playersNew: document.querySelector("[data-players-new]"),
         eventsFrom: document.getElementById("analysis-events-from"),
@@ -1170,6 +1181,21 @@
           .join("&")
       : "";
     return request("GET", "/api/analysis/" + kind + qs);
+  };
+
+  api.standings = function (tags) {
+    var parts = [["days", ANALYSIS_DAYS]];
+    (tags || []).forEach(function (tag) {
+      parts.push(["tag", tag]);
+    });
+    var qs =
+      "?" +
+      parts
+        .map(function (pair) {
+          return encodeURIComponent(pair[0]) + "=" + encodeURIComponent(pair[1]);
+        })
+        .join("&");
+    return request("GET", "/api/analysis/standings" + qs);
   };
 
   function tableLoading(tbody, colspan) {
@@ -1425,21 +1451,44 @@
 
   function loadStandings() {
     var panel = document.getElementById("panel-alliances");
+    var selection = analysisState.standingsSelection;
+    if (selection !== null && !selection.length) {
+      // Explicit empty selection (or no resolvable defaults with a live
+      // snapshot): nothing to chart — the picker shows the validation hint.
+      setPanelBusy("alliances", false);
+      showPanelEmpty(panel, "Select at least one alliance.");
+      return Promise.resolve();
+    }
     setPanelBusy("alliances", true);
     if (!analysisState.charts.alliances) {
       showChartLoading(panel.querySelector(".chart-card"));
     }
     return api
-      .analysis("standings", { days: ANALYSIS_DAYS })
+      .standings(selection)
       .then(function (payload) {
-        analysisState.standingsPayload = payload;
-        var series = payload.series || [];
         var dates = payload.dates || [];
-        if (!series.length || !dates.length) {
+        var series = payload.series || [];
+        analysisState.standingsTags = payload.available_tags || [];
+        if (selection === null) {
+          // First load: the request carried no tag params — adopt the first
+          // eight resolved defaults and slice the fetched series client-side
+          // (no extra request).
+          analysisState.standingsDefaults = (payload.default_tags || []).slice(0, 8);
+          analysisState.standingsSelection = analysisState.standingsDefaults.slice();
+          var chosen = analysisState.standingsSelection;
+          series = series.filter(function (row) {
+            return chosen.indexOf(row.tag) !== -1;
+          });
+        }
+        analysisState.standingsPayload = { dates: dates, series: series };
+        renderStandingsPicker();
+        if (!dates.length) {
           showPanelEmpty(panel, "No data yet.");
+        } else if (!series.length) {
+          showPanelEmpty(panel, "Select at least one alliance.");
         } else {
           hidePanelEmpty(panel);
-          renderStandingsChart(payload);
+          renderStandingsChart();
         }
         setPanelBusy("alliances", false);
       })
@@ -1448,6 +1497,74 @@
         showPanelEmpty(panel, "Couldn't load analysis data.", true);
         activatedTabs.alliances = false;
       });
+  }
+
+  function renderStandingsPicker() {
+    var els = analysisElements();
+    if (!els.standingsOptions) return;
+    var selected = analysisState.standingsSelection || [];
+    var needle = els.standingsSearch.value.trim().toLowerCase();
+    els.standingsOptions.textContent = "";
+    (analysisState.standingsTags || []).forEach(function (tag) {
+      var label = document.createElement("label");
+      label.className = "standings-option";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = tag;
+      box.checked = selected.indexOf(tag) !== -1;
+      label.appendChild(box);
+      var name = document.createElement("span");
+      name.textContent = tag;
+      label.appendChild(name);
+      if (needle !== "" && tag.toLowerCase().indexOf(needle) === -1) {
+        label.hidden = true;
+      }
+      els.standingsOptions.appendChild(label);
+    });
+    updateStandingsFeedback();
+  }
+
+  function updateStandingsFeedback() {
+    var els = analysisElements();
+    var checked = els.standingsOptions.querySelectorAll('input[type="checkbox"]:checked').length;
+    var message = "";
+    if (checked === 0) {
+      message = "Select at least one alliance.";
+    } else if (checked > 8) {
+      message = "Select up to 8 alliances.";
+    }
+    setText(els.standingsFeedback, message);
+    els.standingsFeedback.classList.toggle("is-error", message !== "");
+    els.standingsApply.disabled = checked === 0 || checked > 8;
+  }
+
+  function wireStandingsPicker() {
+    var els = analysisElements();
+    if (!els.standingsApply) return;
+    els.standingsSearch.addEventListener("input", function () {
+      // Local visibility filter only: selected tags stay selected and
+      // nothing is written back to TRACKED_ALLIANCES.
+      var needle = els.standingsSearch.value.trim().toLowerCase();
+      Array.prototype.forEach.call(els.standingsOptions.children, function (label) {
+        var tag = label.textContent.toLowerCase();
+        label.hidden = needle !== "" && tag.indexOf(needle) === -1;
+      });
+    });
+    els.standingsOptions.addEventListener("change", function (event) {
+      if (event.target && event.target.type === "checkbox") updateStandingsFeedback();
+    });
+    els.standingsApply.addEventListener("click", function () {
+      analysisState.standingsSelection = Array.prototype.slice
+        .call(els.standingsOptions.querySelectorAll('input[type="checkbox"]:checked'))
+        .map(function (box) {
+          return box.value;
+        });
+      loadStandings();
+    });
+    els.standingsReset.addEventListener("click", function () {
+      analysisState.standingsSelection = analysisState.standingsDefaults.slice();
+      loadStandings();
+    });
   }
 
   function alignedValues(row, dates, metric) {
@@ -1473,7 +1590,27 @@
     }
   }
 
-  function renderStandingsChart(payload) {
+  function standingsDatasets(series, dates, metric) {
+    // Single builder for both creation and updates: selection changes the
+    // number of series, labels and colors — datasets are replaced whole.
+    return series.map(function (row, i) {
+      return {
+        label: row.tag,
+        data: alignedValues(row, dates, metric),
+        borderColor: row.ours ? cssVar("--accent-gold", "#d1a84a") : SERIES_COLORS[i % SERIES_COLORS.length],
+        borderWidth: row.ours ? 2.5 : 1.75,
+        fill: false,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        tension: 0.3,
+        spanGaps: false,
+      };
+    });
+  }
+
+  function renderStandingsChart() {
+    var payload = analysisState.standingsPayload;
+    if (!payload) return;
     var panel = document.getElementById("panel-alliances");
     var els = analysisElements();
     var card = panel.querySelector(".chart-card");
@@ -1489,15 +1626,13 @@
     var metric = analysisState.metric;
     els.standingsCanvas.setAttribute(
       "aria-label",
-      (metric === "vp" ? "Victory points" : "Population") + " over time for tracked alliances"
+      (metric === "vp" ? "Victory points" : "Population") + " over time for selected alliances"
     );
 
     var chart = analysisState.charts.alliances;
     if (chart) {
       chart.data.labels = dates;
-      chart.data.datasets.forEach(function (ds, i) {
-        ds.data = alignedValues(series[i], dates, metric);
-      });
+      chart.data.datasets = standingsDatasets(series, dates, metric);
       applyStandingsTicks(chart, metric);
       chart.update();
       return;
@@ -1507,19 +1642,7 @@
       type: "line",
       data: {
         labels: dates,
-        datasets: series.map(function (row, i) {
-          return {
-            label: row.tag,
-            data: alignedValues(row, dates, metric),
-            borderColor: row.ours ? cssVar("--accent-gold", "#d1a84a") : SERIES_COLORS[i % SERIES_COLORS.length],
-            borderWidth: row.ours ? 2.5 : 1.75,
-            fill: false,
-            pointRadius: 0,
-            pointHoverRadius: 3,
-            tension: 0.3,
-            spanGaps: false,
-          };
-        }),
+        datasets: standingsDatasets(series, dates, metric),
       },
       options: baseChartOpts(),
     });
@@ -1584,6 +1707,9 @@
     playersSection(els.playersNew, payload.new_villages || [], function (s) {
       return numCell(fmtInt(s.gains));
     });
+    playersSection(els.playersVp, payload.vp || [], function (s) {
+      return numCell(fmtInt(s.vp));
+    });
   }
 
   /* Events tab */
@@ -1638,6 +1764,7 @@
       })
       .then(function () {
         setEventsBusy(false);
+        setPanelBusy("events", false);
       })
       .catch(function (err) {
         setPanelBusy("events", false);
@@ -1648,21 +1775,27 @@
   }
 
   function fetchEvents(from, to) {
-    return api.analysis("events", { from: from, to: to }).then(function (payload) {
-      renderEvents(payload, from, to);
-    });
+    return api
+      .analysis("events", { from: from, to: to, limit: analysisState.eventsLimit })
+      .then(function (payload) {
+        renderEvents(payload, from, to);
+      });
   }
 
   function renderEvents(payload, from, to) {
     var els = analysisElements();
     var gained = payload.gained || [];
     var lost = payload.lost || [];
+    var gainedTotal = payload.gained_total !== undefined ? payload.gained_total : gained.length;
+    var lostTotal = payload.lost_total !== undefined ? payload.lost_total : lost.length;
+    var truncated = gained.length < gainedTotal || lost.length < lostTotal;
     analysisState.eventsPayload = payload;
     setExportEnabled("events", gained.length + lost.length > 0);
     els.gainedList.textContent = "";
     els.lostList.textContent = "";
-    setText(els.gainedCount, String(gained.length));
-    setText(els.lostCount, String(lost.length));
+    setText(els.gainedCount, truncated && gained.length < gainedTotal ? gained.length + " / " + gainedTotal : String(gained.length));
+    setText(els.lostCount, truncated && lost.length < lostTotal ? lost.length + " / " + lostTotal : String(lost.length));
+    if (els.eventsExportNote) els.eventsExportNote.hidden = !truncated;
 
     if (!gained.length && !lost.length) {
       els.eventsGrid.hidden = true;
@@ -2157,7 +2290,11 @@
         (payload.lost || []).forEach(function (e) {
           rows.push(["lost", e.village_name, e.x, e.y, e.region || "", e.owner_tag || e.owner_player || ""]);
         });
-        exportCsv("events-" + analysisState.from + "-" + analysisState.to + ".csv", headers, rows);
+        exportCsv(
+          "events-" + analysisState.from + "-" + analysisState.to + "-limit-" + analysisState.eventsLimit + ".csv",
+          headers,
+          rows
+        );
       },
     };
     document.querySelectorAll("[data-export]").forEach(function (btn) {
@@ -2193,6 +2330,11 @@
     activeTabName = name;
     // Six tabs can overflow on narrow screens — keep the chosen one visible.
     tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // The global alliance filter scopes regions/events/changes/players; the
+    // Alliances tab is a cross-alliance chart with its own local picker.
+    if (els.allianceFilter) {
+      els.allianceFilter.hidden = name === "alliances" || allianceTags.length < 2;
+    }
     if (!activatedTabs[name]) {
       activatedTabs[name] = true;
       tabLoaders[name]();
@@ -2247,7 +2389,7 @@
           b.setAttribute("aria-pressed", String(b === btn));
         });
         if (analysisState.standingsPayload) {
-          renderStandingsChart(analysisState.standingsPayload);
+          renderStandingsChart();
         } else {
           loadStandings();
         }
@@ -2281,6 +2423,12 @@
     }
     els.eventsFrom.addEventListener("change", onChange);
     els.eventsTo.addEventListener("change", onChange);
+    els.eventsLimit.addEventListener("change", function () {
+      // Keeps the selected range and alliance filter; only the row limit
+      // changes (the loader also preserves it across refetches).
+      analysisState.eventsLimit = Number(els.eventsLimit.value);
+      onChange();
+    });
   }
 
   function wireAnalysis() {
@@ -2289,6 +2437,7 @@
     wireRegionSelect();
     wireMetricToggle();
     wireEventsControls();
+    wireStandingsPicker();
     wireAllianceSwitch();
     wireVillagesSearch();
     wireExportButtons();
@@ -2329,6 +2478,11 @@
     // activateDashboardView, which re-checks the same gate.
     if (els.operationsTab) els.operationsTab.hidden = !canManage;
     if (!canManage && els.operationsPanel) els.operationsPanel.hidden = true;
+    // Admin-only cards (the raw Job log) follow the same boundary; a role
+    // switch never re-opens the Operations panel — only its tab does.
+    document.querySelectorAll(".card[data-admin-only]").forEach(function (card) {
+      card.hidden = !canManage;
+    });
   }
 
   function activateDashboardView(name) {
@@ -2468,14 +2622,17 @@
   // /api/auth/status settles, so a member's denied settings call can never
   // emit its misleading admin-required toast. `canManage` is true for
   // admins, token mode and no-auth mode; a confirmed OAuth member gets the
-  // read-only flows (status, logs, analysis) only.
+  // read-only flows (status, analysis) only — logs stay admin-only and are
+  // neither fetched nor polled for members.
   function startDashboardData(canManage) {
     setDashboardAccess(canManage);
-    // Status and Job log power the top bar and Overview — they load
-    // immediately and keep their existing refresh cadence in every view.
+    // Status powers the top bar and Overview; the raw Job log is admin-only
+    // (a member polling it would emit a 403 toast every 15 s).
     loadStatus();
-    loadLogs();
-    window.setInterval(loadLogs, LOG_REFRESH_MS);
+    if (canManage) {
+      loadLogs();
+      window.setInterval(loadLogs, LOG_REFRESH_MS);
+    }
     // Live status refreshes every minute regardless of the active view.
     window.setInterval(loadStatus, 60000);
     // The active-analysis refresh runs only while Intelligence is active:

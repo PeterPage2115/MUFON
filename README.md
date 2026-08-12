@@ -70,13 +70,20 @@ Discord account (member = read-only view, admin = full control).
   `Authorization: Bearer <DASHBOARD_TOKEN>` (constant-time comparison);
   whoever holds the token is admin.
 - **Discord OAuth mode** (recommended for the alliance): members log in
-  with their Discord account — any member of the guild sees the dashboard
-  read-only (Settings/Actions hidden), while the server owner, Discord
+  with their Discord account. Any verified guild member sees the full
+  intelligence (all Analysis tabs incl. the Village explorer, CSV export,
+  snapshot freshness/KPIs/schedules), while the server owner, Discord
   Administrator / Manage Server permission holders, and `ADMIN_ROLE_ID`
-  holders get full control. Actions are rate-limited (6 per minute per
-  user).
+  holders additionally get the raw Job log, the recent-error list on the
+  Status card, Settings and Actions. Settings/Actions are admin-only;
+  `/api/logs` returns 403 for members, and `/api/status` reports
+  `errors: []` for them. Actions are rate-limited (6 per minute per user).
 - **Loopback mode**: no auth at all, only meaningful when the dashboard is
   bound to a loopback address.
+- Sharing the dashboard with players requires
+  `DASHBOARD_AUTH_MODE=oauth` with complete `OAUTH_*` keys — token mode is
+  operator-only (the token holder is always admin, never a read-only
+  player view).
 - The dashboard is designed for **LAN** use (see Deployment); it is not a
   hardened public internet service.
 
@@ -215,14 +222,16 @@ on the pushed image).
 ## Development
 
 ```bash
-uv sync --dev            # install locked dependencies + dev tools
-uv run pytest -q         # full test suite
+uv sync --dev                        # install locked dependencies + dev tools
+uv run playwright install chromium   # browser for the smoke tests (once)
+uv run pytest -q                     # full test suite (incl. the browser smoke)
 uv run ruff check src tests
-uv run basedpyright src  # strict type check (0 errors / 0 warnings / 0 notes)
+uv run basedpyright src              # strict type check (0 errors / 0 warnings / 0 notes)
 ```
 
-CI runs exactly these three gates on every push to `main` and every pull
-request (`quality` job), then builds/pushes the image and smoke-tests it.
+CI runs exactly these gates on every push to `main` and every pull request
+(the `quality` job installs Chromium with `playwright install --with-deps`
+before `pytest`), then builds/pushes the image and smoke-tests it.
 
 ## Backfill (optional)
 

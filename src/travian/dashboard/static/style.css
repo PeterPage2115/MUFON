@@ -360,6 +360,12 @@ code,
   display: none;
 }
 
+/* Author-level `.card { display: flex; }` must never defeat an admin-only
+   card's `hidden` attribute (the member-hidden Job log). */
+.card[hidden] {
+  display: none;
+}
+
 /* Top-level navigation reuses the analysis tab-bar language; only the
    outside-card placement differs (no card inset, spacing to its panel). */
 .tab-bar--views {
@@ -1227,7 +1233,7 @@ code,
 
 .players-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-5);
   align-items: start;
 }
@@ -1463,6 +1469,7 @@ tr.is-inactive td {
   border-color: var(--border-strong);
 }
 
+
 .segmented__btn[aria-pressed="false"] {
   color: var(--text-muted);
   background: transparent;
@@ -1471,6 +1478,61 @@ tr.is-inactive td {
 .segmented__btn:hover:not([aria-pressed="true"]) {
   color: var(--text-secondary);
 }
+/* --- Alliances series picker -------------------------------------------------- */
+
+.standings-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+.standings-picker__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.standings-picker__controls .analysis-select {
+  flex: 1 1 180px;
+  min-width: 140px;
+  cursor: text;
+}
+
+.standings-feedback {
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  min-height: 1em;
+}
+
+.standings-feedback.is-error {
+  color: var(--status-error);
+}
+
+.standings-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  max-height: 132px;
+  overflow-y: auto;
+  padding-bottom: var(--space-2);
+}
+
+.standings-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.standings-option input[type="checkbox"] {
+  accent-color: var(--accent-gold);
+  margin: 0;
+}
+
 
 .analysis-controls {
   display: flex;
@@ -1839,10 +1901,6 @@ tr.is-inactive td {
     gap: var(--space-5);
   }
 
-  .players-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-5);
-  }
 
   .chart-card__canvas {
     height: 240px;

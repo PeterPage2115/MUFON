@@ -34,8 +34,12 @@ Endpoints:
 - ``GET /api/analysis/regions?days=30`` — region share series over the
   window plus the latest-pair control table (``current`` rows carry the
   server-computed ``active``/``controlled``/``to50_needed`` fields).
-- ``GET /api/analysis/standings?days=30`` — population/VP series per
-  TRACKED_ALLIANCES alliance (rows carry ``ours`` for the UI highlight).
+- ``GET /api/analysis/standings?days=30[&tag=<t>]`` — population/VP series
+  per alliance (rows carry ``ours`` for the UI highlight). Without ``tag``:
+  the resolved ``TRACKED_ALLIANCES`` (legacy behavior); with repeated
+  ``tag=<t>``: exactly those tags (1..8, deduped, unknown → 422). Every
+  response adds ``available_tags`` (all current snapshot tags, alphabetical)
+  and ``default_tags`` (resolved ``TRACKED_ALLIANCES`` in config order).
 - ``GET /api/analysis/dates`` — all snapshot dates ascending (Events tab
   selectors).
 - ``GET /api/analysis/events?from=&to=`` — gained/lost village events
@@ -752,8 +756,15 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             session_store.delete(supplied[len("Bearer ") :])
         return Response(status_code=204)
 
-    async def status() -> StatusData:
-        return await asyncio.to_thread(deps.get_status)
+    async def status(request: Request) -> StatusData:
+        # get_status builds a fresh payload dict per call — safe to sanitize
+        # in place for non-admins.
+        data = await asyncio.to_thread(deps.get_status)
+        if not _admin_ok(request):
+            # OAuth members get the identical freshness payload (snapshot,
+            # KPIs, schedules, tags) but never the raw job_log errors.
+            data["errors"] = []
+        return data
 
     async def get_settings(request: Request) -> Response:
         # Settings are configuration — in oauth mode only admins may read
@@ -849,7 +860,12 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             return JSONResponse({"error": "report timed out"}, status_code=504)
         return JSONResponse({"status": "ok", "message": result})
 
-    async def logs(n: Annotated[int, Query(ge=1, le=_MAX_LOG_WINDOW)] = 50) -> list[dict[str, str]]:
+    async def logs(
+        request: Request, n: Annotated[int, Query(ge=1, le=_MAX_LOG_WINDOW)] = 50
+    ) -> Response:
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
+
         def read() -> list[dict[str, str]]:
             conn = store.connect(db_path)
             try:
@@ -857,8 +873,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             finally:
                 conn.close()
 
-        return await asyncio.to_thread(read)
-
+        return JSONResponse(await asyncio.to_thread(read))
     # --- analysis endpoints (report trim) --------------------------------------
     #
     # All of them: asyncio.to_thread + own store.connect per op (existing
@@ -922,21 +937,52 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
-    async def analysis_standings(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+    async def analysis_standings(
+        days: Annotated[int, Query(ge=2, le=60)] = 30,
+        tag: Annotated[list[str] | None, Query()] = None,
+    ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
             try:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"dates": [], "series": []}
+                    return {"dates": [], "series": [], "available_tags": [], "default_tags": []}
+                by_tag = store.alliance_ids_by_tag(conn, latest.snapshot_date)
+                available_tags = sorted(by_tag)
+                default_tags: list[str] = []
+                for configured in cfg.tracked_alliances:
+                    if configured in by_tag and configured not in default_tags:
+                        default_tags.append(configured)
                 dates = store.list_dates(conn)[-days:]
-                ids = _resolve_ids(conn, latest.snapshot_date, cfg.tracked_alliances)
-                if not ids:
-                    return {"dates": dates, "series": []}
-                day_rows = store.alliance_days(conn, dates[0], dates[-1], ids)
-                series = analysis.standings_series(day_rows, set(cfg.alliance_tags))
-                return {"dates": dates, "series": series}
+                if tag is None:
+                    ids = _resolve_ids(conn, latest.snapshot_date, cfg.tracked_alliances)
+                else:
+                    unique: list[str] = []
+                    for value in tag:
+                        if value not in unique:
+                            unique.append(value)
+                    if not unique:
+                        raise HTTPException(status_code=422, detail="standings requires at least one tag")
+                    if len(unique) > 8:
+                        raise HTTPException(status_code=422, detail="standings supports at most 8 tags")
+                    for value in unique:
+                        if value not in by_tag:
+                            raise HTTPException(
+                                status_code=422,
+                                detail=f"unknown standings tag {value!r} — valid: {', '.join(available_tags)}",
+                            )
+                    ids = {alliance_id for value in unique for alliance_id in by_tag[value]}
+                series: list[dict[str, object]] = []
+                if ids:
+                    day_rows = store.alliance_days(conn, dates[0], dates[-1], ids)
+                    series = analysis.standings_series(day_rows, set(cfg.alliance_tags))
+                return {
+                    "dates": dates,
+                    "series": series,
+                    "available_tags": available_tags,
+                    "default_tags": default_tags,
+                }
             finally:
                 conn.close()
 
@@ -956,6 +1002,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         from_: Annotated[str | None, Query(alias="from")] = None,
         to: str | None = None,
         alliance: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -983,15 +1030,48 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 prev_rows = store.load_villages(conn, from_date)
                 curr_rows = store.load_villages(conn, to_date)
                 gained, lost = village_events(prev_rows, curr_rows, ids)
+                # Count the full (already sorted) lists first, then slice —
+                # the limit is per list, so one side never crowds out the other.
                 return {
-                    "gained": [_event_dict(e) for e in gained],
-                    "lost": [_event_dict(e) for e in lost],
+                    "gained": [_event_dict(e) for e in gained[:limit]],
+                    "lost": [_event_dict(e) for e in lost[:limit]],
+                    "gained_total": len(gained),
+                    "lost_total": len(lost),
+                    "limit": limit,
                 }
             finally:
                 conn.close()
 
         return await asyncio.to_thread(read)
+    async def analysis_players(alliance: str | None = None) -> dict[str, object]:
+        """Latest-pair top players: population / growth / new villages / VP (10 each).
 
+        Same pair semantics as the regions table's ``current`` block (latest
+        snapshot vs the previous one); no snapshot → four empty lists.
+        """
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return {"population": [], "growth": [], "new_villages": [], "vp": []}
+                dates = store.list_dates(conn)
+                prev_date = dates[-2] if len(dates) >= 2 else None
+                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
+                curr_rows = store.load_villages(conn, latest.snapshot_date)
+                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
+                rankings = top_players(curr_rows, prev_rows, ids, n=10)
+                return {
+                    "population": [stat.model_dump() for stat in rankings["population"]],
+                    "growth": [stat.model_dump() for stat in rankings["growth"]],
+                    "new_villages": [stat.model_dump() for stat in rankings["new_villages"]],
+                    "vp": [stat.model_dump() for stat in rankings["vp"]],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
     async def analysis_deltas(
         days: Annotated[int, Query(ge=2, le=60)] = 30,
         alliance: str | None = None,
@@ -1012,34 +1092,6 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
-    async def analysis_players(alliance: str | None = None) -> dict[str, object]:
-        """Latest-pair top players: population / growth / new villages (10 each).
-
-        Same pair semantics as the regions table's ``current`` block (latest
-        snapshot vs the previous one); no snapshot → three empty lists.
-        """
-        def read() -> dict[str, object]:
-            conn = store.connect(db_path)
-            try:
-                cfg = deps.get_config()
-                latest = store.load_latest(conn)
-                if latest is None:
-                    return {"population": [], "growth": [], "new_villages": []}
-                dates = store.list_dates(conn)
-                prev_date = dates[-2] if len(dates) >= 2 else None
-                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
-                curr_rows = store.load_villages(conn, latest.snapshot_date)
-                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
-                rankings = top_players(curr_rows, prev_rows, ids, n=10)
-                return {
-                    "population": [stat.model_dump() for stat in rankings["population"]],
-                    "growth": [stat.model_dump() for stat in rankings["growth"]],
-                    "new_villages": [stat.model_dump() for stat in rankings["new_villages"]],
-                }
-            finally:
-                conn.close()
-
-        return await asyncio.to_thread(read)
 
     async def analysis_villages(
         q: str = "",

@@ -48,6 +48,9 @@ jobs:
       - name: Install dependencies (frozen lockfile, dev group)
         run: uv sync --frozen --dev
 
+      - name: Install Chromium for browser smoke tests
+        run: uv run playwright install --with-deps chromium
+
       - name: Test suite
         run: uv run pytest -q
 

@@ -129,6 +129,20 @@
                     <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
                   </div>
                 </div>
+                <div class="standings-picker">
+                  <div class="standings-picker__controls">
+                    <input id="analysis-standings-search" class="analysis-select" type="search"
+                      autocomplete="off" spellcheck="false" placeholder="Search alliances…"
+                      aria-label="Search alliances to chart" aria-describedby="analysis-standings-feedback">
+                    <button class="button button--outline button--small" type="button"
+                      id="analysis-standings-apply" disabled>Apply</button>
+                    <button class="button button--outline button--small" type="button"
+                      id="analysis-standings-reset">Reset</button>
+                  </div>
+                  <p class="standings-feedback" id="analysis-standings-feedback" role="status" aria-live="polite"></p>
+                  <div class="standings-options" id="analysis-standings-options" role="group"
+                    aria-label="Alliances shown on the chart"></div>
+                </div>
                 <div class="chart-card__canvas">
                   <canvas id="analysis-chart-standings" role="img" aria-label="Alliance population over time"></canvas>
                 </div>
@@ -173,6 +187,18 @@
                     <tbody data-players-new></tbody>
                   </table>
                 </div>
+                <div class="data-table__wrap">
+                  <table class="data-table" aria-label="Top players by VP">
+                    <thead>
+                      <tr>
+                        <th class="th--num" scope="col">Rank</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--num" scope="col">VP</th>
+                      </tr>
+                    </thead>
+                    <tbody data-players-vp></tbody>
+                  </table>
+                </div>
               </div>
             </section>
 
@@ -190,8 +216,20 @@
                   <label class="overline" for="analysis-events-to">To</label>
                   <select id="analysis-events-to" class="analysis-select"></select>
                 </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-events-limit">Rows per list</label>
+                  <select id="analysis-events-limit" class="analysis-select">
+                    <option value="200" selected>200</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                  </select>
+                </div>
                 <p class="analysis-controls__error" role="alert" hidden></p>
               </div>
+              <p class="field-help" id="analysis-events-export-note" hidden>
+                CSV exports the rows currently shown — a truncated list (shown / total) needs
+                500 or 1000 rows per list for a fuller export.
+              </p>
               <div class="events-grid" hidden>
                 <div class="event-list">
                   <div class="event-list__head">
@@ -351,13 +389,12 @@
                 <strong data-status-value="next_fetch">—</strong>
                 <span class="schedule-zone" data-status-value="fetch_tz">—</span>
               </div>
-              <div class="schedule-row">
-                <span class="metric-label">Next report</span>
-                <strong data-status-value="next_report">—</strong>
-                <span class="schedule-zone" data-status-value="report_tz">—</span>
-              </div>
+            <div class="schedule-row">
+              <span class="metric-label">Next report</span>
+              <strong data-status-value="next_report">—</strong>
+              <span class="schedule-zone" data-status-value="report_tz">—</span>
             </div>
-
+            </div>
             <footer class="card__footer status-footer">
               <span><span class="metric-label">Snapshot date</span> <strong data-status-value="snapshot_date">—</strong></span>
               <span><span class="metric-label">Source</span> <strong data-status-value="snapshot_source">—</strong></span>
@@ -365,7 +402,7 @@
             <div class="status-alert is-hidden" data-status-errors role="status" aria-live="polite"></div>
           </article>
 
-          <article class="card card--logs" aria-labelledby="logs-title">
+          <article class="card card--logs" aria-labelledby="logs-title" data-admin-only>
             <header class="card__header">
               <div>
                 <p class="overline">Recent activity</p>

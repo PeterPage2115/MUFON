@@ -875,6 +875,8 @@ class TestAnalysisStandings:
             payload = client.get("/api/analysis/standings?days=7").json()
 
         assert payload["dates"] == ["2026-08-07", "2026-08-08", "2026-08-09"]
+        assert payload["available_tags"] == ["ENEMY", "NOVA"]  # alphabetical, alliance_id != 0
+        assert payload["default_tags"] == ["NOVA", "ENEMY"]  # config order
         assert [row["tag"] for row in payload["series"]] == ["NOVA", "ENEMY"]  # latest-pop desc
         nova, enemy = payload["series"]
         assert nova["ours"] is True
@@ -883,6 +885,48 @@ class TestAnalysisStandings:
         assert [p[1] for p in nova["points"]] == [5100, 5602, 5704]
         assert len(nova["vp_points"]) == 3
 
+    def test_tag_filter_returns_exactly_requested(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_analysis_db(db)
+        env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            payload = client.get("/api/analysis/standings?days=7&tag=NOVA").json()
+
+        assert [row["tag"] for row in payload["series"]] == ["NOVA"]
+        assert payload["available_tags"] == ["ENEMY", "NOVA"]  # catalog stays whole-map
+        assert payload["default_tags"] == ["NOVA", "ENEMY"]
+
+    def test_tag_dedupe_preserves_first_occurrence(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_analysis_db(db)
+        env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            payload = client.get("/api/analysis/standings?days=7&tag=ENEMY&tag=NOVA&tag=ENEMY").json()
+
+        # Deduped to ENEMY, NOVA in request order (ENEMY latest-pop 2950 < NOVA
+        # 5704, so series order stays NOVA-first by the standings sort).
+        assert [row["tag"] for row in payload["series"]] == ["NOVA", "ENEMY"]
+
+    def test_nine_tags_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_analysis_db(db)
+        params = [("tag", f"TAG{i}") for i in range(9)]
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/standings", params=params)
+
+        assert res.status_code == 422
+        assert "at most 8 tags" in res.json()["detail"]
+
+    def test_unknown_tag_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "as.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/standings?days=7&tag=NOPE")
+
+        assert res.status_code == 422
+        assert "unknown standings tag 'NOPE'" in res.json()["detail"]
+        assert "ENEMY" in res.json()["detail"]
+
     def test_unresolved_tags_skipped(self, tmp_path: Path) -> None:
         db = tmp_path / "as.db"
         _seed_analysis_db(db)
@@ -890,13 +934,23 @@ class TestAnalysisStandings:
         with TestClient(_app(db, env)) as client:
             payload = client.get("/api/analysis/standings?days=7").json()
 
-        assert payload == {"dates": ["2026-08-07", "2026-08-08", "2026-08-09"], "series": []}
+        assert payload == {
+            "dates": ["2026-08-07", "2026-08-08", "2026-08-09"],
+            "series": [],
+            "available_tags": ["ENEMY", "NOVA"],
+            "default_tags": [],
+        }
 
     def test_empty_db_empty_payload(self, tmp_path: Path) -> None:
         db = tmp_path / "as.db"
         _seed_db(db, snapshot=False)
         with TestClient(_app(db, _env())) as client:
-            assert client.get("/api/analysis/standings?days=7").json() == {"dates": [], "series": []}
+            assert client.get("/api/analysis/standings?days=7").json() == {
+                "dates": [],
+                "series": [],
+                "available_tags": [],
+                "default_tags": [],
+            }
 
 
 class TestAnalysisDates:
@@ -994,8 +1048,11 @@ class TestAnalysisEvents:
         # window itself; nothing disappeared.
         assert [e["village_name"] for e in combined["gained"]] == ["Village 7"]
         assert combined["lost"] == []
+        assert combined["gained_total"] == 1
+        assert combined["lost_total"] == 0
+        assert combined["limit"] == 200
         assert nova == combined
-        assert enemy == {"gained": [], "lost": []}
+        assert enemy == {"gained": [], "lost": [], "gained_total": 0, "lost_total": 0, "limit": 200}
 
     def test_alliance_unknown_422(self, tmp_path: Path) -> None:
         db = tmp_path / "ae.db"
@@ -1005,6 +1062,39 @@ class TestAnalysisEvents:
 
         assert res.status_code == 422
         assert "unknown alliance 'NOPE'" in res.json()["detail"]
+
+    def test_limit_slices_each_list_with_full_totals(self, tmp_path: Path) -> None:
+        db = tmp_path / "ae.db"
+        conn = store.connect(db)
+        store.init_schema(conn)
+        store.save_snapshot(
+            conn,
+            "2026-08-07",
+            [_row(1, population=100), _row(2, population=100), _row(3, population=100), _row(4, population=100)],
+        )
+        store.save_snapshot(
+            conn,
+            "2026-08-08",
+            [_row(1, population=100), _row(5, population=100), _row(6, population=100), _row(7, population=100)],
+        )
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/events?limit=2").json()
+
+        # Full (already sorted) lists counted before the per-list slice: 3
+        # gained (5,6,7) and 3 lost (2,3,4) exist; only 2 of each returned.
+        assert payload["gained_total"] == 3
+        assert payload["lost_total"] == 3
+        assert payload["limit"] == 2
+        assert [e["village_name"] for e in payload["gained"]] == ["Village 5", "Village 6"]
+        assert [e["village_name"] for e in payload["lost"]] == ["Village 2", "Village 3"]
+
+    def test_limit_bounds_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "ae.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/events?limit=0").status_code == 422
+            assert client.get("/api/analysis/events?limit=1001").status_code == 422
 
 
 class TestAnalysisDeltas:
@@ -1139,8 +1229,6 @@ class TestAuthMiddleware:
             assert client.get("/api/status").status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
-
-
 class TestAnalysisPlayers:
     def test_payload_shape_and_rankings(self, tmp_path: Path) -> None:
         db = tmp_path / "pl.db"
@@ -1148,13 +1236,13 @@ class TestAnalysisPlayers:
         with TestClient(_app(db, _env())) as client:
             payload = client.get("/api/analysis/players").json()
 
-        assert set(payload) == {"population", "growth", "new_villages"}
+        assert set(payload) == {"population", "growth", "new_villages", "vp"}
         # Latest day (08-09): NOVA players 1001 (rows 1,2), 1007, 1005 — plus
         # 1004, whose village exists only on 08-08 and who left the alliance
         # (the universe is curr-ours ∪ prev-ours; ranks with population 0).
         assert len(payload["population"]) == 4
         top = payload["population"][0]
-        assert set(top) == {"player_id", "player_name", "population", "villages", "growth", "gains"}
+        assert set(top) == {"player_id", "player_name", "population", "villages", "growth", "vp", "gains"}
         assert top["player_id"] == 1001
         assert top["population"] == 2502 + 2502
         assert top["villages"] == 2
@@ -1167,6 +1255,10 @@ class TestAnalysisPlayers:
         assert [row["player_id"] for row in payload["new_villages"]] == [1007, 1001, 1005, 1004]
         assert payload["new_villages"][0]["gains"] == 1
         assert payload["new_villages"][1]["gains"] == 0
+        # VP: 1001 sums two villages (20), 1007/1005 tie at 10 → population
+        # desc; 1004 left the alliance → vp 0.
+        assert [row["player_id"] for row in payload["vp"]] == [1001, 1007, 1005, 1004]
+        assert [row["vp"] for row in payload["vp"]] == [20, 10, 10, 0]
 
     def test_alliance_filter(self, tmp_path: Path) -> None:
         db = tmp_path / "pl.db"
@@ -1175,10 +1267,13 @@ class TestAnalysisPlayers:
         with TestClient(_app(db, env)) as client:
             enemy = client.get("/api/analysis/players?alliance=ENEMY").json()
 
-        # ENEMY players: 1003 (2000), 1008 (900), 1006 (50) — no growth/gains.
+        # ENEMY players: 1003 (2000), 1008 (900), 1006 (50) — no growth/gains;
+        # all vp 10 → vp ranking degrades to population order.
         assert [row["player_id"] for row in enemy["population"]] == [1003, 1008, 1006]
         assert all(row["growth"] == 0 for row in enemy["growth"])
         assert all(row["gains"] == 0 for row in enemy["new_villages"])
+        assert [row["player_id"] for row in enemy["vp"]] == [1003, 1008, 1006]
+        assert [row["vp"] for row in enemy["vp"]] == [10, 10, 10]
 
     def test_unknown_alliance_422(self, tmp_path: Path) -> None:
         db = tmp_path / "pl.db"
@@ -1197,6 +1292,7 @@ class TestAnalysisPlayers:
                 "population": [],
                 "growth": [],
                 "new_villages": [],
+                "vp": [],
             }
 
 
@@ -1422,6 +1518,56 @@ class TestOAuthFlow:
 
         assert res.status_code == 302
         assert res.headers["location"] == "/?#auth_error=invalid_state"
+
+    def test_member_gets_intel_and_freshness_without_errors_or_logs(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)  # member without admin role
+        with client:
+            _seed_logs(tmp_path / "oa.db")  # operator errors must never leak to members
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+            token = res.headers["location"].split("session=", 1)[1]
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Status: identical freshness payload, sanitized errors.
+            status = client.get("/api/status", headers=headers)
+            assert status.status_code == 200
+            body = status.json()
+            assert body["errors"] == []
+            assert body["snapshot_date"] == SNAPSHOT_DATE
+            assert body["alliance_tags"] == ["NOVA"]
+
+            # Intelligence and the village explorer stay open for members.
+            assert client.get("/api/analysis/players", headers=headers).status_code == 200
+            assert client.get("/api/analysis/villages", params={"q": "Village 1"}, headers=headers).status_code == 200
+
+            # Raw logs are admin-only.
+            assert client.get("/api/logs", headers=headers).status_code == 403
+            assert client.get("/api/logs", headers=headers).json() == {"error": "admin required"}
+
+    def test_admin_sees_logs_and_status_errors(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch, member={"roles": ["555"]})
+        with client:
+            _seed_logs(tmp_path / "oa.db")
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+            token = res.headers["location"].split("session=", 1)[1]
+            headers = {"Authorization": f"Bearer {token}"}
+
+            assert client.get("/api/logs", headers=headers).status_code == 200
+            assert len(client.get("/api/logs", headers=headers).json()) == 5
+            status = client.get("/api/status", headers=headers).json()
+            assert [e["message"] for e in status["errors"]] == ["err4", "err3", "err0"]
+
+    def test_token_mode_bearer_keeps_admin_access(self, tmp_path: Path) -> None:
+        db = tmp_path / "tok.db"
+        _seed_db(db)
+        _seed_logs(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            headers = {"Authorization": "Bearer sekret"}
+            assert client.get("/api/logs", headers=headers).status_code == 200
+            status = client.get("/api/status", headers=headers).json()
+            assert [e["message"] for e in status["errors"]] == ["err4", "err3", "err0"]
 
     def test_callback_missing_params(self, tmp_path: Path, monkeypatch) -> None:
         client = self._client(tmp_path, monkeypatch)

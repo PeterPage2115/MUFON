@@ -20,10 +20,11 @@ locked by these tests:
   None (a region absent from prev yields curr − 0; share_delta = curr share
   − prev share, prev share computed from ALL prev alliances); sorted by
   ``share`` desc, region name asc.
-- ``top_players``: three separate rankings capped at n; player universe =
+- ``top_players``: four separate rankings capped at n; player universe =
   curr-ours ∪ prev-ours; growth None only when prev is None; strict-gained
-  for ``new_villages``; ties break by ``player_name`` ascending (growth and
-  gains add population before name).
+  for ``new_villages``; ``vp`` ranks by summed victory_points desc (then
+  population, then name); ties break by ``player_name`` ascending (growth,
+  gains and vp add population before name).
 """
 
 import logging
@@ -682,6 +683,10 @@ class TestTopPlayers:
         assert [p.gains for p in result["population"]] == [0, 1, 0]
         assert [p.gains for p in result["growth"]] == [1, 0, 0]
         assert [p.gains for p in result["new_villages"]] == [1, 0, 0]
+        # VP ranking: P1 sums two villages (600), P2/P3 tie at 300 → population
+        # desc (P2 400 > P3 300).
+        assert [p.player_id for p in result["vp"]] == [1, 2, 3]
+        assert [p.vp for p in result["vp"]] == [600, 300, 300]
 
     def test_rankings_respect_cap(self):
         curr = [_row(i, 7, i, population=100 + i) for i in range(1, 8)]
@@ -691,10 +696,12 @@ class TestTopPlayers:
         assert len(default["population"]) == 5
         assert len(default["growth"]) == 5
         assert len(default["new_villages"]) == 5
+        assert len(default["vp"]) == 5
         assert [p.player_id for p in default["growth"]] == [7, 6, 5, 4, 3]
 
         small = top_players(curr, prev, {7}, n=3)
         assert [p.player_id for p in small["population"]] == [7, 6, 5]
+        assert len(small["vp"]) == 3
 
     def test_only_our_alliance_players_and_key_order(self):
         curr = [
@@ -704,8 +711,8 @@ class TestTopPlayers:
 
         result = top_players(curr, None, {7})
 
-        assert list(result) == ["population", "growth", "new_villages"]
-        for key in ("population", "growth", "new_villages"):
+        assert list(result) == ["population", "growth", "new_villages", "vp"]
+        for key in ("population", "growth", "new_villages", "vp"):
             assert [p.player_id for p in result[key]] == [1]
 
     def test_growth_ranking_by_delta_including_negative(self):
@@ -734,6 +741,23 @@ class TestTopPlayers:
         assert all(p.growth is None for p in result["growth"])
         assert [p.player_id for p in result["new_villages"]] == [2, 1]
         assert all(p.gains == 0 for p in result["new_villages"])
+        assert [p.player_id for p in result["vp"]] == [2, 1]
+
+    def test_vp_ranking_sums_victory_points_with_tiebreaks(self):
+        prev = [_row(1, 7, 1), _row(2, 7, 2)]
+        curr = [
+            _row(1, 7, 1, victory_points=100),
+            _row(2, 7, 2, victory_points=50),
+            _row(3, 7, 2, victory_points=50, population=999),
+            _row(4, 7, 3, victory_points=200, population=10),
+        ]
+
+        ranking = top_players(curr, prev, {7})["vp"]
+
+        # P3 200 > P1 100; P2 sums 50+50 = 100, ties P1 → population desc
+        # (P2 1099 > P1 100).
+        assert [p.player_id for p in ranking] == [3, 2, 1]
+        assert [p.vp for p in ranking] == [200, 100, 100]
 
     def test_growth_int_when_prev_snapshot_empty(self):
         curr = [_row(1, 7, 1, population=100)]

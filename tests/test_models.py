@@ -271,9 +271,11 @@ class TestPlayerStat:
             population=5000,
             villages=42,
             growth=None,
+            vp=900,
         )
 
         assert stat.growth is None
+        assert stat.vp == 900
 
     def test_serialization_roundtrip(self):
         stat = PlayerStat(
@@ -282,6 +284,7 @@ class TestPlayerStat:
             population=5000,
             villages=42,
             growth=120,
+            vp=900,
         )
 
         assert PlayerStat.model_validate(stat.model_dump()) == stat
@@ -293,9 +296,20 @@ class TestPlayerStat:
             population=5000,
             villages=42,
             growth=120,
+            vp=900,
         )
 
         assert stat.gains is None
+
+    def test_vp_required(self):
+        with pytest.raises(ValidationError):
+            PlayerStat(
+                player_id=7,
+                player_name="Tyrion Lannister",
+                population=5000,
+                villages=42,
+                growth=120,
+            )
 
     def test_gains_roundtrip(self):
         stat = PlayerStat(
@@ -304,12 +318,12 @@ class TestPlayerStat:
             population=5000,
             villages=42,
             growth=120,
+            vp=900,
             gains=3,
         )
 
         assert PlayerStat.model_validate(stat.model_dump()) == stat
         assert stat.gains == 3
-
 
 class TestRegionStat:
     def test_share_is_fraction(self):

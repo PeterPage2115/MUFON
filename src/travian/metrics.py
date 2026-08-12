@@ -415,34 +415,38 @@ def top_players(
     alliance_ids: set[int],
     n: int = 5,
 ) -> dict[str, list[PlayerStat]]:
-    """Three separate top-player rankings for ``alliance_ids``, each capped at n.
+    """Four separate top-player rankings for ``alliance_ids``, each capped at n.
 
     Keys: ``population`` (curr population desc), ``growth`` (curr − prev pop
     desc; negative growth is a real ranking position), ``new_villages``
     (STRICT gained count desc — village absent from prev with ANY owner, same
-    definition as ``village_events``).
+    definition as ``village_events``), ``vp`` (summed victory_points desc,
+    then population desc, then name asc).
 
     The player universe is curr-ours ∪ prev-ours: a player who left the
-    alliance still ranks (population 0, negative growth). ``growth`` is
+    alliance still ranks (population 0, vp 0, negative growth). ``growth`` is
     ``None`` only when ``prev_rows`` is ``None``; ``prev_rows=[]`` (snapshot
     exists, alliance absent) means growth = curr − 0 and every curr-ours
-    village counts as gained. With no previous snapshot all three rankings
-    degenerate to population-desc order (growth ``None``, zero gains). Every
-    stat carries ``gains`` (the strict-gained count — 0 when there is no
-    snapshot) regardless of which ranking it appears in. Ties break by
-    ``player_name`` ascending (case-sensitive plain compare; growth/gains add
-    population before name) — fully deterministic ranking order.
+    village counts as gained. With no previous snapshot the growth/new/vp
+    rankings degenerate to population-desc order (growth ``None``, zero
+    gains). Every stat carries ``gains`` (the strict-gained count — 0 when
+    there is no snapshot) regardless of which ranking it appears in. Ties
+    break by ``player_name`` ascending (case-sensitive plain compare;
+    growth/gains/vp add population before name) — fully deterministic
+    ranking order.
     """
     curr_ours = [row for row in curr_rows if row.alliance_id in alliance_ids]
     prev_ours = [row for row in prev_rows if row.alliance_id in alliance_ids] if prev_rows is not None else []
 
     population: dict[int, int] = {}
     villages: dict[int, int] = {}
+    victory_points: dict[int, int] = {}
     names: dict[int, str] = {}
     for row in curr_ours:
         names[row.player_id] = row.player_name
         population[row.player_id] = population.get(row.player_id, 0) + row.population
         villages[row.player_id] = villages.get(row.player_id, 0) + 1
+        victory_points[row.player_id] = victory_points.get(row.player_id, 0) + row.victory_points
 
     prev_pop: dict[int, int] = {}
     for row in prev_ours:
@@ -464,6 +468,7 @@ def top_players(
             population=population.get(player, 0),
             villages=villages.get(player, 0),
             growth=None if prev_rows is None else population.get(player, 0) - prev_pop.get(player, 0),
+            vp=victory_points.get(player, 0),
             gains=gains[player],
         )
         for player in names
@@ -472,10 +477,12 @@ def top_players(
     by_pop = sorted(stats, key=lambda s: (-s.population, s.player_name))[:n]
     if prev_rows is None:
         # No previous snapshot: growth is None and gains are 0 for everyone,
-        # so the growth/new_villages rankings degenerate to population order.
+        # so the growth/new_villages/vp rankings degenerate to population order.
         by_growth = by_pop
         by_gains = by_pop
+        by_vp = by_pop
     else:
         by_growth = sorted(stats, key=lambda s: (-(s.growth or 0), -s.population, s.player_name))[:n]
         by_gains = sorted(stats, key=lambda s: (-gains[s.player_id], -s.population, s.player_name))[:n]
-    return {"population": by_pop, "growth": by_growth, "new_villages": by_gains}
+        by_vp = sorted(stats, key=lambda s: (-s.vp, -s.population, s.player_name))[:n]
+    return {"population": by_pop, "growth": by_growth, "new_villages": by_gains, "vp": by_vp}

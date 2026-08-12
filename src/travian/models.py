@@ -103,11 +103,13 @@ class VillageEvent(BaseModel):
 
 
 class PlayerStat(BaseModel):
-    """One player's standing in a top ranking (population/growth/new_villages).
+    """One player's standing in a top ranking (population/growth/new_villages/vp).
 
     ``growth`` is ``None`` when there is no previous snapshot; ``gains`` is
     the strict-gained village count (village absent from prev with ANY
-    owner), ``None`` when not provided/unknown.
+    owner), ``None`` when not provided/unknown. ``vp`` is the summed
+    ``victory_points`` over the player's current villages (0 for a departed
+    player).
     """
 
     player_id: int
@@ -115,8 +117,8 @@ class PlayerStat(BaseModel):
     population: int
     villages: int
     growth: int | None
+    vp: int
     gains: int | None = None
-
 
 class RegionStat(BaseModel):
     """Per-region numbers for our alliance(s) plus day-over-day deltas.
