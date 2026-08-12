@@ -676,6 +676,61 @@ class TestAnalysisRegions:
                 "current": [],
             }
 
+    def test_alliance_filter_per_tag(self, tmp_path: Path) -> None:
+        db = tmp_path / "ar.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            combined = client.get("/api/analysis/regions?days=7").json()
+            nova = client.get("/api/analysis/regions?days=7&alliance=NOVA").json()
+            enemy = client.get("/api/analysis/regions?days=7&alliance=ENEMY").json()
+
+        # Combined = union of both tags: every region with ANY of our
+        # presence. Combined covers ALL villages of each region (share 1.0),
+        # so rows sort by region name asc.
+        assert [row["region"] for row in combined["current"]] == ["Borders", "Enemyland", "Testland"]
+        assert set(combined["series"]) == {"Testland", "Borders", "Enemyland"}
+        testland = next(row for row in combined["current"] if row["region"] == "Testland")
+        # Latest day (08-09) Testland: NOVA rows 1,2,7 (row 4 exists only on
+        # 08-08) + ENEMY row 3.
+        assert testland["our_pop"] == 2502 + 2502 + 600 + 2000
+
+        # NOVA-only: Enemyland disappears (no NOVA presence), numbers drop.
+        assert [row["region"] for row in nova["current"]] == ["Testland", "Borders"]
+        assert set(nova["series"]) == {"Testland", "Borders"}
+        nova_testland = next(row for row in nova["current"] if row["region"] == "Testland")
+        assert nova_testland["our_pop"] == 2502 + 2502 + 600
+        assert nova_testland["region_total_pop"] == 2502 + 2502 + 600 + 2000  # all villages, both alliances
+
+        # ENEMY-only: shares computed from the enemy villages only (the
+        # fixture seeds ENEMY in all three regions; Enemyland is fully ours).
+        assert [row["region"] for row in enemy["current"]] == ["Enemyland", "Borders", "Testland"]
+        assert set(enemy["series"]) == {"Testland", "Borders", "Enemyland"}
+        enemyland = next(row for row in enemy["current"] if row["region"] == "Enemyland")
+        assert enemyland["our_pop"] == 900
+        enemy_testland = next(row for row in enemy["current"] if row["region"] == "Testland")
+        assert enemy_testland["our_pop"] == 2000
+
+    def test_alliance_unknown_422_lists_valid(self, tmp_path: Path) -> None:
+        db = tmp_path / "ar.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/regions?days=7&alliance=NOPE")
+
+        assert res.status_code == 422
+        detail = res.json()["detail"]
+        assert "unknown alliance 'NOPE'" in detail
+        assert "NOVA" in detail  # the valid tags are listed
+
+    def test_alliance_combined_explicit_equals_default(self, tmp_path: Path) -> None:
+        db = tmp_path / "ar.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            default = client.get("/api/analysis/regions?days=7").json()
+            explicit = client.get("/api/analysis/regions?days=7&alliance=combined").json()
+        assert default == explicit
+
 
 class TestAnalysisStandings:
     def test_series_rows_with_ours_flag(self, tmp_path: Path) -> None:
@@ -786,6 +841,35 @@ class TestAnalysisEvents:
         with TestClient(_app(db, _env())) as client:
             assert client.get("/api/analysis/events").json() == {"gained": [], "lost": []}
 
+    def test_alliance_filter(self, tmp_path: Path) -> None:
+        # The fixture's only events belong to NOVA (ids 7/4); an ENEMY-only
+        # filter must return no events, NOVA must return the same pair as
+        # combined when ENEMY has no events.
+        db = tmp_path / "ae.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            combined = client.get("/api/analysis/events?from=2026-08-07&to=2026-08-09").json()
+            nova = client.get("/api/analysis/events?from=2026-08-07&to=2026-08-09&alliance=NOVA").json()
+            enemy = client.get("/api/analysis/events?from=2026-08-07&to=2026-08-09&alliance=ENEMY").json()
+
+        # 07→09 window: village 7 appears on 08-09 (gained); village 4
+        # exists only inside the window (08-08) and is not an event of the
+        # window itself; nothing disappeared.
+        assert [e["village_name"] for e in combined["gained"]] == ["Village 7"]
+        assert combined["lost"] == []
+        assert nova == combined
+        assert enemy == {"gained": [], "lost": []}
+
+    def test_alliance_unknown_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "ae.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/events?alliance=NOPE")
+
+        assert res.status_code == 422
+        assert "unknown alliance 'NOPE'" in res.json()["detail"]
+
 
 class TestAnalysisDeltas:
     def test_rows_with_deltas_none_on_oldest(self, tmp_path: Path) -> None:
@@ -817,6 +901,44 @@ class TestAnalysisDeltas:
         _seed_db(db, snapshot=False)
         with TestClient(_app(db, _env())) as client:
             assert client.get("/api/analysis/deltas?days=7").json() == {"dates": [], "rows": []}
+
+    def test_alliance_filter(self, tmp_path: Path) -> None:
+        db = tmp_path / "dl.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            combined = client.get("/api/analysis/deltas?days=7").json()
+            nova = client.get("/api/analysis/deltas?days=7&alliance=NOVA").json()
+            enemy = client.get("/api/analysis/deltas?days=7&alliance=ENEMY").json()
+
+        # Latest-day rows: NOVA swaps village 4 (08-08 only) for village 7
+        # (08-09), so village/pop deltas are 0/+102; ENEMY is static
+        # (3 villages, 2950 pop both days); combined = NOVA + ENEMY rows.
+        assert combined["rows"][2]["villages"] == 7
+        assert combined["rows"][2]["population"] == 8654
+        assert combined["rows"][2]["villages_delta"] == 0
+        assert combined["rows"][2]["population_delta"] == 102
+        assert nova["rows"][2]["villages"] == 4
+        assert nova["rows"][2]["population"] == 5704
+        assert nova["rows"][2]["villages_delta"] == 0
+        assert nova["rows"][2]["population_delta"] == 102
+        assert enemy["rows"][2]["villages"] == 3
+        assert enemy["rows"][2]["population"] == 2950
+        assert enemy["rows"][2]["villages_delta"] == 0
+        assert enemy["rows"][2]["population_delta"] == 0
+        # 08-08 row: NOVA gained village 4 (+502 pop) while ENEMY stayed flat.
+        assert nova["rows"][1]["villages_delta"] == 1
+        assert nova["rows"][1]["population_delta"] == 502
+        assert enemy["rows"][1]["villages_delta"] == 0
+
+    def test_alliance_unknown_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "dl.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/deltas?days=7&alliance=NOPE")
+
+        assert res.status_code == 422
+        assert "unknown alliance 'NOPE'" in res.json()["detail"]
 
 
 class TestAuthMiddleware:

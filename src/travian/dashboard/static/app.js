@@ -330,7 +330,56 @@
       alertBox.classList.add("is-hidden");
     }
 
+    allianceTags = data.alliance_tags || [];
+    renderAllianceFilter();
+
     els.metricGrid.setAttribute("aria-busy", "false");
+  }
+
+  /* --- alliance filter (analysis) ---------------------------------------------- */
+
+  function renderAllianceFilter() {
+    var filter = analysisElements().allianceFilter;
+    if (!filter || filter.dataset.rendered) return; // options are stable per process
+    filter.dataset.rendered = "1";
+    if (allianceTags.length < 2) {
+      filter.hidden = true;
+      return;
+    }
+    filter.hidden = false;
+    ["combined"].concat(allianceTags).forEach(function (tag) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "segmented__btn";
+      btn.setAttribute("data-alliance", tag);
+      btn.setAttribute("aria-pressed", String(tag === analysisState.alliance));
+      btn.textContent = tag === "combined" ? "Combined" : tag;
+      filter.appendChild(btn);
+    });
+  }
+
+  function wireAllianceSwitch() {
+    var filter = analysisElements().allianceFilter;
+    if (!filter) return;
+    filter.addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest ? event.target.closest(".segmented__btn") : null;
+      if (!btn || !filter.contains(btn)) return;
+      var tag = btn.getAttribute("data-alliance");
+      if (tag === analysisState.alliance) return;
+      analysisState.alliance = tag;
+      Array.prototype.forEach.call(filter.querySelectorAll(".segmented__btn"), function (b) {
+        b.setAttribute("aria-pressed", String(b === btn));
+      });
+      // Active tabs refetch with the new filter; inactive ones reset so the
+      // next activation loads with it (their loaders preserve the selection
+      // across refetches — regions keeps the region, events keeps from/to).
+      ["regions", "events", "changes"].forEach(function (name) {
+        if (!activatedTabs[name]) return;
+        var panel = document.getElementById("panel-" + name);
+        if (panel && panel.getAttribute("aria-busy") === "true") return;
+        tabLoaders[name]();
+      });
+    });
   }
 
   /* --- settings form ------------------------------------------------------------ */
@@ -747,6 +796,7 @@
   var analysisState = {
     charts: {},
     metric: "population",
+    alliance: "combined",
     region: null,
     from: null,
     to: null,
@@ -754,6 +804,7 @@
     regionsSeries: {},
     standingsPayload: null,
   };
+  var allianceTags = [];
   var activatedTabs = {};
   var analysisEls = null;
 
@@ -770,6 +821,7 @@
     if (!analysisEls) {
       analysisEls = {
         range: document.querySelector("[data-analysis-range]"),
+        allianceFilter: document.getElementById("analysis-alliance-filter"),
         tabs: Array.prototype.slice.call(document.querySelectorAll(".tab-bar__tab")),
         panels: Array.prototype.slice.call(document.querySelectorAll(".analysis-panel")),
         regionsBody: document.querySelector("[data-regions-body]"),
@@ -885,14 +937,28 @@
     };
   }
 
+  // Kinds that honor the alliance filter (standings is a cross-alliance
+  // comparison and never filters).
+  var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas"];
+
   api.analysis = function (kind, params) {
-    var qs = "";
+    var parts = [];
     if (params) {
-      var parts = Object.keys(params).map(function (key) {
-        return encodeURIComponent(key) + "=" + encodeURIComponent(params[key]);
+      parts = Object.keys(params).map(function (key) {
+        return [key, params[key]];
       });
-      if (parts.length) qs = "?" + parts.join("&");
     }
+    if (ALLIANCE_FILTERED_KINDS.indexOf(kind) !== -1 && analysisState.alliance !== "combined") {
+      parts.push(["alliance", analysisState.alliance]);
+    }
+    var qs = parts.length
+      ? "?" +
+        parts
+          .map(function (pair) {
+            return encodeURIComponent(pair[0]) + "=" + encodeURIComponent(pair[1]);
+          })
+          .join("&")
+      : "";
     return request("GET", "/api/analysis/" + kind + qs);
   };
 
@@ -1518,6 +1584,7 @@
     wireRegionSelect();
     wireMetricToggle();
     wireEventsControls();
+    wireAllianceSwitch();
     // Regions is the default tab — its payload is fetched at init.
     activateTab(document.getElementById("tab-regions"));
   }

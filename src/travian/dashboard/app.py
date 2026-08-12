@@ -295,6 +295,25 @@ def _resolve_ids(conn: sqlite3.Connection, date: str, tags: list[str]) -> set[in
     return ids
 
 
+def _resolve_alliance_ids(
+    conn: sqlite3.Connection, date: str, cfg: ConfigProtocol, alliance: str | None
+) -> set[int]:
+    """Resolve the analysis ``alliance`` filter to ids against ``date``.
+
+    ``None``/``"combined"`` → the union of ``cfg.alliance_tags`` (the
+    historical behavior); a configured tag → that tag's ids only; anything
+    else → 422 naming the valid values.
+    """
+    if alliance is None or alliance == "combined":
+        return _resolve_ids(conn, date, cfg.alliance_tags)
+    if alliance in cfg.alliance_tags:
+        return set(store.alliance_ids_by_tag(conn, date).get(alliance, []))
+    raise HTTPException(
+        status_code=422,
+        detail=f"unknown alliance {alliance!r} — valid: {', '.join(cfg.alliance_tags)}",
+    )
+
+
 def _event_dict(event: VillageEvent) -> dict[str, object]:
     """One village event in the events-browser payload shape."""
     return {
@@ -580,7 +599,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     # (fallback: latest snapshot date; no snapshot → empty payloads). ``days``
     # is at least 2 because deltas and charts need a pair of dates.
 
-    async def analysis_regions(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+    async def analysis_regions(
+        days: Annotated[int, Query(ge=2, le=60)] = 30,
+        alliance: str | None = None,
+    ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
             try:
@@ -589,7 +611,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 if latest is None:
                     return {"dates": [], "series": {}, "current": []}
                 dates = store.list_dates(conn)[-days:]
-                ids = _resolve_ids(conn, latest.snapshot_date, cfg.alliance_tags)
+                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
                 day_rows = store.region_days(conn, dates[0], dates[-1], ids)
                 by_region: dict[str, list[RegionDay]] = {}
                 for day in day_rows:
@@ -660,6 +682,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     async def analysis_events(
         from_: Annotated[str | None, Query(alias="from")] = None,
         to: str | None = None,
+        alliance: str | None = None,
     ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -683,7 +706,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                     )
                 if from_date >= to_date:
                     raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
-                ids = _resolve_ids(conn, latest, cfg.alliance_tags)
+                ids = _resolve_alliance_ids(conn, latest, cfg, alliance)
                 prev_rows = store.load_villages(conn, from_date)
                 curr_rows = store.load_villages(conn, to_date)
                 gained, lost = village_events(prev_rows, curr_rows, ids)
@@ -696,7 +719,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
-    async def analysis_deltas(days: Annotated[int, Query(ge=2, le=60)] = 30) -> dict[str, object]:
+    async def analysis_deltas(
+        days: Annotated[int, Query(ge=2, le=60)] = 30,
+        alliance: str | None = None,
+    ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
             try:
@@ -705,7 +731,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 if latest is None:
                     return {"dates": [], "rows": []}
                 dates = store.list_dates(conn)[-days:]
-                ids = _resolve_ids(conn, latest.snapshot_date, cfg.alliance_tags)
+                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
                 day_rows = store.summary_days(conn, dates[0], dates[-1], ids)
                 return {"dates": dates, "rows": analysis.summary_history(day_rows)}
             finally:

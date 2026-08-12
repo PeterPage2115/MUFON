@@ -392,6 +392,15 @@ code,
   padding-top: 2px;
 }
 
+.analysis-header-side {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .card-state {
   display: inline-flex;
   align-items: center;
