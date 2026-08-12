@@ -10,18 +10,22 @@ services:
     env_file: .env
     environment:
       # Bind INSIDE the container: must be 0.0.0.0 for the port publish to
-      # work. Access control is the HOST-side loopback-only publish below.
+      # work. Access control is the DASHBOARD_TOKEN (set it in .env): the
+      # API routes require Authorization: Bearer <DASHBOARD_TOKEN> whenever
+      # the dashboard is reachable beyond loopback.
       DASHBOARD_BIND: "0.0.0.0"
-      # With DASHBOARD_BIND=0.0.0.0 this disables the API token requirement —
-      # the loopback-only host publish is the security boundary.
-      DASHBOARD_LOOPBACK_ONLY: "true"
+      # With DASHBOARD_BIND=0.0.0.0 and DASHBOARD_LOOPBACK_ONLY != "true"
+      # the API requires the token (see app.py _auth_required). The static
+      # UI and /healthz stay public so the browser can load the page and
+      # the container HEALTHCHECK works without the secret.
+      DASHBOARD_LOOPBACK_ONLY: "false"
       # Container system time (tools like `date`). Python timezones come from
       # the pip tzdata package — FETCH_TZ/REPORT_TZ are independent of this.
       TZ: Europe/Warsaw
     ports:
-      # Loopback-only on the HOST: the dashboard is unreachable from the
-      # network even though the container binds 0.0.0.0.
-      - "127.0.0.1:8090:8090"
+      # Published on all interfaces — the DASHBOARD_TOKEN env (see .env) is
+      # the access control. Do NOT remove the token when this port is open.
+      - "8099:8090"
     volumes:
       # SQLite data survives container recreation.
       - travian-data:/data

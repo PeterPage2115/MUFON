@@ -52,11 +52,13 @@ RUN adduser -D -u 10001 appuser \
 WORKDIR /app
 USER appuser
 
-# /api/status is only 200 once the process passed startup validation — i.e.
+# /healthz is only 200 once the process passed startup validation — i.e.
 # with a REAL DISCORD_TOKEN (main() exits 1 on validation failure BEFORE the
 # dashboard thread starts). Without a valid env the container reports
-# unhealthy; that is the intended signal.
+# unhealthy; that is the intended signal. /healthz is deliberately
+# token-free (the API routes may require DASHBOARD_TOKEN when the dashboard
+# is exposed on the LAN — the healthcheck must not need the secret).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status', timeout=3)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
 
 CMD ["python", "-m", "travian.bot.main"]

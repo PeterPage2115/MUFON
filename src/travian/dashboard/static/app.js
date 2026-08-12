@@ -130,6 +130,8 @@
 
   function request(method, url, payload) {
     var opts = { method: method, headers: { Accept: "application/json" } };
+    var token = localStorage.getItem(TOKEN_KEY);
+    if (token) opts.headers["Authorization"] = "Bearer " + token;
     if (payload !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = stringifyPayload(payload);
@@ -145,6 +147,7 @@
         })
         .then(function (body) {
           if (!res.ok) {
+            if (res.status === 401) showTokenDialog();
             var err = new Error(extractError(body, res.status));
             err.status = res.status;
             err.body = body;
@@ -172,6 +175,54 @@
       return request("GET", "/api/logs?n=" + LOG_LIMIT);
     },
   };
+
+  /* --- dashboard access token (LAN mode) ----------------------------------- */
+
+  var TOKEN_KEY = "dashboard_token";
+  var tokenDialogShown = false;
+
+  function ensureTokenDialog() {
+    var existing = document.getElementById("token-dialog");
+    if (existing) return existing;
+    var dialog = document.createElement("dialog");
+    dialog.className = "token-dialog";
+    dialog.id = "token-dialog";
+    dialog.innerHTML =
+      '<form class="token-dialog__form" id="token-form" novalidate>' +
+      '<p class="overline">Access token required</p>' +
+      '<p class="token-dialog__copy">This dashboard is protected. Enter the access token (DASHBOARD_TOKEN on the server).</p>' +
+      '<input type="password" id="token-input" autocomplete="off" spellcheck="false" placeholder="Dashboard access token" aria-describedby="token-error">' +
+      '<p class="token-dialog__error" id="token-error" role="alert"></p>' +
+      '<button class="button button--primary" type="submit">Unlock</button>' +
+      "</form>";
+    document.body.appendChild(dialog);
+    dialog.querySelector("#token-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var value = document.getElementById("token-input").value.trim();
+      var error = document.getElementById("token-error");
+      if (!value) {
+        error.textContent = "Token is required.";
+        return;
+      }
+      error.textContent = "";
+      localStorage.setItem(TOKEN_KEY, value);
+      window.location.reload(); // static UI is public — the reload then authenticates every API call
+    });
+    // The token is required to use the dashboard; Esc must not dismiss the dialog.
+    dialog.addEventListener("cancel", function (event) {
+      event.preventDefault();
+    });
+    return dialog;
+  }
+
+  function showTokenDialog() {
+    if (tokenDialogShown) return;
+    tokenDialogShown = true;
+    var dialog = ensureTokenDialog();
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    var input = document.getElementById("token-input");
+    if (input) input.focus();
+  }
 
   /* --- toasts ---------------------------------------------------------------- */
 

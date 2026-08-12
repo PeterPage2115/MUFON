@@ -849,10 +849,38 @@ class TestAuthMiddleware:
     def test_middleware_active_but_token_empty_401_always(self, tmp_path: Path) -> None:
         db = tmp_path / "m.db"
         _seed_db(db)
-        env = _env(DASHBOARD_BIND="0.0.0.0")  # DASHBOARD_TOKEN="" 
+        env = _env(DASHBOARD_BIND="0.0.0.0")  # DASHBOARD_TOKEN=""
         with TestClient(_app(db, env)) as client:
             assert client.get("/api/status", headers={"Authorization": "Bearer "}).status_code == 401
             assert client.get("/api/status").status_code == 401
+
+    def test_healthz_public_under_auth(self, tmp_path: Path) -> None:
+        # The container HEALTHCHECK probes /healthz — it must never need the
+        # token (an authenticated probe would mark the container unhealthy).
+        db = tmp_path / "m.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/healthz").status_code == 200
+            assert client.get("/healthz").json() == {"status": "ok"}
+            assert client.get("/api/status").status_code == 401
+
+    def test_static_ui_public_under_auth(self, tmp_path: Path, monkeypatch) -> None:
+        # The browser must be able to load the page without a token; the UI
+        # then authenticates the API calls (app.js sends the Bearer header
+        # from the login dialog).
+        static = tmp_path / "static"
+        static.mkdir()
+        (static / "index.html").write_text("<html>dashboard</html>", encoding="utf-8")
+        monkeypatch.setattr(dashboard_app, "STATIC_DIR", static)
+        db = tmp_path / "m.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/").status_code == 200
+            assert client.get("/api/status").status_code == 401
+            assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
+            assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
 
 
 # --- uvicorn bootstrap (bot.main.start_dashboard) ------------------------------

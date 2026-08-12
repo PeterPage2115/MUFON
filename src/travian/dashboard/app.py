@@ -45,11 +45,19 @@ Endpoints:
   deltas (``None`` on the oldest date).
 
 Auth middleware: active ONLY when ``DASHBOARD_BIND`` is not a loopback
-address AND ``DASHBOARD_LOOPBACK_ONLY != "true"`` (compose sets it to "true"
-because the host publishes loopback-only); then every route requires
-``Authorization: Bearer <DASHBOARD_TOKEN>`` (401 otherwise — and 401 always
-when the token env is empty while the middleware is active). The decision is
-computed once at app creation: env is static for the process.
+address AND ``DASHBOARD_LOOPBACK_ONLY != "true"`` (compose historically set
+it to "true" because the host published loopback-only); then every ``/api/*``
+route requires ``Authorization: Bearer <DASHBOARD_TOKEN>`` (401 otherwise —
+and 401 always when the token env is empty while the middleware is active).
+The static UI (``/``, ``/static/*``) and the ``/healthz`` probe stay public
+so the browser can load the page and the container HEALTHCHECK works without
+a token; the UI authenticates the API calls with the token the operator
+enters. The decision is computed once at app creation: env is static for the
+process.
+
+- ``GET /healthz`` — always ``{"status": "ok"}``, never token-protected:
+  the container HEALTHCHECK probe (the app only starts serving after
+  ``main()`` passed startup validation, so a 200 implies a healthy process).
 
 Sqlite: every operation opens its own connection via ``store.connect``
 (``check_same_thread=False``, one connection per op, never shared) and closes
@@ -483,7 +491,12 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     async def _auth_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if auth_required:
+        # Only the API is sensitive; the static UI (/, /static/*, /healthz)
+        # stays public so the browser can load it — the UI then authenticates
+        # every API call with the token the operator enters (app.js sends
+        # Authorization: Bearer <token> from the login dialog). /healthz is
+        # the container HEALTHCHECK probe and must stay token-free.
+        if auth_required and request.url.path.startswith("/api/"):
             token = deps.env.get("DASHBOARD_TOKEN", "")
             if not token or request.headers.get("authorization") != f"Bearer {token}":
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -494,6 +507,15 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         if not index_path.is_file():
             raise HTTPException(status_code=404, detail="static/index.html not built yet")
         return FileResponse(index_path)
+
+    def healthz() -> dict[str, str]:
+        """Container HEALTHCHECK probe — always public, never token-protected.
+
+        The app only starts serving after ``main()`` passed startup
+        validation, so a 200 implies the process is healthy (the pre-token
+        semantics of /api/status, without needing the Bearer header).
+        """
+        return {"status": "ok"}
 
     async def status() -> StatusData:
         return await asyncio.to_thread(deps.get_status)
@@ -693,6 +715,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
+    _ = app.get("/healthz")(healthz)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     _ = app.get("/api/status")(status)
