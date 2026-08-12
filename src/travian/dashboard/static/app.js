@@ -255,10 +255,12 @@
     var dialog = document.createElement("dialog");
     dialog.className = "token-dialog";
     dialog.id = "token-dialog";
+    dialog.setAttribute("aria-labelledby", "token-dialog-title");
+    dialog.setAttribute("aria-describedby", "token-dialog-copy");
     dialog.innerHTML =
       '<form class="token-dialog__form" id="token-form" novalidate>' +
-      '<p class="overline">Access token required</p>' +
-      '<p class="token-dialog__copy">This dashboard is protected. Enter the access token (DASHBOARD_TOKEN on the server).</p>' +
+      '<p class="overline" id="token-dialog-title">Access token required</p>' +
+      '<p class="token-dialog__copy" id="token-dialog-copy">This dashboard is protected. Enter the access token (DASHBOARD_TOKEN on the server).</p>' +
       '<input type="password" id="token-input" autocomplete="off" spellcheck="false" placeholder="Dashboard access token" aria-describedby="token-error">' +
       '<p class="token-dialog__error" id="token-error" role="alert"></p>' +
       '<button class="button button--primary" type="submit">Unlock</button>' +
@@ -301,8 +303,8 @@
         if (!form) return;
         if (data && data.method === "oauth") {
           form.innerHTML =
-            '<p class="overline">Sign in required</p>' +
-            '<p class="token-dialog__copy">This dashboard is protected. Sign in with your Discord account.</p>' +
+            '<p class="overline" id="token-dialog-title">Sign in required</p>' +
+            '<p class="token-dialog__copy" id="token-dialog-copy">This dashboard is protected. Sign in with your Discord account.</p>' +
             '<a class="button button--primary" href="/api/auth/login">Sign in with Discord</a>';
           return;
         }
@@ -900,6 +902,7 @@
   };
   var allianceTags = [];
   var activatedTabs = {};
+  var activeTabName = "regions";
   var analysisEls = null;
 
   function cssVar(name, fallback) {
@@ -921,8 +924,14 @@
         regionsBody: document.querySelector("[data-regions-body]"),
         regionSelect: document.getElementById("analysis-region-select"),
         regionCanvas: document.getElementById("analysis-chart-regions"),
+        regionTop: document.getElementById("region-top"),
+        regionTopTitle: document.getElementById("region-top-title"),
+        regionTopList: document.getElementById("region-top-list"),
         standingsCanvas: document.getElementById("analysis-chart-standings"),
         metricButtons: Array.prototype.slice.call(document.querySelectorAll(".segmented__btn")),
+        playersPopulation: document.querySelector("[data-players-population]"),
+        playersGrowth: document.querySelector("[data-players-growth]"),
+        playersNew: document.querySelector("[data-players-new]"),
         eventsFrom: document.getElementById("analysis-events-from"),
         eventsTo: document.getElementById("analysis-events-to"),
         eventsError: document.querySelector(".analysis-controls__error"),
@@ -975,6 +984,17 @@
       card.appendChild(state);
     }
     state.textContent = "Chart library unavailable.";
+    card.classList.add("is-empty");
+  }
+
+  function showChartLoading(card) {
+    var state = card.querySelector(".empty-state");
+    if (!state) {
+      state = document.createElement("p");
+      state.className = "empty-state";
+      card.appendChild(state);
+    }
+    state.textContent = "Loading…";
     card.classList.add("is-empty");
   }
 
@@ -1033,7 +1053,7 @@
 
   // Kinds that honor the alliance filter (standings is a cross-alliance
   // comparison and never filters).
-  var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas"];
+  var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players"];
 
   api.analysis = function (kind, params) {
     var parts = [];
@@ -1093,6 +1113,9 @@
     var current = payload.current || [];
     var dates = payload.dates || [];
     var series = payload.series || {};
+    analysisState.regionsPayload = payload;
+    setExportEnabled("regions", current.length > 0);
+    if (els.regionTop) els.regionTop.hidden = true;
 
     if (!current.length || !dates.length) {
       showPanelEmpty(panel, "No data yet.");
@@ -1198,6 +1221,31 @@
     return tr;
   }
 
+  function renderRegionTop(region) {
+    var els = analysisElements();
+    var byRegion = (analysisState.regionsPayload && analysisState.regionsPayload.top_alliances) || {};
+    var entries = byRegion[region] || [];
+    if (!entries.length) {
+      els.regionTop.hidden = true;
+      return;
+    }
+    els.regionTop.hidden = false;
+    setText(els.regionTopTitle, "Top alliances in " + region);
+    els.regionTopList.textContent = "";
+    entries.forEach(function (entry) {
+      var li = document.createElement("li");
+      var tag = document.createElement("span");
+      tag.className = "region-top__tag";
+      tag.textContent = entry.tag || "(none)";
+      var pop = document.createElement("span");
+      pop.className = "region-top__pop";
+      pop.textContent = fmtInt(entry.population);
+      li.appendChild(tag);
+      li.appendChild(pop);
+      els.regionTopList.appendChild(li);
+    });
+  }
+
   function renderRegionChart(region) {
     var panel = document.getElementById("panel-regions");
     var els = analysisElements();
@@ -1224,6 +1272,7 @@
     });
 
     els.regionCanvas.setAttribute("aria-label", "Share of population over time for " + region);
+    renderRegionTop(region);
 
     var chart = analysisState.charts.regions;
     if (chart) {
@@ -1281,6 +1330,9 @@
   function loadStandings() {
     var panel = document.getElementById("panel-alliances");
     setPanelBusy("alliances", true);
+    if (!analysisState.charts.alliances) {
+      showChartLoading(panel.querySelector(".chart-card"));
+    }
     return api
       .analysis("standings", { days: ANALYSIS_DAYS })
       .then(function (payload) {
@@ -1328,6 +1380,10 @@
   function renderStandingsChart(payload) {
     var panel = document.getElementById("panel-alliances");
     var els = analysisElements();
+    var card = panel.querySelector(".chart-card");
+    card.classList.remove("is-empty");
+    var stale = card.querySelector(".empty-state");
+    if (stale) stale.remove();
     if (!window.Chart) {
       showPanelEmpty(panel, "Chart library unavailable.");
       return;
@@ -1376,6 +1432,64 @@
     analysisState.charts.alliances = chart;
   }
 
+  /* Players tab */
+
+  function loadPlayers() {
+    var panel = document.getElementById("panel-players");
+    setPanelBusy("players", true);
+    return api
+      .analysis("players", {})
+      .then(function (payload) {
+        renderPlayers(payload);
+        setPanelBusy("players", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("players", false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.players = false; // next activation retries
+      });
+  }
+
+  function playersSection(tbody, rows, valueCell) {
+    tbody.textContent = "";
+    if (!rows.length) {
+      var tr = document.createElement("tr");
+      var td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "faint";
+      td.textContent = "No data yet.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+    rows.forEach(function (stat, index) {
+      var tr = document.createElement("tr");
+      var tdRank = document.createElement("td");
+      tdRank.className = "num faint";
+      tdRank.textContent = String(index + 1);
+      var tdName = document.createElement("td");
+      tdName.className = "player-name";
+      tdName.textContent = stat.player_name || "unknown";
+      tr.appendChild(tdRank);
+      tr.appendChild(tdName);
+      tr.appendChild(valueCell(stat));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderPlayers(payload) {
+    var els = analysisElements();
+    playersSection(els.playersPopulation, payload.population || [], function (s) {
+      return numCell(fmtInt(s.population));
+    });
+    playersSection(els.playersGrowth, payload.growth || [], function (s) {
+      return deltaCell(s.growth);
+    });
+    playersSection(els.playersNew, payload.new_villages || [], function (s) {
+      return numCell(fmtInt(s.gains));
+    });
+  }
+
   /* Events tab */
 
   function fillDateSelect(select, dates) {
@@ -1388,10 +1502,17 @@
     });
   }
 
+  function setEventsBusy(busy) {
+    var els = analysisElements();
+    els.eventsFrom.disabled = busy;
+    els.eventsTo.disabled = busy;
+  }
+
   function loadEvents() {
     var panel = document.getElementById("panel-events");
     var els = analysisElements();
     setPanelBusy("events", true);
+    setEventsBusy(true);
     return api
       .analysis("dates")
       .then(function (payload) {
@@ -1399,6 +1520,7 @@
         if (dates.length < 2) {
           showPanelEmpty(panel, "No data yet.");
           setPanelBusy("events", false);
+          setEventsBusy(false);
           return;
         }
         hidePanelEmpty(panel);
@@ -1418,8 +1540,12 @@
         analysisState.to = els.eventsTo.value;
         return fetchEvents(analysisState.from, analysisState.to);
       })
+      .then(function () {
+        setEventsBusy(false);
+      })
       .catch(function (err) {
         setPanelBusy("events", false);
+        setEventsBusy(false);
         showPanelEmpty(panel, "Couldn't load analysis data.", true);
         activatedTabs.events = false;
       });
@@ -1435,6 +1561,8 @@
     var els = analysisElements();
     var gained = payload.gained || [];
     var lost = payload.lost || [];
+    analysisState.eventsPayload = payload;
+    setExportEnabled("events", gained.length + lost.length > 0);
     els.gainedList.textContent = "";
     els.lostList.textContent = "";
     setText(els.gainedCount, String(gained.length));
@@ -1502,6 +1630,8 @@
       .analysis("deltas", { days: ANALYSIS_DAYS })
       .then(function (payload) {
         var rows = payload.rows || [];
+        analysisState.changesPayload = payload;
+        setExportEnabled("changes", rows.length > 0);
         if (!rows.length) {
           showPanelEmpty(panel, "No data yet.");
           setPanelBusy("changes", false);
@@ -1564,11 +1694,98 @@
     return td;
   }
 
+  /* CSV export (client-side) */
+
+  function setExportEnabled(kind, enabled) {
+    var btn = document.querySelector('[data-export="' + kind + '"]');
+    if (btn) btn.disabled = !enabled;
+  }
+
+  function exportCsv(filename, headers, rows) {
+    var lines = [headers].concat(rows);
+    var csv = lines
+      .map(function (cells) {
+        return cells
+          .map(function (value) {
+            var text = value === null || value === undefined ? "" : String(value);
+            return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+          })
+          .join(",");
+      })
+      .join("\r\n");
+    var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function wireExportButtons() {
+    var exporters = {
+      regions: function () {
+        var payload = analysisState.regionsPayload;
+        if (!payload || !payload.current.length) return;
+        var snapshot = payload.dates && payload.dates.length ? payload.dates[payload.dates.length - 1] : "latest";
+        var headers = ["Region", "Share", "Pop", "Delta %", "To 50%", "Active", "Controlled"];
+        var rows = payload.current.map(function (r) {
+          return [
+            r.region,
+            (r.share * 100).toFixed(1) + "%",
+            r.our_pop,
+            r.share_delta === null || r.share_delta === undefined ? "" : (r.share_delta * 100).toFixed(1) + "%",
+            r.controlled ? "yes" : r.to50_needed === null || r.to50_needed === undefined ? "" : r.to50_needed,
+            r.active ? "yes" : "no",
+            r.controlled ? "yes" : "no",
+          ];
+        });
+        exportCsv("regions-" + snapshot + ".csv", headers, rows);
+      },
+      changes: function () {
+        var payload = analysisState.changesPayload;
+        var rows = payload && payload.rows ? payload.rows : [];
+        if (!rows.length) return;
+        var snapshot = rows[rows.length - 1].date;
+        var headers = ["Date", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
+        exportCsv(
+          "changes-" + snapshot + ".csv",
+          headers,
+          rows.map(function (r) {
+            return [r.date, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
+          })
+        );
+      },
+      events: function () {
+        var payload = analysisState.eventsPayload;
+        if (!payload || (!payload.gained.length && !payload.lost.length)) return;
+        var headers = ["Event", "Village", "X", "Y", "Region", "Player"];
+        var rows = [];
+        (payload.gained || []).forEach(function (e) {
+          rows.push(["gained", e.village_name, e.x, e.y, e.region || "", e.owner_player || ""]);
+        });
+        (payload.lost || []).forEach(function (e) {
+          rows.push(["lost", e.village_name, e.x, e.y, e.region || "", e.owner_tag || e.owner_player || ""]);
+        });
+        exportCsv("events-" + analysisState.from + "-" + analysisState.to + ".csv", headers, rows);
+      },
+    };
+    document.querySelectorAll("[data-export]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var exporter = exporters[btn.getAttribute("data-export")];
+        if (exporter) exporter();
+      });
+    });
+  }
+
   /* Tab bar + wiring */
 
   var tabLoaders = {
     regions: loadRegions,
     alliances: loadStandings,
+    players: loadPlayers,
     events: loadEvents,
     changes: loadChanges,
   };
@@ -1584,6 +1801,7 @@
       panel.hidden = panel.id !== tab.getAttribute("aria-controls");
     });
     var name = tab.id.replace("tab-", "");
+    activeTabName = name;
     if (!activatedTabs[name]) {
       activatedTabs[name] = true;
       tabLoaders[name]();
@@ -1660,12 +1878,14 @@
       analysisState.from = from;
       analysisState.to = to;
       setPanelBusy("events", true);
+      setEventsBusy(true);
       fetchEvents(from, to)
         .catch(function (err) {
           showToast("Events refresh failed", err.message, "error");
         })
         .then(function () {
           setPanelBusy("events", false);
+          setEventsBusy(false);
         });
     }
     els.eventsFrom.addEventListener("change", onChange);
@@ -1679,6 +1899,7 @@
     wireMetricToggle();
     wireEventsControls();
     wireAllianceSwitch();
+    wireExportButtons();
     // Regions is the default tab — its payload is fetched at init.
     activateTab(document.getElementById("tab-regions"));
   }
@@ -1731,6 +1952,15 @@
     loadLogs();
     loadAuthStatus();
     window.setInterval(loadLogs, LOG_REFRESH_MS);
+    // Live dashboard: status and the active analysis tab refresh every
+    // minute; a busy panel (in-flight load) is skipped, never double-fired.
+    window.setInterval(loadStatus, 60000);
+    window.setInterval(function () {
+      var panel = document.getElementById("panel-" + activeTabName);
+      if (!panel || panel.getAttribute("aria-busy") === "true") return;
+      var loader = tabLoaders[activeTabName];
+      if (loader) loader();
+    }, 60000);
 
     els.fetchButton.addEventListener("click", function () {
       runAction("fetch");

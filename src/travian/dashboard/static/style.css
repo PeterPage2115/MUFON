@@ -881,6 +881,12 @@ code,
   width: 100%;
 }
 
+.button--small {
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.8125rem;
+}
+
 .button-spinner {
   display: none;
   width: 14px;
@@ -1194,6 +1200,63 @@ code,
 
 .analysis-panel.is-empty > :not(.empty-state) {
   display: none;
+}
+
+.analysis-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+
+.players-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.player-name {
+  color: var(--text-primary);
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 26ch;
+}
+
+.region-top {
+  border-top: 1px solid var(--border-default);
+  padding-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.region-top__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.region-top__list li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.8125rem;
+}
+
+.region-top__tag {
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+.region-top__pop {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color: var(--accent-gold-soft);
+  font-variant-numeric: tabular-nums;
 }
 
 .analysis-layout--regions {
@@ -1603,6 +1666,11 @@ tr.is-inactive td {
     gap: var(--space-5);
   }
 
+  .players-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+
   .chart-card__canvas {
     height: 240px;
   }
@@ -1713,7 +1781,52 @@ tr.is-inactive td {
   }
 
   .chart-card__canvas {
-    height: 220px;
+    height: 240px;
+  }
+
+  /* Compact tables on phones: smaller type, and the regions table drops
+     the two rightmost columns (Δ % / To 50%) instead of overflowing — the
+     changes table keeps all 9 columns behind the horizontal scroller. */
+  .data-table th {
+    font-size: 0.75rem;
+  }
+
+  .data-table td {
+    font-size: 0.8125rem;
+  }
+
+  .data-table--regions th:nth-child(n + 5),
+  .data-table--regions td:nth-child(n + 5) {
+    display: none;
+  }
+
+  .players-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Scroll affordance: fade the right edge of overflowing tables. */
+  .data-table__wrap {
+    position: relative;
+  }
+
+  .data-table__wrap::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 28px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(9, 11, 9, 0.85));
+  }
+
+  /* Touch targets. */
+  .segmented__btn {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .analysis-select {
+    min-height: 36px;
   }
 }
 

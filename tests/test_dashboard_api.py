@@ -677,6 +677,7 @@ class TestAnalysisRegions:
                 "dates": [],
                 "series": {},
                 "current": [],
+                "top_alliances": {},
             }
 
     def test_alliance_filter_per_tag(self, tmp_path: Path) -> None:
@@ -733,6 +734,22 @@ class TestAnalysisRegions:
             default = client.get("/api/analysis/regions?days=7").json()
             explicit = client.get("/api/analysis/regions?days=7&alliance=combined").json()
         assert default == explicit
+
+    def test_top_alliances_per_region(self, tmp_path: Path) -> None:
+        db = tmp_path / "ar.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/regions?days=7").json()
+
+        top = payload["top_alliances"]
+        assert set(top) == {"Testland", "Borders", "Enemyland"}
+        # Latest day (08-09) Testland: NOVA rows 1,2,7 (5604) + ENEMY row 3.
+        assert top["Testland"] == [
+            {"tag": "NOVA", "population": 2502 + 2502 + 600},
+            {"tag": "ENEMY", "population": 2000},
+        ]
+        assert top["Borders"] == [{"tag": "NOVA", "population": 100}, {"tag": "ENEMY", "population": 50}]
+        assert top["Enemyland"] == [{"tag": "ENEMY", "population": 900}]
 
 
 class TestAnalysisStandings:
@@ -1006,6 +1023,65 @@ class TestAuthMiddleware:
             assert client.get("/api/status").status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
+
+
+class TestAnalysisPlayers:
+    def test_payload_shape_and_rankings(self, tmp_path: Path) -> None:
+        db = tmp_path / "pl.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/players").json()
+
+        assert set(payload) == {"population", "growth", "new_villages"}
+        # Latest day (08-09): NOVA players 1001 (rows 1,2), 1007, 1005 — plus
+        # 1004, whose village exists only on 08-08 and who left the alliance
+        # (the universe is curr-ours ∪ prev-ours; ranks with population 0).
+        assert len(payload["population"]) == 4
+        top = payload["population"][0]
+        assert set(top) == {"player_id", "player_name", "population", "villages", "growth", "gains"}
+        assert top["player_id"] == 1001
+        assert top["population"] == 2502 + 2502
+        assert top["villages"] == 2
+        assert [row["player_id"] for row in payload["population"]] == [1001, 1007, 1005, 1004]
+        # Growth vs 08-08: 1007 +600, 1001 +2, 1005 0, 1004 −500 (left).
+        assert [row["player_id"] for row in payload["growth"]] == [1007, 1001, 1005, 1004]
+        assert payload["growth"][0]["growth"] == 600
+        assert payload["growth"][3]["growth"] == -500
+        # New villages vs 08-08: only village 7 (1007) is a strict gain.
+        assert [row["player_id"] for row in payload["new_villages"]] == [1007, 1001, 1005, 1004]
+        assert payload["new_villages"][0]["gains"] == 1
+        assert payload["new_villages"][1]["gains"] == 0
+
+    def test_alliance_filter(self, tmp_path: Path) -> None:
+        db = tmp_path / "pl.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            enemy = client.get("/api/analysis/players?alliance=ENEMY").json()
+
+        # ENEMY players: 1003 (2000), 1008 (900), 1006 (50) — no growth/gains.
+        assert [row["player_id"] for row in enemy["population"]] == [1003, 1008, 1006]
+        assert all(row["growth"] == 0 for row in enemy["growth"])
+        assert all(row["gains"] == 0 for row in enemy["new_villages"])
+
+    def test_unknown_alliance_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "pl.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            res = client.get("/api/analysis/players?alliance=NOPE")
+
+        assert res.status_code == 422
+        assert "unknown alliance 'NOPE'" in res.json()["detail"]
+
+    def test_empty_db_empty_rankings(self, tmp_path: Path) -> None:
+        db = tmp_path / "pl.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/players").json() == {
+                "population": [],
+                "growth": [],
+                "new_villages": [],
+            }
 
 
 class TestAuthModes:

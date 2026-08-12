@@ -43,9 +43,11 @@ Endpoints:
   or an unknown date → 422 listing the valid dates).
 - ``GET /api/analysis/deltas?days=30`` — headline history with day-over-day
   deltas (``None`` on the oldest date).
-- ``GET /api/analysis/regions|events|deltas?alliance=<tag>`` — per-alliance
-  filtering (``combined``/absent = union of ``ALLIANCE_TAGS``; unknown tag →
-  422 listing the valid tags).
+- ``GET /api/analysis/players?alliance=<tag>`` — latest-pair top players:
+  population / growth / new-villages rankings (10 each).
+- ``GET /api/analysis/regions|events|deltas|players?alliance=<tag>`` —
+  per-alliance filtering (``combined``/absent = union of ``ALLIANCE_TAGS``;
+  unknown tag → 422 listing the valid tags).
 - ``GET /api/auth/status`` — public: ``{"method": ..., "user": ...}`` for the
   auth-aware UI.
 - ``GET /api/auth/login`` — public: 302 to Discord's authorization endpoint
@@ -105,7 +107,7 @@ from fastapi.staticfiles import StaticFiles
 
 from travian import analysis, store
 from travian.dashboard import auth
-from travian.metrics import region_stats, village_events
+from travian.metrics import region_alliance_totals, region_stats, top_players, village_events
 from travian.models import RegionDay, VillageEvent
 
 logger = logging.getLogger(__name__)
@@ -429,14 +431,10 @@ def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[],
             alliances = 0
             total_population = 0
             if latest is not None:
-                rows = store.load_villages(conn, latest.snapshot_date)
                 snapshot_date = latest.snapshot_date
                 snapshot_source = latest.source
-                villages = len(rows)
-                players = len({row.player_id for row in rows})
-                # alliance_id 0 = no alliance (map.sql convention)
-                alliances = len({row.alliance_id for row in rows if row.alliance_id != 0})
-                total_population = sum(row.population for row in rows)
+                # One aggregate query instead of loading every village row.
+                villages, players, alliances, total_population = store.snapshot_counts(conn, snapshot_date)
             return StatusData(
                 snapshot_date=snapshot_date,
                 snapshot_source=snapshot_source,
@@ -798,7 +796,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"dates": [], "series": {}, "current": []}
+                    return {"dates": [], "series": {}, "current": [], "top_alliances": {}}
                 dates = store.list_dates(conn)[-days:]
                 ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
                 day_rows = store.region_days(conn, dates[0], dates[-1], ids)
@@ -832,7 +830,13 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                     row["controlled"] = analysis.region_controlled(stat)
                     row["to50_needed"] = analysis.to50_needed(stat)
                     current.append(row)
-                return {"dates": dates, "series": series, "current": current}
+                # Top-5 alliances per region over ALL villages of the latest
+                # snapshot (region context, not the filtered subset).
+                top_alliances = {
+                    region: [{"tag": tag, "population": population} for tag, population in pairs]
+                    for region, pairs in region_alliance_totals(curr_rows).items()
+                }
+                return {"dates": dates, "series": series, "current": current, "top_alliances": top_alliances}
             finally:
                 conn.close()
 
@@ -928,6 +932,35 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
+    async def analysis_players(alliance: str | None = None) -> dict[str, object]:
+        """Latest-pair top players: population / growth / new villages (10 each).
+
+        Same pair semantics as the regions table's ``current`` block (latest
+        snapshot vs the previous one); no snapshot → three empty lists.
+        """
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return {"population": [], "growth": [], "new_villages": []}
+                dates = store.list_dates(conn)
+                prev_date = dates[-2] if len(dates) >= 2 else None
+                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
+                curr_rows = store.load_villages(conn, latest.snapshot_date)
+                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
+                rankings = top_players(curr_rows, prev_rows, ids, n=10)
+                return {
+                    "population": [stat.model_dump() for stat in rankings["population"]],
+                    "growth": [stat.model_dump() for stat in rankings["growth"]],
+                    "new_villages": [stat.model_dump() for stat in rankings["new_villages"]],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
     _ = app.get("/healthz")(healthz)
@@ -948,4 +981,5 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/api/analysis/dates")(analysis_dates)
     _ = app.get("/api/analysis/events")(analysis_events)
     _ = app.get("/api/analysis/deltas")(analysis_deltas)
+    _ = app.get("/api/analysis/players")(analysis_players)
     return app

@@ -237,6 +237,31 @@ def list_dates(conn: sqlite3.Connection) -> list[str]:
     return [row["snapshot_date"] for row in rows]
 
 
+def snapshot_counts(conn: sqlite3.Connection, date: str) -> tuple[int, int, int, int]:
+    """(villages, players, alliances, total_population) for one snapshot date.
+
+    One aggregate query (``alliance_id != 0`` = has an alliance, the map.sql
+    convention) — the /api/status counts, previously computed in Python over
+    every village row of the date.
+    """
+    row = cast(
+        Mapping[str, int] | None,
+        conn.execute(
+            """
+            SELECT COUNT(*) AS villages,
+                   COUNT(DISTINCT player_id) AS players,
+                   COUNT(DISTINCT CASE WHEN alliance_id != 0 THEN alliance_id END) AS alliances,
+                   COALESCE(SUM(population), 0) AS total_population
+            FROM villages
+            WHERE snapshot_date = ?
+            """,
+            (date,),
+        ).fetchone(),
+    )
+    assert row is not None  # aggregate without GROUP BY always returns one row
+    return row["villages"], row["players"], row["alliances"], row["total_population"]
+
+
 def load_latest(conn: sqlite3.Connection) -> SnapshotRecord | None:
     """The most recent ``snapshots`` row, or None when no snapshot exists."""
     row = cast(

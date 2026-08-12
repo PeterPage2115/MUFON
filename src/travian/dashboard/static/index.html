@@ -265,14 +265,19 @@
           <div class="tab-bar" role="tablist" aria-label="Analysis views">
             <button class="tab-bar__tab" role="tab" id="tab-regions" aria-controls="panel-regions" aria-selected="true" tabindex="0">Regions</button>
             <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
+            <button class="tab-bar__tab" role="tab" id="tab-players" aria-controls="panel-players" aria-selected="false" tabindex="-1">Players</button>
             <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
             <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
           </div>
 
           <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
+            <div class="analysis-toolbar">
+              <p class="overline">Latest snapshot vs previous</p>
+              <button class="button button--outline button--small" type="button" data-export="regions" disabled>Export CSV</button>
+            </div>
             <div class="analysis-layout--regions">
               <div class="data-table__wrap">
-                <table class="data-table" aria-label="Region control summary">
+                <table class="data-table data-table--regions" aria-label="Region control summary">
                   <thead>
                     <tr>
                       <th class="th--left" scope="col">Region</th>
@@ -295,6 +300,10 @@
                 <div class="chart-card__canvas">
                   <canvas id="analysis-chart-regions" role="img" aria-label="Share of population over time"></canvas>
                 </div>
+                <div class="region-top" id="region-top" hidden>
+                  <p class="overline" id="region-top-title"></p>
+                  <ol class="region-top__list" id="region-top-list"></ol>
+                </div>
               </div>
             </div>
           </section>
@@ -314,7 +323,52 @@
             </div>
           </section>
 
+          <section class="analysis-panel" id="panel-players" role="tabpanel" aria-labelledby="tab-players" hidden>
+            <div class="players-grid">
+              <div class="data-table__wrap">
+                <table class="data-table" aria-label="Top players by population">
+                  <thead>
+                    <tr>
+                      <th class="th--num" scope="col">Rank</th>
+                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--num" scope="col">Population</th>
+                    </tr>
+                  </thead>
+                  <tbody data-players-population></tbody>
+                </table>
+              </div>
+              <div class="data-table__wrap">
+                <table class="data-table" aria-label="Top players by growth">
+                  <thead>
+                    <tr>
+                      <th class="th--num" scope="col">Rank</th>
+                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--num" scope="col">Growth</th>
+                    </tr>
+                  </thead>
+                  <tbody data-players-growth></tbody>
+                </table>
+              </div>
+              <div class="data-table__wrap">
+                <table class="data-table" aria-label="Top players by new villages">
+                  <thead>
+                    <tr>
+                      <th class="th--num" scope="col">Rank</th>
+                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--num" scope="col">New villages</th>
+                    </tr>
+                  </thead>
+                  <tbody data-players-new></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
           <section class="analysis-panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+            <div class="analysis-toolbar">
+              <p class="overline">Gained + lost between the selected dates</p>
+              <button class="button button--outline button--small" type="button" data-export="events" disabled>Export CSV</button>
+            </div>
             <div class="analysis-controls">
               <div class="analysis-control">
                 <label class="overline" for="analysis-events-from">From</label>
@@ -346,6 +400,10 @@
           </section>
 
           <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
+            <div class="analysis-toolbar">
+              <p class="overline">Daily headline history</p>
+              <button class="button button--outline button--small" type="button" data-export="changes" disabled>Export CSV</button>
+            </div>
             <div class="data-table__wrap">
               <table class="data-table" aria-label="Daily change history">
                 <thead>

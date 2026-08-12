@@ -37,6 +37,7 @@ from travian.store import (
     region_days,
     save_snapshot,
     set_settings,
+    snapshot_counts,
     summary_days,
 )
 
@@ -443,6 +444,29 @@ class TestSummaryDays:
         save_snapshot(conn, "2026-08-08", [make_row(1, alliance_id=20)])
 
         assert summary_days(conn, "2026-08-08", "2026-08-08", set()) == []
+
+
+class TestSnapshotCounts:
+    def test_counts_and_total_population(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                make_row(1, alliance_id=20, population=100),
+                make_row(2, alliance_id=20, population=200, player_id=11),
+                # no alliance (alliance_id 0) — excluded from the alliances count
+                make_row(3, alliance_id=0, population=50, player_id=12),
+                # same player as row 1 — one distinct player
+                make_row(4, alliance_id=30, population=150, player_id=10),
+            ],
+        )
+
+        assert snapshot_counts(conn, "2026-08-08") == (4, 3, 2, 500)
+
+    def test_unknown_date_zero_counts(self, conn: sqlite3.Connection) -> None:
+        save_snapshot(conn, "2026-08-08", [make_row(1, alliance_id=20, population=100)])
+
+        assert snapshot_counts(conn, "2026-08-07") == (0, 0, 0, 0)
 
 
 def test_recent_logs_limits_when_n_smaller_than_count(conn: sqlite3.Connection) -> None:
