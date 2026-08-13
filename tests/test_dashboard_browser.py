@@ -10,6 +10,7 @@ Fetch/Report, never reads a production SQLite and never uses a token.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import threading
 import time
@@ -131,23 +132,60 @@ def _seed_browser_db(db: Path) -> None:
 
 @pytest.fixture()
 def browser_app(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard (existing scenarios): DASHBOARD_AUTH_MODE=none."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="")
+
+
+@pytest.fixture()
+def browser_app_token(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Token-mode dashboard for the auth-gate scenarios (test token only).
+
+    Serves a REAL asyncio loop in a background thread so the Actions can
+    dispatch (the production bot_loop pattern) instead of 409ing.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield from _browser_app_with_auth(
+            tmp_path, auth_mode="token", token="browser-smoke-test-token", bot_loop=loop
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+def _browser_app_with_auth(
+    tmp_path: Path,
+    *,
+    auth_mode: str,
+    token: str,
+    bot_loop: asyncio.AbstractEventLoop | None = None,
+) -> Generator[tuple[str, Browser], None, None]:
     db = tmp_path / "browser.db"
     _seed_browser_db(db)
     env = _env(db)
+    env["DASHBOARD_AUTH_MODE"] = auth_mode
+    env["DASHBOARD_TOKEN"] = token
+    if auth_mode == "token":
+        # The middleware decides auth from env: with a loopback bind the
+        # legacy heuristic resolves to "none" and the token is never checked.
+        # A non-loopback bind (compose-style) makes the token mode real.
+        env["DASHBOARD_BIND"] = "0.0.0.0"
     get_config = _config_getter(db, env)
 
     async def no_fetch() -> str:
-        return "unused"
+        return "completed"
 
     async def no_report(channel_id: int, require_today: bool = True) -> str:
-        return "unused"
+        return "sent"
 
     app = create_app(
         DashboardDeps(
             get_status=make_status_provider(str(db), get_config),
             run_fetch_fn=no_fetch,
             run_report_fn=no_report,
-            bot_loop_getter=lambda: None,
+            bot_loop_getter=lambda: bot_loop,
             get_config=get_config,
             env=env,
         )
@@ -185,6 +223,22 @@ def _standings_labels(page: Page) -> list[str]:
             return chart ? chart.data.datasets.map((d) => d.label) : [];
         }"""
     )
+
+
+def _collect_page_errors(page: Page) -> list[str]:
+    """Attach console-error + pageerror collectors; returns the list to assert on."""
+    errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            errors.append("console.error: " + msg.text)
+
+    def on_pageerror(exc) -> None:
+        errors.append("pageerror: " + str(exc))
+
+    page.on("console", on_console)
+    page.on("pageerror", on_pageerror)
+    return errors
 
 
 def test_filter_switch_players_events_standings_picker_and_limit(
@@ -283,4 +337,198 @@ def test_filter_switch_players_events_standings_picker_and_limit(
     # Back on Regions the global filter is visible again.
     page.click("#tab-regions")
     assert not page.locator("#analysis-alliance-filter").evaluate("(el) => el.hidden")
+    page.close()
+
+
+def test_overview_view_status_and_job_log(browser_app: tuple[str, Browser]) -> None:
+    """Overview tab: panel switching, KPI tiles and the admin job log render."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Intelligence is the initial view; Overview starts hidden.
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
+    assert page.get_attribute("#dashboard-panel-overview", "hidden") is not None
+
+    page.click("#dashboard-tab-overview")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() !== '—'; }"
+    )
+    assert page.get_attribute("#dashboard-panel-overview", "hidden") is None
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is not None
+    assert page.get_attribute("#dashboard-tab-overview", "aria-selected") == "true"
+
+    # KPI tiles carry the seeded snapshot numbers (442 villages; distinct
+    # player ids are 440: the seeded player ids 1000+i collide with the
+    # gained-village ids 10000+i -> same player ids 1000..1219 reused).
+    assert page.text_content('[data-status-value="villages"]').strip() == "442"
+    assert page.text_content('[data-status-value="players"]').strip() == "440"
+    assert page.text_content('[data-status-value="alliances"]').strip() == "2"
+    assert page.text_content('[data-status-value="snapshot_date"]').strip() == "2026-08-08"
+
+    # The admin job log settles (seed DB has no log rows -> "No activity yet.").
+    page.wait_for_function(
+        "() => document.getElementById('job-log').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.text_content("#log-count").strip() == "No activity yet"
+
+    # Back to Intelligence: the panel pair flips again.
+    page.click("#dashboard-tab-intelligence")
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
+    assert page.get_attribute("#dashboard-panel-overview", "hidden") is not None
+    assert errors == []
+    page.close()
+
+
+def test_analysis_tabs_load_without_console_errors(browser_app: tuple[str, Browser]) -> None:
+    """Alliances/Changes/Players tabs settle to aria-busy=false without JS errors."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    for tab_id in ("tab-alliances", "tab-changes", "tab-players", "tab-regions"):
+        page.click("#" + tab_id)
+        page.wait_for_function(
+            "() => document.getElementById('panel-" + tab_id[4:] + "').getAttribute('aria-busy') === 'false'"
+        )
+    assert errors == []
+    page.close()
+
+
+def test_village_explorer_search_and_history(browser_app: tuple[str, Browser]) -> None:
+    """Villages: name search renders a row and the history detail opens."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    page.click("#tab-villages")
+    # Substring search: "NOVA-P5" also matches NOVA-P50..P59, so assert the
+    # exact village is among the results rather than the whole body.
+    page.fill("#village-search-input", "NOVA-P5")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-villages-table]'); return el && !el.hidden && el.textContent.includes('NOVA-P5'); }"
+    )
+    body = page.text_content("[data-villages-body]")
+    assert "Village 10005" in body
+    # The search result row: population + player + alliance columns.
+    assert "105" in body
+    assert "NOVA-P5" in body
+    assert "NOVA" in body
+
+    # Open the history detail. Village 10005 only exists in the 08-08
+    # snapshot (gained that day), so exactly one observation is stored and
+    # the single-point note replaces the trend chart.
+    page.click('[aria-label="Open history for Village 10005"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-village-history-table]'); return el && !el.hidden; }"
+    )
+    assert page.text_content("[data-village-history-body]").count("2026-08-0") == 1
+    assert "Village 10005" in page.text_content("#village-detail-name")
+    assert "Only one stored observation" in page.text_content("[data-village-detail-note]")
+    assert errors == []
+    page.close()
+
+
+def test_csv_exports_for_regions_and_changes(browser_app: tuple[str, Browser]) -> None:
+    """Regions and Changes exports download with snapshot-date filenames."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-regions-body] tr'); return el; }"
+    )
+    # Export button enables once the regions payload is present.
+    page.wait_for_function("() => !document.querySelector('[data-export=\"regions\"]').disabled")
+    with page.expect_download() as download_info:
+        page.click('[data-export="regions"]')
+    assert "regions-2026-08-08.csv" in download_info.value.suggested_filename
+
+    page.click("#tab-changes")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-changes-body] tr'); return el; }"
+    )
+    page.wait_for_function("() => !document.querySelector('[data-export=\"changes\"]').disabled")
+    with page.expect_download() as download_info:
+        page.click('[data-export="changes"]')
+    assert "changes-2026-08-08.csv" in download_info.value.suggested_filename
+    assert errors == []
+    page.close()
+
+
+def test_token_gate_blocks_until_unlock(browser_app_token: tuple[str, Browser]) -> None:
+    """Token mode: protected data stays hidden until the token is entered."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+
+    # Without a token every protected request 401s -> the unlock dialog opens.
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    assert "Access token required" in page.text_content("#token-dialog-title")
+
+    # The Operations tab stays hidden and no protected data is rendered.
+    assert page.get_attribute("#dashboard-tab-operations", "hidden") is not None
+    assert page.text_content('[data-status-value="villages"]').strip() == "—"
+
+    # Enter the test token: the UI stores it and reloads, then loads data.
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    assert page.text_content('[data-status-value="villages"]').strip() == "442"
+    assert errors == []
+    page.close()
+
+
+def test_operations_admin_flow_with_token(browser_app_token: tuple[str, Browser]) -> None:
+    """Token holder is admin: Operations loads settings and runs an action."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    # Unlock exactly like a user would (the fixture serves token mode).
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+
+    # Admin sees the Operations tab and the settings form loads on entry.
+    assert page.get_attribute("#dashboard-tab-operations", "hidden") is None
+    page.click("#dashboard-tab-operations")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('ALLIANCE_TAGS'); return el && el.value.includes('NOVA'); }"
+    )
+    assert page.input_value("#ALLIANCE_TAGS") == "NOVA\nENEMY"
+    assert page.input_value("#FETCH_HOUR") == "0"
+
+    # Fetch action runs (fake run_fetch returns "completed") and the button
+    # returns to its idle state with the outcome in the feedback line.
+    page.click("#fetch-action")
+    page.wait_for_function(
+        "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: completed'); }"
+    )
+    assert page.get_attribute("#fetch-action", "aria-busy") == "false"
+    assert errors == []
     page.close()

@@ -2655,10 +2655,10 @@
     wireDashboardViews();
     loadAuthStatus().then(function (status) {
       var canManage = canManageFromAuth(status);
-      // Resolve the Operations gate before branching: a pending login
-      // (oauth without a session) must not expose the admin-only view.
-      setDashboardAccess(canManage);
       if (status && status.method === "oauth") {
+        // Resolve the Operations gate before branching: a pending login
+        // (oauth without a session) must not expose the admin-only view.
+        setDashboardAccess(canManage);
         if (!status.user) {
           // Confirmed OAuth session missing — ask for login before any
           // protected request; the callback reload re-enters this bootstrap
@@ -2670,7 +2670,15 @@
         startDashboardData(canManage);
         return;
       }
-      // Token / no-auth mode (or an unknown status): full dashboard.
+      // Token / no-auth mode (or an unknown status). In token mode without a
+      // stored token the admin-only surface stays hidden and no protected
+      // request is issued before the user unlocks (the dialog's reload
+      // re-enters this bootstrap with the token stored).
+      if (status && status.method === "token" && !localStorage.getItem(TOKEN_KEY)) {
+        setDashboardAccess(false);
+        showTokenDialog();
+        return;
+      }
       startDashboardData(canManage);
     });
   });

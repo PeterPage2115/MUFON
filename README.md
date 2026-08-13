@@ -7,6 +7,9 @@ plus a web dashboard for status, manual fetch/report, settings, and
 region/alliance analytics. Members of the alliance can log in with their
 Discord account (member = read-only view, admin = full control).
 
+Product decisions, priorities and acceptance criteria live in
+[`ROADMAP.md`](ROADMAP.md) — check it before starting new work.
+
 ## Overview
 
 ```
@@ -228,6 +231,20 @@ uv run pytest -q                     # full test suite (incl. the browser smoke)
 uv run ruff check src tests
 uv run basedpyright src              # strict type check (0 errors / 0 warnings / 0 notes)
 ```
+
+### Live smoke (optional)
+
+Point the read-only smoke tests at a running deployment — no mutations, no
+secrets printed:
+
+```bash
+DASHBOARD_LIVE_URL='http://<host>:8099' uv run pytest tests/test_dashboard_live.py -m live -v
+DASHBOARD_LIVE_URL='http://<host>:8099' DASHBOARD_TOKEN='<token>' uv run pytest tests/test_dashboard_live.py -m live -v
+```
+
+The token (when set) is read from the environment only and never logged; the
+tests hit `/healthz`, the static UI, `/api/auth/status`, anonymous 401s and
+(read-only) `/api/status` + `/api/analysis/dates`.
 
 CI runs exactly these gates on every push to `main` and every pull request
 (the `quality` job installs Chromium with `playwright install --with-deps`

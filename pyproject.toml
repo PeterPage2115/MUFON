@@ -42,5 +42,6 @@ pythonVersion = "3.12"
 testpaths = ["tests"]
 markers = [
     "browser: browser smoke tests (require `uv run playwright install chromium`)",
+    "live: secret-free smoke against a running deployment (opt-in via DASHBOARD_LIVE_URL)",
 ]
 
