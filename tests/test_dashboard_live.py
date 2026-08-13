@@ -9,7 +9,9 @@ verify only read-only, non-mutating contracts:
   (the offline contract, same as TestStaticAssets);
 - `/api/auth/status` is public and reports the auth method;
 - protected `/api/*` routes reject anonymous requests (401);
-- with `DASHBOARD_TOKEN` set, protected routes answer 200.
+- with `DASHBOARD_TOKEN` set, protected routes answer 200, including a
+  read-only analysis call;
+- with `DASHBOARD_EXPECTED_SHA` set, `/api/meta` reports that exact SHA.
 
 Skipped unless `DASHBOARD_LIVE_URL` is set — local runs and CI never touch a
 deployment. Never prints or logs the token, never calls `PUT /api/settings`
@@ -33,6 +35,7 @@ pytestmark = [
 
 BASE = os.environ.get("DASHBOARD_LIVE_URL", "").rstrip("/")
 TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+EXPECTED_SHA = os.environ.get("DASHBOARD_EXPECTED_SHA", "")
 
 
 def _client() -> httpx.Client:
@@ -80,7 +83,20 @@ def test_protected_routes_work_with_token() -> None:
     with _client() as client:
         status = client.get("/api/status", headers=headers)
         dates = client.get("/api/analysis/dates", headers=headers)
+        regions = client.get("/api/analysis/regions", params={"days": 2}, headers=headers)
     assert status.status_code == 200
     assert status.json()["snapshot_date"] is not None
     assert dates.status_code == 200
     assert isinstance(dates.json()["dates"], list)
+    assert regions.status_code == 200
+    assert isinstance(regions.json()["dates"], list)
+
+
+@pytest.mark.skipif(not EXPECTED_SHA, reason="DASHBOARD_EXPECTED_SHA not set")
+def test_meta_reports_expected_build_sha() -> None:
+    with _client() as client:
+        resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"version", "build_sha"}
+    assert body["build_sha"] == EXPECTED_SHA

@@ -137,6 +137,12 @@ def browser_app(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
 
 
 @pytest.fixture()
+def browser_app_empty(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over an EMPTY database (schema, zero snapshots)."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_empty_db)
+
+
+@pytest.fixture()
 def browser_app_token(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
     """Token-mode dashboard for the auth-gate scenarios (test token only).
 
@@ -155,15 +161,23 @@ def browser_app_token(tmp_path: Path) -> Generator[tuple[str, Browser], None, No
         thread.join(timeout=2)
 
 
+def _seed_empty_db(db: Path) -> None:
+    """Schema only, no snapshots — the empty/no-data contract."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    conn.close()
+
+
 def _browser_app_with_auth(
     tmp_path: Path,
     *,
     auth_mode: str,
     token: str,
     bot_loop: asyncio.AbstractEventLoop | None = None,
+    seed: Callable[[Path], None] = _seed_browser_db,
 ) -> Generator[tuple[str, Browser], None, None]:
     db = tmp_path / "browser.db"
-    _seed_browser_db(db)
+    seed(db)
     env = _env(db)
     env["DASHBOARD_AUTH_MODE"] = auth_mode
     env["DASHBOARD_TOKEN"] = token
@@ -472,6 +486,61 @@ def test_csv_exports_for_regions_and_changes(browser_app: tuple[str, Browser]) -
     page.close()
 
 
+def test_empty_db_no_data_states(browser_app_empty: tuple[str, Browser]) -> None:
+    """Empty DB: every view settles to aria-busy=false with an empty state, no JS errors."""
+    url, browser = browser_app_empty
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+
+    # Regions is the default tab: it settles and shows the no-data message.
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.get_attribute("#panel-regions", "aria-busy") == "false"
+    assert "No data yet." in page.text_content("#panel-regions")
+    assert page.get_attribute("#panel-regions", "class").count("is-empty") == 1
+
+    # Other analysis tabs settle too.
+    for tab_id in ("tab-alliances", "tab-players", "tab-events", "tab-changes"):
+        page.click("#" + tab_id)
+        page.wait_for_function(
+            "() => document.getElementById('panel-" + tab_id[4:] + "').getAttribute('aria-busy') === 'false'"
+        )
+
+    # Overview: KPI tiles settle and the header reports no snapshot.
+    page.click("#dashboard-tab-overview")
+    page.wait_for_function(
+        "() => document.querySelector('.metric-grid').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.text_content("[data-header-snapshot]").strip() == "No snapshot yet"
+    assert page.text_content('[data-status-value="snapshot_date"]').strip() == "—"
+    assert errors == []
+    page.close()
+
+
+def test_empty_db_village_search_no_results(browser_app_empty: tuple[str, Browser]) -> None:
+    """Empty DB: a village search settles with the empty-state prompt, no errors."""
+    url, browser = browser_app_empty
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    page.click("#tab-villages")
+    page.fill("#village-search-input", "nonexistent-village")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-villages-empty]'); return el && !el.hidden && el.textContent.includes('No villages found'); }"
+    )
+    assert page.get_attribute("#panel-villages", "aria-busy") == "false"
+    assert errors == []
+    page.close()
+
+
 def test_token_gate_blocks_until_unlock(browser_app_token: tuple[str, Browser]) -> None:
     """Token mode: protected data stays hidden until the token is entered."""
     url, browser = browser_app_token
@@ -526,8 +595,13 @@ def test_operations_admin_flow_with_token(browser_app_token: tuple[str, Browser]
     # Fetch action runs (fake run_fetch returns "completed") and the button
     # returns to its idle state with the outcome in the feedback line.
     page.click("#fetch-action")
+    # Feedback appears when the action API resolves; the button returns to
+    # idle only after the status/logs refresh that follows it.
     page.wait_for_function(
         "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: completed'); }"
+    )
+    page.wait_for_function(
+        "() => document.getElementById('fetch-action').getAttribute('aria-busy') === 'false'"
     )
     assert page.get_attribute("#fetch-action", "aria-busy") == "false"
     assert errors == []
