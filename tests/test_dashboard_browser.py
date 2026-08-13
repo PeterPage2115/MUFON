@@ -24,7 +24,7 @@ from playwright.sync_api import Browser, Page, sync_playwright
 
 from travian import store
 from travian.bot import main as bot_main
-from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
+from travian.dashboard.app import DashboardDeps, RuntimeState, create_app, make_status_provider
 from travian.models import VillageRow
 
 pytestmark = pytest.mark.browser
@@ -201,6 +201,7 @@ def _browser_app_with_auth(
             run_report_fn=no_report,
             bot_loop_getter=lambda: bot_loop,
             get_config=get_config,
+            get_runtime_state=lambda: RuntimeState(True, True),
             env=env,
         )
     )
@@ -384,6 +385,8 @@ def test_overview_view_status_and_job_log(browser_app: tuple[str, Browser]) -> N
     assert page.text_content('[data-status-value="players"]').strip() == "440"
     assert page.text_content('[data-status-value="alliances"]').strip() == "2"
     assert page.text_content('[data-status-value="snapshot_date"]').strip() == "2026-08-08"
+    # Fixed seed dates are in the past → the text-first freshness label says Stale.
+    assert page.text_content('[data-status-value="freshness"]').strip().startswith("Stale \u00b7")
 
     # The admin job log settles (seed DB has no log rows -> "No activity yet.").
     page.wait_for_function(
@@ -516,6 +519,7 @@ def test_empty_db_no_data_states(browser_app_empty: tuple[str, Browser]) -> None
     )
     assert page.text_content("[data-header-snapshot]").strip() == "No snapshot yet"
     assert page.text_content('[data-status-value="snapshot_date"]').strip() == "—"
+    assert page.text_content('[data-status-value="freshness"]').strip() == "No data"
     assert errors == []
     page.close()
 

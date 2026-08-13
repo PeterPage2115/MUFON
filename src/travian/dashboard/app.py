@@ -162,6 +162,24 @@ _SCHEDULE_KEYS: Final = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class RuntimeState:
+    """Bot/scheduler readiness, read fresh on every /readyz call."""
+
+    bot_ready: bool
+    scheduler_ready: bool
+
+
+class FreshnessData(TypedDict):
+    """Age and gap state of the snapshot history (see :func:`compute_freshness`)."""
+
+    state: Literal["no_data", "current", "stale", "gap"]
+    snapshot_date: str | None
+    previous_snapshot_date: str | None
+    age_days: int | None
+    gap_days: int | None
+
+
 class StatusData(TypedDict):
     """The ``GET /api/status`` payload (see module docstring)."""
 
@@ -181,6 +199,7 @@ class StatusData(TypedDict):
     next_report: str
     errors: list[dict[str, str]]
     alliance_tags: list[str]
+    freshness: FreshnessData
 
 
 class SettingsPayload(TypedDict):
@@ -284,6 +303,9 @@ class DashboardDeps:
     - ``bot_loop_getter`` — returns the bot's event loop (``bot.main.bot_loop``),
       None until ``on_ready`` has run.
     - ``get_config`` — the merged config getter (real: ``bot.main._current_config``).
+    - ``get_runtime_state`` — fresh bot/scheduler readiness for ``/readyz``
+      (real: ``bot.main`` wiring — ``bot_ready = bot_loop is not None``,
+      ``scheduler_ready = bot.scheduler is not None``).
     - ``sync_scheduler_fn`` — optional settings→scheduler sync callback (real:
       the bound callback inside ``bot.main._dashboard_app_factory``); None in
       test constructions, where ``put_settings`` then reports ``pending``.
@@ -295,6 +317,7 @@ class DashboardDeps:
     run_report_fn: RunReportFn
     bot_loop_getter: Callable[[], asyncio.AbstractEventLoop | None]
     get_config: ConfigGetter
+    get_runtime_state: Callable[[], RuntimeState]
     env: Mapping[str, str]
     sync_scheduler_fn: SyncSchedulerFn | None = None
 
@@ -303,6 +326,40 @@ class DashboardDeps:
 
 def _db_path(env: Mapping[str, str]) -> str:
     return env.get("SQLITE_PATH", _DEFAULT_SQLITE_PATH)
+
+
+def compute_freshness(dates: list[str], now: datetime, fetch_tz: str) -> FreshnessData:
+    """Freshness contract over ascending ISO snapshot dates.
+
+    - ``no_data`` — no snapshots at all.
+    - ``gap`` — ``gap_days > 0`` (missing day(s) between the two latest
+      snapshots; ``gap_days = (latest - previous).days - 1``).
+    - ``stale`` — latest snapshot older than ``today`` in ``fetch_tz``.
+    - ``current`` — otherwise.
+    """
+    if not dates:
+        return FreshnessData(
+            state="no_data", snapshot_date=None, previous_snapshot_date=None, age_days=None, gap_days=None
+        )
+    latest = datetime.fromisoformat(dates[-1]).date()
+    previous = dates[-2] if len(dates) >= 2 else None
+    gap_days: int | None = None
+    if previous is not None:
+        gap_days = (latest - datetime.fromisoformat(previous).date()).days - 1
+    age_days = (now.astimezone(ZoneInfo(fetch_tz)).date() - latest).days
+    if gap_days is not None and gap_days > 0:
+        state: Literal["no_data", "current", "stale", "gap"] = "gap"
+    elif age_days > 0:
+        state = "stale"
+    else:
+        state = "current"
+    return FreshnessData(
+        state=state,
+        snapshot_date=dates[-1],
+        previous_snapshot_date=previous,
+        age_days=age_days,
+        gap_days=gap_days,
+    )
 
 
 def _is_loopback(bind: str) -> bool:
@@ -497,6 +554,7 @@ def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[],
                 next_report=_next_occurrence(cfg.report_hour, cfg.report_minute, cfg.report_tz),
                 errors=_recent_errors(conn),
                 alliance_tags=cfg.alliance_tags,
+                freshness=compute_freshness(store.list_dates(conn), datetime.now(UTC), cfg.fetch_tz),
             )
         finally:
             conn.close()
@@ -623,7 +681,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         # The static UI, the healthcheck probe and the whole /api/auth/*
         # surface stay public so the browser can load the page and log in
         # without credentials; every other /api/* route is protected.
-        return path in ("/", "/healthz", "/api/meta") or path.startswith(("/static/", "/api/auth/"))
+        return path in ("/", "/healthz", "/api/meta", "/readyz") or path.startswith(("/static/", "/api/auth/"))
 
     def _rate_limited(path: str, method: str, key: str) -> bool:
         if not (path.startswith("/api/actions/") or (path == "/api/settings" and method == "PUT")):
@@ -687,6 +745,30 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         image tag after a deployment.
         """
         return get_build_info(deps.env)
+
+    def readyz() -> JSONResponse:
+        """Public readiness: bot + scheduler state and snapshot freshness.
+
+        200 only when both the bot and the scheduler are ready; 503
+        otherwise. ``/healthz`` stays the liveness probe (process up) —
+        Docker HEALTHCHECK keeps using it so a not-yet-ready process is not
+        reported dead.
+        """
+        runtime = deps.get_runtime_state()
+        cfg = deps.get_config()
+        conn = store.connect(db_path)
+        try:
+            dates = store.list_dates(conn)
+        finally:
+            conn.close()
+        freshness = compute_freshness(dates, datetime.now(UTC), cfg.fetch_tz)
+        body = {
+            "status": "ready" if (runtime.bot_ready and runtime.scheduler_ready) else "not_ready",
+            "bot_ready": runtime.bot_ready,
+            "scheduler_ready": runtime.scheduler_ready,
+            "freshness": freshness,
+        }
+        return JSONResponse(body, status_code=200 if runtime.bot_ready and runtime.scheduler_ready else 503)
 
     def _admin_ok(request: Request) -> bool:
         """RBAC gate: token mode treats token possession as admin; oauth mode
@@ -1178,6 +1260,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
     _ = app.get("/healthz")(healthz)
+    _ = app.get("/readyz")(readyz)
     _ = app.get("/api/meta")(meta)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

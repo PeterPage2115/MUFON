@@ -402,6 +402,17 @@
 
   /* --- status card ------------------------------------------------------------ */
 
+  // Text-first freshness labels (never color alone): No data / Current /
+  // Stale · N d / Gap · N missing days.
+  function freshnessLabel(freshness) {
+    if (!freshness) return "—";
+    if (freshness.state === "no_data") return "No data";
+    if (freshness.state === "current") return "Current";
+    if (freshness.state === "stale") return "Stale \u00b7 " + freshness.age_days + " d";
+    if (freshness.state === "gap") return "Gap \u00b7 " + freshness.gap_days + " missing days";
+    return "—";
+  }
+
   function renderStatus(data) {
     setText(els.headerSnapshot, data.snapshot_date || "No snapshot yet");
     setText(els.headerSource, data.snapshot_source || "—");
@@ -434,6 +445,9 @@
         case "snapshot_source":
           value = data.snapshot_source || "—";
           break;
+        case "freshness":
+          value = freshnessLabel(data.freshness);
+          break;
         default:
           value = data[key] !== undefined && data[key] !== null ? String(data[key]) : "—";
       }
@@ -442,6 +456,15 @@
         el.classList.remove("refreshing");
         void el.offsetWidth; // restart the flash animation
         el.classList.add("refreshing");
+      }
+      if (key === "freshness" && data.freshness) {
+        var note = document.querySelector('[data-status-note="freshness"]');
+        if (note) {
+          var noteText = "from snapshots";
+          if (data.freshness.state === "no_data") noteText = "no snapshots stored";
+          else if (data.freshness.snapshot_date) noteText = "as of " + data.freshness.snapshot_date;
+          if (note.textContent !== noteText) setText(note, noteText);
+        }
       }
     });
 

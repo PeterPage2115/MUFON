@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import discord
 import pytest
 from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingTypeStubs]
+from fastapi.testclient import TestClient
 
 from travian import store, strings
 from travian.bot import main as bot_main
@@ -735,6 +736,46 @@ def _field(trigger: CronTrigger, name: str) -> int:
 
 
 class TestBot:
+    def test_dashboard_readyz_reflects_runtime_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real factory wiring: /readyz is 503 until BOTH the bot loop and
+        the scheduler exist, then 200 (the deploy acceptance probe)."""
+        monkeypatch.setattr(bot_main, "bot_loop", None)
+        monkeypatch.setattr(bot_main, "_current_config", lambda: _cfg())
+        db_path = tmp_path / "readyz.db"
+        conn = store.connect(db_path)
+        store.init_schema(conn)  # production: main() runs init_schema at startup
+        conn.close()
+        bot = bot_main.TravianBot(_cfg())
+        factory = bot_main._dashboard_app_factory({"SQLITE_PATH": str(db_path)}, bot)
+
+        # Nothing ready yet → 503.
+        with TestClient(factory()) as client:
+            resp = client.get("/readyz")
+            assert resp.status_code == 503
+            assert resp.json()["status"] == "not_ready"
+            assert resp.json()["bot_ready"] is False
+            assert resp.json()["scheduler_ready"] is False
+
+            # Scheduler present, bot loop still missing → still not ready.
+            bot.scheduler = FakeScheduler()  # pyright: ignore[reportAttributeAccessIssue]
+            resp = client.get("/readyz")
+            assert resp.status_code == 503
+            assert resp.json()["scheduler_ready"] is True
+            assert resp.json()["bot_ready"] is False
+
+        # Bot loop present (module global, as set by on_ready) → ready.
+        loop = asyncio.new_event_loop()
+        monkeypatch.setattr(bot_main, "bot_loop", loop)
+        with TestClient(factory()) as client:
+            resp = client.get("/readyz")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ready"
+            assert resp.json()["bot_ready"] is True
+            assert resp.json()["scheduler_ready"] is True
+        loop.close()
+
     def test_on_ready_syncs_and_starts_scheduler(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
             bot = bot_main.TravianBot(_cfg())

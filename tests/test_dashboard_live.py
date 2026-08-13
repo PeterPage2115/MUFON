@@ -70,6 +70,18 @@ def test_auth_status_public() -> None:
     assert body["method"] in {"token", "oauth", "none"}
 
 
+def test_readyz_public_and_ready() -> None:
+    """A deployed, healthy process must report bot+scheduler ready (200)."""
+    with _client() as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["bot_ready"] is True
+    assert body["scheduler_ready"] is True
+    assert body["freshness"]["state"] in {"no_data", "current", "stale", "gap"}
+
+
 def test_protected_routes_reject_anonymous() -> None:
     with _client() as client:
         for path in ("/api/status", "/api/analysis/dates", "/api/settings", "/api/logs"):

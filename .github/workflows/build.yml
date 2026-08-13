@@ -116,7 +116,7 @@ jobs:
           import os, uvicorn
           from travian import store
           from travian.bot import main as m
-          from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
+          from travian.dashboard.app import DashboardDeps, RuntimeState, create_app, make_status_provider
           conn = store.connect(os.environ['SQLITE_PATH'])
           store.init_schema(conn)
           conn.close()
@@ -128,6 +128,7 @@ jobs:
               run_report_fn=m.run_report,
               bot_loop_getter=lambda: None,
               get_config=m._current_config,
+              get_runtime_state=lambda: RuntimeState(True, True),
               env=os.environ,
           )
           uvicorn.run(create_app(deps), host=os.environ.get('DASHBOARD_BIND', '127.0.0.1'), port=int(os.environ.get('DASHBOARD_PORT', '8090')), log_level='warning')")
@@ -160,7 +161,15 @@ jobs:
           echo "meta: $meta"
           expected="${{ github.sha }}"
           actual=$(printf '%s' "$meta" | sed -n 's/.*"build_sha":"\([^"]*\)".*/\1/p')
+          # The smoke runtime provider reports bot+scheduler ready, so
+          # /readyz must answer 200 (the deploy acceptance uses the same probe).
+          ready_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 5 "http://127.0.0.1:8090/readyz") || ready_code=000
           docker rm -f "$container" > /dev/null 2>&1 || true
+          if [ "$ready_code" != "200" ]; then
+            echo "::error::/readyz did not return 200 (got $ready_code)"
+            exit 1
+          fi
+          echo "readiness OK: /readyz returned 200"
           if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
             echo "::error::build_sha mismatch: expected $expected, got '$actual'"
             exit 1

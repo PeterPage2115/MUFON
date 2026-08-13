@@ -131,7 +131,7 @@ from fastapi import FastAPI
 from travian import store
 from travian.bot.commands import register_commands
 from travian.bot.report_embed import DAILY_SECTIONS, build_report_embed
-from travian.dashboard.app import DashboardDeps, create_app, make_status_provider
+from travian.dashboard.app import DashboardDeps, RuntimeState, create_app, make_status_provider
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
     alliance_standings,
@@ -956,6 +956,10 @@ def _dashboard_app_factory(env: Mapping[str, str], bot: TravianBot) -> Callable[
                 run_report_fn=run_report,
                 bot_loop_getter=lambda: bot_loop,
                 get_config=_current_config,
+                get_runtime_state=lambda: RuntimeState(
+                    bot_ready=bot_loop is not None,
+                    scheduler_ready=bot.scheduler is not None,
+                ),
                 env=env,
                 sync_scheduler_fn=sync_scheduler_on_bot_loop,
             )

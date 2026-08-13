@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 from urllib.parse import parse_qs, urlparse
@@ -167,6 +167,7 @@ def _deps(
     loop: asyncio.AbstractEventLoop | None = None,
     get_status: Callable[[], dashboard_app.StatusData] | None = None,
     sync_scheduler_fn: dashboard_app.SyncSchedulerFn | None = None,
+    get_runtime_state: Callable[[], dashboard_app.RuntimeState] | None = None,
 ) -> DashboardDeps:
     env = dict(env)
     env["SQLITE_PATH"] = str(db)  # app endpoints open the db via env, like main()
@@ -177,6 +178,7 @@ def _deps(
         run_report_fn=run_report or FakeRunReport(),
         bot_loop_getter=lambda: loop,
         get_config=get_config,
+        get_runtime_state=get_runtime_state or (lambda: dashboard_app.RuntimeState(True, True)),
         env=env,
         sync_scheduler_fn=sync_scheduler_fn,
     )
@@ -191,6 +193,7 @@ def _app(
     loop: asyncio.AbstractEventLoop | None = None,
     get_status: Callable[[], dashboard_app.StatusData] | None = None,
     sync_scheduler_fn: dashboard_app.SyncSchedulerFn | None = None,
+    get_runtime_state: Callable[[], dashboard_app.RuntimeState] | None = None,
 ) -> FastAPI:
     return create_app(
         _deps(
@@ -201,6 +204,7 @@ def _app(
             loop=loop,
             get_status=get_status,
             sync_scheduler_fn=sync_scheduler_fn,
+            get_runtime_state=get_runtime_state,
         )
     )
 
@@ -1486,6 +1490,102 @@ class TestAuthModes:
             assert client.get("/api/status").status_code == 200
 
 
+class TestReadinessAndFreshness:
+    def test_compute_freshness_states(self) -> None:
+        """Pure-function contract: precedence no_data → gap → stale → current."""
+        fixed_now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+        assert dashboard_app.compute_freshness([], fixed_now, "Europe/Warsaw") == {
+            "state": "no_data",
+            "snapshot_date": None,
+            "previous_snapshot_date": None,
+            "age_days": None,
+            "gap_days": None,
+        }
+        gap = dashboard_app.compute_freshness(
+            ["2026-08-01", "2026-08-08"], fixed_now, "Europe/Warsaw"
+        )
+        assert gap == {
+            "state": "gap",
+            "snapshot_date": "2026-08-08",
+            "previous_snapshot_date": "2026-08-01",
+            "age_days": 5,
+            "gap_days": 6,
+        }
+        assert dashboard_app.compute_freshness(["2026-08-13"], fixed_now, "Europe/Warsaw") == {
+            "state": "current",
+            "snapshot_date": "2026-08-13",
+            "previous_snapshot_date": None,
+            "age_days": 0,
+            "gap_days": None,
+        }
+        stale = dashboard_app.compute_freshness(["2026-08-01"], fixed_now, "Europe/Warsaw")
+        assert stale["state"] == "stale"
+        assert stale["age_days"] == 12
+        assert stale["gap_days"] is None
+
+    def test_readyz_503_before_runtime_ready(self, tmp_path: Path) -> None:
+        db = tmp_path / "rz.db"
+        _seed_db(db)
+        def not_ready() -> dashboard_app.RuntimeState:
+            return dashboard_app.RuntimeState(bot_ready=False, scheduler_ready=False)
+        with TestClient(_app(db, _env(), get_runtime_state=not_ready)) as client:
+            resp = client.get("/readyz")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "not_ready"
+        assert body["bot_ready"] is False
+        assert body["scheduler_ready"] is False
+        # Freshness is still reported on a not-ready process (public probe).
+        assert body["freshness"]["state"] in {"current", "stale", "gap"}
+
+    def test_readyz_200_when_runtime_ready(self, tmp_path: Path) -> None:
+        db = tmp_path / "rz.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:  # fixture default: ready
+            resp = client.get("/readyz")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ready"
+
+    def test_readyz_public_under_token_auth(self, tmp_path: Path) -> None:
+        """/readyz must never need the token (same reasoning as /healthz)."""
+        db = tmp_path / "rz.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/status").status_code == 401
+            assert client.get("/readyz").status_code == 200
+            assert client.get("/readyz").json()["status"] == "ready"
+
+    def test_readyz_gap_days_and_empty_db(self, tmp_path: Path) -> None:
+        gap_db = tmp_path / "gap.db"
+        _seed_db(gap_db, snapshot=False)
+        conn = store.connect(gap_db)
+        store.save_snapshot(conn, "2026-08-01", [_row(1, population=100)])
+        store.save_snapshot(conn, "2026-08-08", [_row(1, population=110)])
+        conn.close()
+        with TestClient(_app(gap_db, _env())) as client:
+            freshness = client.get("/readyz").json()["freshness"]
+        assert freshness["state"] == "gap"
+        assert freshness["gap_days"] == 6
+        assert freshness["previous_snapshot_date"] == "2026-08-01"
+
+        empty_db = tmp_path / "empty.db"
+        _seed_db(empty_db, snapshot=False)
+        with TestClient(_app(empty_db, _env())) as client:
+            freshness = client.get("/readyz").json()["freshness"]
+        assert freshness["state"] == "no_data"
+        assert freshness["snapshot_date"] is None
+        assert freshness["age_days"] is None
+
+    def test_status_includes_freshness_for_admins(self, tmp_path: Path) -> None:
+        db = tmp_path / "st.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/status").json()
+        assert body["freshness"]["snapshot_date"] == SNAPSHOT_DATE
+        assert "state" in body["freshness"]
+
+
 class TestOAuthFlow:
     OAUTH_ENV: ClassVar[dict[str, str]] = {
         "DASHBOARD_AUTH_MODE": "oauth",
@@ -1573,6 +1673,9 @@ class TestOAuthFlow:
             assert body["errors"] == []
             assert body["snapshot_date"] == SNAPSHOT_DATE
             assert body["alliance_tags"] == ["NOVA"]
+            # Freshness is part of the member payload (never sanitized away).
+            assert body["freshness"]["snapshot_date"] == SNAPSHOT_DATE
+            assert body["freshness"]["state"] in {"current", "stale", "gap"}
 
             # Intelligence and the village explorer stay open for members.
             assert client.get("/api/analysis/players", headers=headers).status_code == 200
