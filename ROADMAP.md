@@ -28,7 +28,7 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 7. Browser smoke (Playwright) pokrywa główne widoki; live smoke jest sekret-free i read-only.
 8. Pełny zestaw `pytest + ruff + basedpyright` przechodzi w CI przed publikacją obrazu.
 
-## 3. Zrobione (stan na 2026-08-13, HEAD `eba690c`)
+## 3. Zrobione (stan na 2026-08-13, HEAD `48b5116`)
 
 - Parser i składowanie snapshotów `map.sql` (SQLite/WAL), delta engine, backfill z Postgres.
 - Raport Discord (KPI, Regiony, Standings) + `/raport`, `/wioski`, `/regiony`.
@@ -78,9 +78,10 @@ Status carryoverów z historycznego draftu dashboardu (zweryfikowany 2026-08-13)
 
 - [x] Scheduler sync, vendored Chart.js, gap-aware Changes, Village explorer,
       VP ranking graczy i limit Events — wdrożone i potwierdzone w kodzie i testach.
-- [ ] War scoreboard (`metrics.conquests_between`, `GET /api/analysis/wars`,
-      zakładka „Wars" z macierzą kto-komu) — brak implementacji; kandydat na
-      kolejny konkretny slice Intelligence (porównania okresów).
+- [x] War scoreboard (`metrics.conquests_between`, `GET /api/analysis/wars`,
+      zakładka „Wars" z macierzą kto-komu, drill-down i eksportem CSV) —
+      wdrożone; wszechświat = `TRACKED_ALLIANCES` (obie strony podboju muszą
+      być śledzone; usunięte wioski osobno), testy jednostkowe/API/browser.
 
 Rekomendowany: **Intelligence** — drill-down region/player, porównania
 okresów, zapisane widoki.
