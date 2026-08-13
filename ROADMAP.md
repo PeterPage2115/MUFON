@@ -48,13 +48,13 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 - [x] Task 4: browser smoke dla token gate i widoku Operations (admin-only).
 - [ ] Autoryzowany dogfood live (wymaga bezpiecznej sesji token/OAuth — tylko po zgodzie).
 
-## 5. Później (P1) — przed szerszym udostępnieniem na LAN-ie
+## 5. Zrobione (P1, 2026-08-13) — hardening przed szerszym udostępnieniem na LAN-ie
 
-- [ ] Task 5: identyfikacja buildu (`/api/meta` z SHA) + deploy/rollback po konkretnym SHA.
-- [ ] Task 6: backup/restore SQLite + procedura rollbacku.
-- [ ] Task 7: rozdzielenie liveness (`/healthz`) od readiness/freshness (`/readyz`).
-- [ ] Task 8: utwardzenie OAuth (redirect-origin, transport sesji, nagłówki).
-- [ ] Task 9: pomiar retencji/wydajności na realnych danych; ewentualne indeksy/paginacja.
+- [x] Task 5: identyfikacja buildu (`/api/meta` z SHA) + deploy/rollback po konkretnym SHA (`IMAGE_TAG`).
+- [x] Task 6: backup/restore SQLite (`python -m travian.backup`) + procedura rollbacku.
+- [x] Task 7: rozdzielenie liveness (`/healthz`) od readiness/freshness (`/readyz`).
+- [x] Task 8: utwardzenie OAuth (redirect-origin `OAUTH_PUBLIC_ORIGIN`, HttpOnly cookie, nagłówki).
+- [x] Task 9: pomiar retencji/wydajności na read-only kopii (seed 60k wiosek × 7 dni): najwolniejszy endpoint (Regions 7d) p95 ≈ 0,63 s — poniżej progu interwencji; bez zmian `store.py`/API i bez pruningu.
 
 ## 6. Później (P2) — następny slice produktowy (wybór po P0/P1)
 
