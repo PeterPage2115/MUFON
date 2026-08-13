@@ -28,7 +28,7 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 7. Browser smoke (Playwright) pokrywa główne widoki; live smoke jest sekret-free i read-only.
 8. Pełny zestaw `pytest + ruff + basedpyright` przechodzi w CI przed publikacją obrazu.
 
-## 3. Zrobione (do 2026-08-12, HEAD `d1614c3`)
+## 3. Zrobione (stan na 2026-08-13, HEAD `1a4f3c2`)
 
 - Parser i składowanie snapshotów `map.sql` (SQLite/WAL), delta engine, backfill z Postgres.
 - Raport Discord (KPI, Regiony, Standings) + `/raport`, `/wioski`, `/regiony`.
@@ -36,13 +36,16 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
   Overview (Status / Job log), Operations (Actions / Settings), scheduler sync, honest deltas.
 - Auth: token mode, Discord OAuth z RBAC member/admin i rate limitingiem akcji.
 - CI: quality (pytest + ruff + basedpyright + browser smoke) → build-push GHCR → smoke → secret-scan.
+- Iteration 4 P0: ten dokument jako kontrakt, sekret-free live smoke (marker `live`),
+  browser smoke dla Intelligence/Overview/token gate/Operations (Playwright) i fix token gate.
+  Pełny baseline `pytest + ruff + basedpyright` przechodzi lokalnie na tym commicie.
 
 ## 4. Następne (P0) — stabilizacja i akceptacja
 
-- [ ] Task 1 (ten dokument): kontrakt + roadmapa.
-- [ ] Task 2: sekret-free live smoke (`tests/test_dashboard_live.py`, marker `live`).
-- [ ] Task 3: browser smoke dla głównych widoków Intelligence/Overview + ścieżek pustych.
-- [ ] Task 4: browser smoke dla token gate i widoku Operations (admin-only).
+- [x] Task 1 (ten dokument): kontrakt + roadmapa.
+- [x] Task 2: sekret-free live smoke (`tests/test_dashboard_live.py`, marker `live`).
+- [x] Task 3: browser smoke dla głównych widoków Intelligence/Overview + ścieżek pustych.
+- [x] Task 4: browser smoke dla token gate i widoku Operations (admin-only).
 - [ ] Autoryzowany dogfood live (wymaga bezpiecznej sesji token/OAuth — tylko po zgodzie).
 
 ## 5. Później (P1) — przed szerszym udostępnieniem na LAN-ie
