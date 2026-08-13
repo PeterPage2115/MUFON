@@ -35,6 +35,7 @@ import pytest
 from travian.metrics import (
     alliance_standings,
     compute_deltas,
+    conquests_between,
     region_alliance_totals,
     region_stats,
     resolve_alliance_ids,
@@ -428,6 +429,137 @@ class TestVillageEvents:
         assert [e.village_id for e in gained] == [4]
         assert [e.event for e in lost] == ["lost_deleted"]
         assert lost[0].village_id == 3
+
+
+class TestConquestsBetween:
+    """Wars scoreboard: tracked→tracked transfers and tracked deletions only.
+
+    The universe is the resolved tracked ids: a transition involving an
+    untracked alliance (either side) is NOT a conquest — the Events tab owns
+    gained/lost. Same-alliance changes and new villages never appear.
+    """
+
+    def test_tracked_to_tracked_transfer_is_conquest(self):
+        prev = [_row(1, 7, 1)]
+        curr = [
+            make_village_row(
+                village_id=1,
+                alliance_id=8,
+                alliance_tag="ZETA",
+                player_id=5,
+                player_name="P5",
+                region="North",
+                population=250,
+            )
+        ]
+
+        conquests, deleted = conquests_between(prev, curr, {7, 8})
+
+        assert deleted == []
+        assert len(conquests) == 1
+        event = conquests[0]
+        assert event.village_id == 1
+        assert event.from_tag == "A7"
+        assert event.from_player == "P1"
+        assert event.to_tag == "ZETA"
+        assert event.to_player == "P5"
+        assert event.region == "North"
+        assert event.population == 250  # current snapshot
+
+    def test_untracked_transitions_ignored(self):
+        prev = [
+            _row(1, 7, 1),  # tracked -> untracked (lost to enemy: Events tab)
+            _row(2, 999, 3),  # untracked -> tracked (gained: Events tab)
+            _row(3, 999, 4),  # untracked -> untracked
+        ]
+        curr = [
+            make_village_row(village_id=1, alliance_id=888, alliance_tag="GHOST"),
+            make_village_row(village_id=2, alliance_id=7, alliance_tag="A7"),
+            make_village_row(village_id=3, alliance_id=777, alliance_tag="GHOST2"),
+        ]
+
+        conquests, deleted = conquests_between(prev, curr, {7})
+
+        assert conquests == []
+        assert deleted == []
+
+    def test_same_alliance_change_ignored(self):
+        # Tag rename + player change within the same alliance_id → no event.
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=7, alliance_tag="WOLVERINE", player_id=9)]
+
+        conquests, deleted = conquests_between(prev, curr, {7})
+
+        assert conquests == []
+        assert deleted == []
+
+    def test_new_village_ignored(self):
+        prev = [_row(1, 7, 1)]
+        curr = [_row(1, 7, 1), _row(2, 7, 2)]
+
+        conquests, deleted = conquests_between(prev, curr, {7})
+
+        assert conquests == []
+        assert deleted == []
+
+    def test_tracked_deleted_carries_prev_snapshot(self):
+        prev = [_row(1, 7, 1, population=150, region="South")]
+        curr = [_row(2, 7, 2)]
+
+        conquests, deleted = conquests_between(prev, curr, {7})
+
+        assert conquests == []
+        assert len(deleted) == 1
+        event = deleted[0]
+        assert event.village_id == 1
+        assert event.from_tag == "A7"
+        assert event.from_player == "P1"
+        assert event.region == "South"
+        assert event.population == 150  # previous snapshot (village gone)
+
+    def test_untracked_deleted_ignored(self):
+        prev = [_row(1, 999, 3)]
+        curr: list[VillageRow] = []
+
+        conquests, deleted = conquests_between(prev, curr, {7})
+
+        assert conquests == []
+        assert deleted == []
+
+    def test_none_prev_returns_no_events(self):
+        curr = [_row(1, 7, 1)]
+
+        conquests, deleted = conquests_between(None, curr, {7})
+
+        assert conquests == []
+        assert deleted == []
+
+    def test_deterministic_order(self):
+        # Shuffled input: conquests sorted by (from_tag, to_tag, x, y);
+        # deleted sorted by (from_tag, x, y).
+        prev = [
+            _row(1, 9, 1),  # B->A transfer (x=1)
+            _row(2, 9, 1),  # B->A transfer (x=2)
+            _row(3, 7, 2),  # A->B transfer
+            _row(4, 9, 1),  # B deleted
+            _row(5, 7, 1),  # A deleted
+            _row(6, 7, 1),  # A stable
+        ]
+        curr = [
+            make_village_row(village_id=1, alliance_id=7, alliance_tag="A7"),
+            make_village_row(village_id=2, alliance_id=7, alliance_tag="A7"),
+            make_village_row(village_id=3, alliance_id=9, alliance_tag="A9"),
+            _row(6, 7, 1),
+        ]
+
+        conquests, deleted = conquests_between(prev, curr, {7, 9})
+
+        assert [(e.from_tag, e.to_tag, e.village_id) for e in conquests] == [
+            ("A7", "A9", 3),
+            ("A9", "A7", 1),
+            ("A9", "A7", 2),
+        ]
+        assert [(e.from_tag, e.village_id) for e in deleted] == [("A7", 5), ("A9", 4)]
 
 
 class TestRegionStats:

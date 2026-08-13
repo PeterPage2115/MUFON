@@ -1054,6 +1054,9 @@
     from: null,
     to: null,
     eventsLimit: 200,
+    warsPayload: null,
+    warsFrom: null,
+    warsTo: null,
     regionsDates: [],
     regionsSeries: {},
     standingsPayload: null,
@@ -1115,6 +1118,19 @@
         lostList: document.querySelector("[data-events-lost]"),
         gainedCount: document.querySelector("[data-events-gained-count]"),
         lostCount: document.querySelector("[data-events-lost-count]"),
+        warsFrom: document.getElementById("analysis-wars-from"),
+        warsTo: document.getElementById("analysis-wars-to"),
+        warsError: document.getElementById("analysis-wars-error"),
+        warsMatrix: document.querySelector("[data-wars-matrix]"),
+        warsMatrixHead: document.querySelector("[data-wars-matrix-head]"),
+        warsMatrixBody: document.querySelector("[data-wars-matrix-body]"),
+        warsDetail: document.querySelector("[data-wars-detail]"),
+        warsDetailTitle: document.querySelector("[data-wars-detail-title]"),
+        warsDetailCount: document.querySelector("[data-wars-detail-count]"),
+        warsEntries: document.querySelector("[data-wars-entries]"),
+        warsDeleted: document.querySelector("[data-wars-deleted]"),
+        warsDeletedCount: document.querySelector("[data-wars-deleted-count]"),
+        warsEmpty: document.querySelector("[data-wars-empty]"),
         changesBody: document.querySelector("[data-changes-body]"),
         villagesInput: document.getElementById("village-search-input"),
         villagesTable: document.querySelector("[data-villages-table]"),
@@ -1159,10 +1175,10 @@
   function hidePanelEmpty(panel) {
     panel.classList.remove("is-empty");
     var state = panel.querySelector(".empty-state");
-    // The events panel's dedicated node ([data-events-empty]) is owned by
-    // renderEvents; generated states are removed so recovery never leaves a
-    // stale message behind.
-    if (state && !state.hasAttribute("data-events-empty")) {
+    // The events/wars panels' dedicated nodes ([data-events-empty] /
+    // [data-wars-empty]) are owned by their renderers; generated states are
+    // removed so recovery never leaves a stale message behind.
+    if (state && !state.hasAttribute("data-events-empty") && !state.hasAttribute("data-wars-empty")) {
       if (state.parentNode) state.parentNode.removeChild(state);
     }
   }
@@ -1938,6 +1954,198 @@
     return li;
   }
 
+  /* Wars tab */
+
+  function loadWars() {
+    var panel = document.getElementById("panel-wars");
+    var els = analysisElements();
+    setPanelBusy("wars", true);
+    setWarsBusy(true);
+    return api
+      .analysis("dates")
+      .then(function (payload) {
+        var dates = payload.dates || [];
+        if (dates.length < 2) {
+          showPanelEmpty(panel, "No data yet.");
+          setPanelBusy("wars", false);
+          setWarsBusy(false);
+          return;
+        }
+        hidePanelEmpty(panel);
+        fillDateSelect(els.warsFrom, dates);
+        fillDateSelect(els.warsTo, dates);
+        if (analysisState.warsFrom && dates.indexOf(analysisState.warsFrom) !== -1) {
+          els.warsFrom.value = analysisState.warsFrom;
+        } else {
+          els.warsFrom.value = dates[dates.length - 2];
+        }
+        if (analysisState.warsTo && dates.indexOf(analysisState.warsTo) !== -1) {
+          els.warsTo.value = analysisState.warsTo;
+        } else {
+          els.warsTo.value = dates[dates.length - 1];
+        }
+        analysisState.warsFrom = els.warsFrom.value;
+        analysisState.warsTo = els.warsTo.value;
+        return fetchWars(analysisState.warsFrom, analysisState.warsTo);
+      })
+      .then(function () {
+        setWarsBusy(false);
+        setPanelBusy("wars", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("wars", false);
+        setWarsBusy(false);
+        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        activatedTabs.wars = false;
+      });
+  }
+
+  function setWarsBusy(busy) {
+    var els = analysisElements();
+    els.warsFrom.disabled = busy;
+    els.warsTo.disabled = busy;
+  }
+
+  function fetchWars(from, to) {
+    return api
+      .analysis("wars", { from: from, to: to })
+      .then(function (payload) {
+        renderWars(payload, from, to);
+      });
+  }
+
+  function renderWars(payload, from, to) {
+    var els = analysisElements();
+    var pairs = payload.pairs || [];
+    var deleted = payload.deleted || [];
+    analysisState.warsPayload = payload;
+    setExportEnabled("wars", pairs.length + deleted.length > 0);
+    els.warsMatrixHead.textContent = "";
+    els.warsMatrixBody.textContent = "";
+    els.warsEntries.textContent = "";
+    els.warsDeleted.textContent = "";
+    setText(els.warsDeletedCount, String(deleted.length));
+
+    if (!pairs.length && !deleted.length) {
+      els.warsMatrix.hidden = true;
+      els.warsDetail.hidden = true;
+      els.warsEmpty.hidden = false;
+      setText(els.warsEmpty, "No conquests or deleted villages between " + from + " and " + to + ".");
+      return;
+    }
+    els.warsEmpty.hidden = true;
+    els.warsMatrix.hidden = pairs.length === 0;
+    els.warsDetail.hidden = false;
+
+    var tags = payload.tracked_tags || [];
+    var byPair = {};
+    pairs.forEach(function (pair) {
+      byPair[pair.from_tag + "\u0000" + pair.to_tag] = pair;
+    });
+
+    // Matrix head: empty corner + one column per tracked tag.
+    var headRow = document.createElement("tr");
+    var corner = document.createElement("th");
+    corner.scope = "col";
+    corner.textContent = "From \\ To";
+    headRow.appendChild(corner);
+    tags.forEach(function (tag) {
+      var th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = tag;
+      headRow.appendChild(th);
+    });
+    els.warsMatrixHead.appendChild(headRow);
+
+    // Body: one row per tracked tag; cells are buttons when a pair has events.
+    tags.forEach(function (fromTag) {
+      var tr = document.createElement("tr");
+      var label = document.createElement("th");
+      label.scope = "row";
+      label.textContent = fromTag;
+      tr.appendChild(label);
+      tags.forEach(function (toTag) {
+        var td = document.createElement("td");
+        var pair = byPair[fromTag + "\u0000" + toTag];
+        if (pair && pair.villages > 0) {
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "wars-cell";
+          btn.textContent = String(pair.villages);
+          btn.title = pair.population + " population";
+          btn.addEventListener("click", function () {
+            showWarsPair(pair);
+          });
+          td.appendChild(btn);
+        } else {
+          td.textContent = "\u2013";
+        }
+        tr.appendChild(td);
+      });
+      els.warsMatrixBody.appendChild(tr);
+    });
+
+    // Detail defaults to the first pair (deterministic order).
+    showWarsPair(pairs[0]);
+
+    deleted.forEach(function (ev) {
+      els.warsDeleted.appendChild(warsLine(ev));
+    });
+  }
+
+  function showWarsPair(pair) {
+    var els = analysisElements();
+    setText(
+      els.warsDetailTitle,
+      pair.from_tag + " \u2192 " + pair.to_tag + " \u2014 " + pair.villages + " villages, " + pair.population + " pop"
+    );
+    setText(els.warsDetailCount, String(pair.villages));
+    els.warsEntries.textContent = "";
+    pair.entries.forEach(function (ev) {
+      els.warsEntries.appendChild(warsLine(ev));
+    });
+  }
+
+  function warsLine(ev) {
+    var li = document.createElement("li");
+    li.className = "event-line event-line--lost";
+
+    // Same semantic button as the Events tab: opens the village's history.
+    var name = document.createElement("button");
+    name.type = "button";
+    name.className = "event-line__name";
+    name.textContent = ev.village_name;
+    name.addEventListener("click", function () {
+      openVillageFromEvent(ev);
+    });
+    li.appendChild(name);
+
+    var coords = document.createElement("span");
+    coords.className = "event-line__coords";
+    coords.textContent = "(" + ev.x + "|" + ev.y + ")";
+    li.appendChild(coords);
+
+    if (ev.region) {
+      var region = document.createElement("span");
+      region.className = "event-line__region";
+      region.textContent = "\u2014 " + ev.region;
+      li.appendChild(region);
+    }
+
+    var meta = document.createElement("span");
+    meta.className = "event-line__meta";
+    if (ev.from_tag !== undefined) {
+      meta.textContent =
+        (ev.to_tag !== undefined ? ev.from_tag + " \u2192 " + ev.to_tag : ev.from_tag) +
+        " \u00b7 " +
+        (ev.to_player || ev.from_player || "unknown");
+    } else {
+      meta.textContent = "deleted \u00b7 " + (ev.from_player || "unknown");
+    }
+    li.appendChild(meta);
+    return li;
+  }
+
   /* Changes tab */
 
   function loadChanges() {
@@ -2380,6 +2588,21 @@
           rows
         );
       },
+      wars: function () {
+        var payload = analysisState.warsPayload;
+        if (!payload || (!payload.pairs.length && !payload.deleted.length)) return;
+        var headers = ["Event", "From", "To", "Village", "Coordinates", "Region", "From player", "To player", "Population"];
+        var rows = [];
+        (payload.pairs || []).forEach(function (pair) {
+          pair.entries.forEach(function (e) {
+            rows.push(["conquest", e.from_tag, e.to_tag, e.village_name, e.x + "|" + e.y, e.region || "", e.from_player, e.to_player, e.population]);
+          });
+        });
+        (payload.deleted || []).forEach(function (e) {
+          rows.push(["deleted", e.from_tag, "", e.village_name, e.x + "|" + e.y, e.region || "", e.from_player, "", e.population]);
+        });
+        exportCsv("wars-" + analysisState.warsFrom + "-" + analysisState.warsTo + ".csv", headers, rows);
+      },
     };
     document.querySelectorAll("[data-export]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -2396,6 +2619,7 @@
     alliances: loadStandings,
     players: loadPlayers,
     events: loadEvents,
+    wars: loadWars,
     changes: loadChanges,
     villages: loadVillages,
   };
@@ -2415,9 +2639,10 @@
     // Six tabs can overflow on narrow screens — keep the chosen one visible.
     tab.scrollIntoView({ block: "nearest", inline: "nearest" });
     // The global alliance filter scopes regions/events/changes/players; the
-    // Alliances tab is a cross-alliance chart with its own local picker.
+    // Alliances tab is a cross-alliance chart with its own local picker and
+    // the Wars tab always uses the tracked universe (never the filter).
     if (els.allianceFilter) {
-      els.allianceFilter.hidden = name === "alliances" || allianceTags.length < 2;
+      els.allianceFilter.hidden = name === "alliances" || name === "wars" || allianceTags.length < 2;
     }
     if (!activatedTabs[name]) {
       activatedTabs[name] = true;
@@ -2515,12 +2740,42 @@
     });
   }
 
+  function wireWarsControls() {
+    var els = analysisElements();
+    function onChange() {
+      var from = els.warsFrom.value;
+      var to = els.warsTo.value;
+      if (!from || !to) return;
+      if (from >= to) {
+        setText(els.warsError, "From must be earlier than To.");
+        els.warsError.hidden = false;
+        return; // keep the previous lists
+      }
+      els.warsError.hidden = true;
+      analysisState.warsFrom = from;
+      analysisState.warsTo = to;
+      setPanelBusy("wars", true);
+      setWarsBusy(true);
+      fetchWars(from, to)
+        .catch(function (err) {
+          showToast("Wars refresh failed", err.message, "error");
+        })
+        .then(function () {
+          setPanelBusy("wars", false);
+          setWarsBusy(false);
+        });
+    }
+    els.warsFrom.addEventListener("change", onChange);
+    els.warsTo.addEventListener("change", onChange);
+  }
+
   function wireAnalysis() {
     applyChartDefaults();
     wireTabs();
     wireRegionSelect();
     wireMetricToggle();
     wireEventsControls();
+    wireWarsControls();
     wireStandingsPicker();
     wireAllianceSwitch();
     wireVillagesSearch();

@@ -83,6 +83,7 @@
               <button class="tab-bar__tab" role="tab" id="tab-alliances" aria-controls="panel-alliances" aria-selected="false" tabindex="-1">Alliances</button>
               <button class="tab-bar__tab" role="tab" id="tab-players" aria-controls="panel-players" aria-selected="false" tabindex="-1">Players</button>
               <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+              <button class="tab-bar__tab" role="tab" id="tab-wars" aria-controls="panel-wars" aria-selected="false" tabindex="-1">Wars</button>
               <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
               <button class="tab-bar__tab" role="tab" id="tab-villages" aria-controls="panel-villages" aria-selected="false" tabindex="-1">Villages</button>
             </div>
@@ -252,6 +253,47 @@
                 </div>
               </div>
               <p class="empty-state" data-events-empty hidden></p>
+            </section>
+
+            <section class="analysis-panel" id="panel-wars" role="tabpanel" aria-labelledby="tab-wars" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Conquests between the selected dates</p>
+                <button class="button button--outline button--small" type="button" data-export="wars" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls">
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-wars-from">From</label>
+                  <select id="analysis-wars-from" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-wars-to">To</label>
+                  <select id="analysis-wars-to" class="analysis-select"></select>
+                </div>
+                <p class="analysis-controls__error" id="analysis-wars-error" role="alert" hidden></p>
+              </div>
+              <div class="data-table__wrap" data-wars-matrix hidden>
+                <table class="data-table data-table--wars" aria-label="Conquest matrix between tracked alliances">
+                  <thead data-wars-matrix-head></thead>
+                  <tbody data-wars-matrix-body></tbody>
+                </table>
+              </div>
+              <div class="events-grid" data-wars-detail hidden>
+                <div class="event-list">
+                  <div class="event-list__head">
+                    <p class="overline" data-wars-detail-title>Conquests</p>
+                    <span class="event-list__count mono"><span data-wars-detail-count>0</span></span>
+                  </div>
+                  <ul class="event-list__items" data-wars-entries></ul>
+                </div>
+                <div class="event-list">
+                  <div class="event-list__head">
+                    <p class="overline">Deleted villages</p>
+                    <span class="event-list__count mono is-negative">· <span data-wars-deleted-count>0</span></span>
+                  </div>
+                  <ul class="event-list__items" data-wars-deleted></ul>
+                </div>
+              </div>
+              <p class="empty-state" data-wars-empty hidden></p>
             </section>
 
             <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>

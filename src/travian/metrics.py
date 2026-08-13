@@ -56,6 +56,8 @@ import sqlite3
 
 from travian.models import (
     AllianceStat,
+    ConquestEvent,
+    DeletedVillageEvent,
     DeltaSummary,
     PlayerStat,
     RegionStat,
@@ -311,6 +313,67 @@ def village_events(
     gained.sort(key=lambda e: ((e.region or ""), e.x, e.y))
     lost.sort(key=lambda e: (e.event == "lost_deleted", (e.new_owner_tag or ""), (e.region or ""), e.x, e.y))
     return gained, lost
+
+
+def conquests_between(
+    prev_rows: list[VillageRow] | None,
+    curr_rows: list[VillageRow],
+    tracked_ids: set[int],
+) -> tuple[list[ConquestEvent], list[DeletedVillageEvent]]:
+    """(conquests, deleted) events between two snapshots — tracked universe.
+
+    Only ownership transitions where BOTH the old and the new alliance ids are
+    in ``tracked_ids`` and differ count as conquests. A tracked village gone
+    from the map counts as deleted. New villages, same-alliance changes, and
+    transitions involving an untracked alliance are ignored (the Events tab
+    covers those). ``prev_rows=None`` yields no events. Conquest events carry
+    the CURRENT row's region/population; deleted events carry the PREVIOUS
+    row's. Sort order: conquests by (from_tag, to_tag, x, y, village_id);
+    deleted by (from_tag, x, y, village_id) — stable, deterministic.
+    """
+    if prev_rows is None:
+        return [], []
+    prev_by_id = {row.village_id: row for row in prev_rows}
+    curr_by_id = {row.village_id: row for row in curr_rows}
+
+    conquests: list[ConquestEvent] = []
+    deleted: list[DeletedVillageEvent] = []
+    for village_id, prev_row in prev_by_id.items():
+        if prev_row.alliance_id not in tracked_ids:
+            continue
+        curr_row = curr_by_id.get(village_id)
+        if curr_row is None:
+            deleted.append(
+                DeletedVillageEvent(
+                    village_id=village_id,
+                    village_name=prev_row.name,
+                    x=prev_row.x,
+                    y=prev_row.y,
+                    from_tag=prev_row.alliance_tag,
+                    from_player=prev_row.player_name,
+                    region=prev_row.region,
+                    population=prev_row.population,
+                )
+            )
+        elif curr_row.alliance_id in tracked_ids and curr_row.alliance_id != prev_row.alliance_id:
+            conquests.append(
+                ConquestEvent(
+                    village_id=village_id,
+                    village_name=curr_row.name,
+                    x=curr_row.x,
+                    y=curr_row.y,
+                    from_tag=prev_row.alliance_tag,
+                    from_player=prev_row.player_name,
+                    to_tag=curr_row.alliance_tag,
+                    to_player=curr_row.player_name,
+                    region=curr_row.region,
+                    population=curr_row.population,
+                )
+            )
+
+    conquests.sort(key=lambda e: (e.from_tag, e.to_tag, e.x, e.y, e.village_id))
+    deleted.sort(key=lambda e: (e.from_tag, e.x, e.y, e.village_id))
+    return conquests, deleted
 
 
 def region_alliance_totals(curr_rows: list[VillageRow]) -> dict[str, list[tuple[str, int]]]:

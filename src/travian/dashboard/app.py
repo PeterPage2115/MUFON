@@ -45,6 +45,10 @@ Endpoints:
 - ``GET /api/analysis/events?from=&to=`` — gained/lost village events
   between two dates (missing sides default to the latest pair; ``from >= to``
   or an unknown date → 422 listing the valid dates).
+- ``GET /api/analysis/wars?from=&to=`` — conquests and deleted villages
+  between two dates, TRACKED_ALLIANCES universe (both sides of a conquest
+  must be tracked; explicit dates must exist and ``from < to``; fewer than
+  two dates → ``from``/``to`` null + empty results).
 - ``GET /api/analysis/deltas?days=30`` — headline history with day-over-day
   deltas (``None`` on the oldest date).
 - ``GET /api/analysis/players?alliance=<tag>`` — latest-pair top players:
@@ -132,8 +136,14 @@ from fastapi.staticfiles import StaticFiles
 from travian import analysis, store
 from travian.build_info import get_build_info
 from travian.dashboard import auth
-from travian.metrics import region_alliance_totals, region_stats, top_players, village_events
-from travian.models import RegionDay, VillageEvent
+from travian.metrics import (
+    conquests_between,
+    region_alliance_totals,
+    region_stats,
+    top_players,
+    village_events,
+)
+from travian.models import ConquestEvent, DeletedVillageEvent, RegionDay, VillageEvent
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +549,36 @@ def _event_dict(event: VillageEvent) -> dict[str, object]:
         "event": event.event,
         "owner_tag": event.new_owner_tag,
         "owner_player": event.new_owner_player,
+    }
+
+
+def _conquest_dict(event: ConquestEvent) -> dict[str, object]:
+    """One conquest in the wars-browser payload shape (tracked → tracked)."""
+    return {
+        "village_id": event.village_id,
+        "village_name": event.village_name,
+        "x": event.x,
+        "y": event.y,
+        "region": event.region,
+        "from_tag": event.from_tag,
+        "from_player": event.from_player,
+        "to_tag": event.to_tag,
+        "to_player": event.to_player,
+        "population": event.population,
+    }
+
+
+def _deleted_dict(event: DeletedVillageEvent) -> dict[str, object]:
+    """One deleted village in the wars-browser payload shape."""
+    return {
+        "village_id": event.village_id,
+        "village_name": event.village_name,
+        "x": event.x,
+        "y": event.y,
+        "region": event.region,
+        "from_tag": event.from_tag,
+        "from_player": event.from_player,
+        "population": event.population,
     }
 
 
@@ -1230,6 +1270,82 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 conn.close()
 
         return await asyncio.to_thread(read)
+
+    async def analysis_wars(
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
+    ) -> dict[str, object]:
+        """Conquests + deleted villages between two dates (tracked universe).
+
+        Missing sides default to the latest pair of snapshot dates. Explicit
+        dates must exist and satisfy ``from < to`` (else 422 listing the valid
+        dates). The universe is ``TRACKED_ALLIANCES`` resolved against the
+        ``to`` date — tags with no ids there are dropped, and an empty
+        universe yields empty results (never 422).
+        """
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                empty: dict[str, object] = {
+                    "from": None,
+                    "to": None,
+                    "tracked_tags": [],
+                    "pairs": [],
+                    "deleted": [],
+                }
+                if len(all_dates) < 2:
+                    return empty
+                latest = all_dates[-1]
+                from_date = from_ if from_ is not None else all_dates[-2]
+                to_date = to if to is not None else latest
+                if from_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'from' date {from_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if to_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'to' date {to_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if from_date >= to_date:
+                    raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
+                by_tag = store.alliance_ids_by_tag(conn, to_date)
+                tracked_tags = [t for t in cfg.tracked_alliances if by_tag.get(t)]
+                ids: set[int] = set()
+                for tag in tracked_tags:
+                    ids.update(by_tag[tag])
+                prev_rows = store.load_villages(conn, from_date)
+                curr_rows = store.load_villages(conn, to_date)
+                conquests, deleted = conquests_between(prev_rows, curr_rows, ids)
+                grouped: dict[tuple[str, str], list[ConquestEvent]] = {}
+                for event in conquests:
+                    grouped.setdefault((event.from_tag, event.to_tag), []).append(event)
+                pairs = [
+                    {
+                        "from_tag": from_tag,
+                        "to_tag": to_tag,
+                        "villages": len(entries),
+                        "population": sum(event.population for event in entries),
+                        "entries": [_conquest_dict(event) for event in entries],
+                    }
+                    for (from_tag, to_tag), entries in sorted(grouped.items())
+                ]
+                return {
+                    "from": from_date,
+                    "to": to_date,
+                    "tracked_tags": tracked_tags,
+                    "pairs": pairs,
+                    "deleted": [_deleted_dict(event) for event in deleted],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
     async def analysis_players(alliance: str | None = None) -> dict[str, object]:
         """Latest-pair top players: population / growth / new villages / VP (10 each).
 
@@ -1373,6 +1489,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/api/analysis/standings")(analysis_standings)
     _ = app.get("/api/analysis/dates")(analysis_dates)
     _ = app.get("/api/analysis/events")(analysis_events)
+    _ = app.get("/api/analysis/wars")(analysis_wars)
     _ = app.get("/api/analysis/deltas")(analysis_deltas)
     _ = app.get("/api/analysis/players")(analysis_players)
     _ = app.get("/api/analysis/villages")(analysis_villages)

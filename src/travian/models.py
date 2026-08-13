@@ -102,6 +102,43 @@ class VillageEvent(BaseModel):
     region: str | None = None
 
 
+class ConquestEvent(BaseModel):
+    """A village that switched from one tracked alliance to another tracked alliance.
+
+    Produced by ``metrics.conquests_between``: both the old and the new
+    alliance must be in the tracked universe and differ. ``region`` and
+    ``population`` come from the current snapshot (the village still exists).
+    """
+
+    village_id: int
+    village_name: str
+    x: int
+    y: int
+    from_tag: str
+    from_player: str
+    to_tag: str
+    to_player: str
+    region: str | None = None
+    population: int
+
+
+class DeletedVillageEvent(BaseModel):
+    """A tracked alliance's village that disappeared from the map between snapshots.
+
+    Produced by ``metrics.conquests_between``. ``region`` and ``population``
+    come from the previous snapshot (the village is gone in the current one).
+    """
+
+    village_id: int
+    village_name: str
+    x: int
+    y: int
+    from_tag: str
+    from_player: str
+    region: str | None = None
+    population: int
+
+
 class PlayerStat(BaseModel):
     """One player's standing in a top ranking (population/growth/new_villages/vp).
 

@@ -1150,6 +1150,129 @@ class TestAnalysisEvents:
             assert client.get("/api/analysis/events?limit=1001").status_code == 422
 
 
+class TestAnalysisWars:
+    """Wars scoreboard: TRACKED_ALLIANCES universe, latest-pair defaults.
+
+    Scenario (two dates): NOVA(7) ↔ ENEMY(8) transfers on villages 2/3,
+    ENEMY village 4 deleted, GHOST(999) untracked and stable, NOVA village 7
+    new on the second day. Transfers involving an untracked alliance never
+    appear; new villages never appear.
+    """
+
+    def _seed(self, db: Path) -> None:
+        conn = store.connect(db)
+        store.init_schema(conn)
+        store.save_snapshot(
+            conn,
+            "2026-08-07",
+            [
+                _row(1, population=100),  # NOVA stable
+                _row(2, population=200, alliance_id=8, alliance_tag="ENEMY"),  # ENEMY -> NOVA
+                _row(3, population=300),  # NOVA -> ENEMY
+                _row(4, population=400, alliance_id=8, alliance_tag="ENEMY"),  # ENEMY deleted
+                _row(6, population=600, alliance_id=999, alliance_tag="GHOST"),  # untracked stable
+            ],
+        )
+        store.save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                _row(1, population=110),
+                _row(2, population=210, alliance_id=7, alliance_tag="NOVA"),
+                _row(3, population=310, alliance_id=8, alliance_tag="ENEMY"),
+                _row(6, population=610, alliance_id=999, alliance_tag="GHOST"),
+                _row(7, population=700),  # new NOVA village (ignored)
+            ],
+        )
+        conn.close()
+
+    def test_default_pair_is_latest_two_dates(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        self._seed(db)
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA,ENEMY"))) as client:
+            payload = client.get("/api/analysis/wars").json()
+
+        assert payload["from"] == "2026-08-07"
+        assert payload["to"] == "2026-08-08"
+        assert payload["tracked_tags"] == ["NOVA", "ENEMY"]
+        assert [(p["from_tag"], p["to_tag"]) for p in payload["pairs"]] == [
+            ("ENEMY", "NOVA"),
+            ("NOVA", "ENEMY"),
+        ]
+        enemy_to_nova = payload["pairs"][0]
+        assert enemy_to_nova["villages"] == 1
+        assert enemy_to_nova["population"] == 210
+        entry = enemy_to_nova["entries"][0]
+        assert entry["village_name"] == "Village 2"
+        assert entry["from_tag"] == "ENEMY"
+        assert entry["to_tag"] == "NOVA"
+        assert entry["from_player"] == "Player 2"
+        assert entry["to_player"] == "Player 2"  # same player id keeps owner
+        assert payload["pairs"][1]["entries"][0]["village_name"] == "Village 3"
+        assert [d["village_name"] for d in payload["deleted"]] == ["Village 4"]
+        assert payload["deleted"][0]["from_tag"] == "ENEMY"
+
+    def test_explicit_dates_and_validation(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        self._seed(db)
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA,ENEMY"))) as client:
+            explicit = client.get("/api/analysis/wars?from=2026-08-07&to=2026-08-08").json()
+            same = client.get("/api/analysis/wars?from=2026-08-08&to=2026-08-08")
+            unknown = client.get("/api/analysis/wars?from=2026-01-01")
+            reversed_order = client.get("/api/analysis/wars?from=2026-08-08&to=2026-08-07")
+
+        assert explicit["from"] == "2026-08-07"
+        assert same.status_code == 422
+        assert "must be earlier than" in same.json()["detail"]
+        assert unknown.status_code == 422
+        assert "valid dates" in unknown.json()["detail"]
+        assert reversed_order.status_code == 422
+
+    def test_fewer_than_two_dates_empty_payload(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        conn = store.connect(db)
+        store.init_schema(conn)
+        store.save_snapshot(conn, "2026-08-07", [_row(1, population=100)])
+        conn.close()
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA,ENEMY"))) as client:
+            payload = client.get("/api/analysis/wars").json()
+
+        assert payload == {"from": None, "to": None, "tracked_tags": [], "pairs": [], "deleted": []}
+
+    def test_empty_db_empty_payload(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA,ENEMY"))) as client:
+            payload = client.get("/api/analysis/wars").json()
+
+        assert payload == {"from": None, "to": None, "tracked_tags": [], "pairs": [], "deleted": []}
+
+    def test_unresolved_tracked_tags_dropped(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        self._seed(db)
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA,MISSING"))) as client:
+            payload = client.get("/api/analysis/wars").json()
+
+        assert payload["tracked_tags"] == ["NOVA"]
+        # A conquest needs BOTH sides tracked: with ENEMY untracked, every
+        # transfer and the ENEMY deletion drop out — empty results, 200.
+        assert payload["pairs"] == []
+        assert payload["deleted"] == []
+
+    def test_tracked_only_universe(self, tmp_path: Path) -> None:
+        db = tmp_path / "wars.db"
+        self._seed(db)
+        with TestClient(_app(db, _env(TRACKED_ALLIANCES="NOVA"))) as client:
+            payload = client.get("/api/analysis/wars").json()
+
+        assert payload["tracked_tags"] == ["NOVA"]
+        # Both sides of a conquest must be tracked: the ENEMY→NOVA transfer
+        # (village 2) and the ENEMY deletion (village 4) are not in the
+        # NOVA-only universe.
+        assert payload["pairs"] == []
+        assert payload["deleted"] == []
+
+
 class TestAnalysisDeltas:
     def test_rows_with_deltas_none_on_oldest(self, tmp_path: Path) -> None:
         db = tmp_path / "dl.db"

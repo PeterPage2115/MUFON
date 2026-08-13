@@ -1677,6 +1677,27 @@ tr.is-inactive td {
   color: var(--text-faint);
 }
 
+/* Wars tab: conquest-matrix cell buttons. */
+.wars-cell {
+  border: none;
+  background: none;
+  padding: var(--space-1) var(--space-3);
+  font: inherit;
+  color: var(--accent-gold);
+  cursor: pointer;
+  border-radius: var(--radius-input);
+}
+
+.wars-cell:hover {
+  background: var(--surface-elevated);
+  text-decoration: underline;
+}
+
+.wars-cell:focus-visible {
+  outline: 2px solid var(--accent-gold-soft);
+  outline-offset: 2px;
+}
+
 .empty-state {
   margin: var(--space-4) var(--space-6) var(--space-6);
   padding: var(--space-10) var(--space-6);

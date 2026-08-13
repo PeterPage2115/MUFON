@@ -132,10 +132,47 @@ def _seed_browser_db(db: Path) -> None:
     conn.close()
 
 
+def _seed_wars_db(db: Path) -> None:
+    """Wars scenario: NOVA(7) ↔ ENEMY(8) transfers (villages 2/3), one ENEMY
+    deletion (village 4), one untracked stable village (GHOST 999) and one new
+    NOVA village (7) on the second day — only the transfers + deletion count."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    store.save_snapshot(
+        conn,
+        "2026-08-07",
+        [
+            _row(1, x=1, population=100, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(2, x=2, population=200, player_id=2000, player_name="ENEMY-P0", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
+            _row(3, x=3, population=300, player_id=1003, player_name="NOVA-P3", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(4, x=4, population=400, player_id=2004, player_name="ENEMY-P4", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
+            _row(6, x=6, population=600, player_id=9006, player_name="GHOST-P6", alliance_id=999, alliance_tag="GHOST"),
+        ],
+    )
+    store.save_snapshot(
+        conn,
+        "2026-08-08",
+        [
+            _row(1, x=1, population=110, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(2, x=2, population=210, player_id=2000, player_name="ENEMY-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(3, x=3, population=310, player_id=2003, player_name="ENEMY-P3", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
+            _row(6, x=6, population=610, player_id=9006, player_name="GHOST-P6", alliance_id=999, alliance_tag="GHOST"),
+            _row(7, x=7, population=700, player_id=1007, player_name="NOVA-P7", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+        ],
+    )
+    conn.close()
+
+
 @pytest.fixture()
 def browser_app(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
     """Auth-free dashboard (existing scenarios): DASHBOARD_AUTH_MODE=none."""
     yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="")
+
+
+@pytest.fixture()
+def browser_app_wars(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over the wars scenario (two snapshots, transfers)."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_wars_db)
 
 
 @pytest.fixture()
@@ -471,7 +508,7 @@ def test_analysis_tabs_load_without_console_errors(browser_app: tuple[str, Brows
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
 
-    for tab_id in ("tab-alliances", "tab-changes", "tab-players", "tab-regions"):
+    for tab_id in ("tab-alliances", "tab-changes", "tab-players", "tab-wars", "tab-regions"):
         page.click("#" + tab_id)
         page.wait_for_function(
             "() => document.getElementById('panel-" + tab_id[4:] + "').getAttribute('aria-busy') === 'false'"
@@ -564,7 +601,7 @@ def test_empty_db_no_data_states(browser_app_empty: tuple[str, Browser]) -> None
     assert page.get_attribute("#panel-regions", "class").count("is-empty") == 1
 
     # Other analysis tabs settle too.
-    for tab_id in ("tab-alliances", "tab-players", "tab-events", "tab-changes"):
+    for tab_id in ("tab-alliances", "tab-players", "tab-events", "tab-wars", "tab-changes"):
         page.click("#" + tab_id)
         page.wait_for_function(
             "() => document.getElementById('panel-" + tab_id[4:] + "').getAttribute('aria-busy') === 'false'"
@@ -717,5 +754,53 @@ def test_operations_admin_flow_with_token(browser_app_token: tuple[str, Browser]
         "() => document.getElementById('fetch-action').getAttribute('aria-busy') === 'false'"
     )
     assert page.get_attribute("#fetch-action", "aria-busy") == "false"
+    assert errors == []
+    page.close()
+
+
+def test_wars_tab_matrix_drilldown_and_csv(browser_app_wars: tuple[str, Browser]) -> None:
+    """Wars tab: conquest matrix, drill-down detail, deleted list and CSV export.
+
+    Seed: NOVA→ENEMY (village 3) and ENEMY→NOVA (village 2) transfers, ENEMY
+    deletion (village 4), untracked GHOST stable and a new NOVA village — only
+    the two transfers and the deletion may appear.
+    """
+    url, browser = browser_app_wars
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.click("#tab-wars")
+    page.wait_for_function(
+        "() => document.getElementById('panel-wars').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Matrix head lists both tracked tags; two conquest cells exist.
+    page.wait_for_function(
+        "() => { const head = document.querySelector('[data-wars-matrix-head]'); return head && head.textContent.indexOf('ENEMY') !== -1 && head.textContent.indexOf('NOVA') !== -1; }"
+    )
+    assert page.locator("[data-wars-matrix-body] .wars-cell").count() == 2
+    # Detail defaults to the first (sorted) pair: ENEMY → NOVA.
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-wars-detail-title]'); return el && el.textContent.indexOf('ENEMY') !== -1; }"
+    )
+    assert "Village 2" in page.text_content("[data-wars-entries]")
+
+    # Click the NOVA→ENEMY cell (row NOVA, its only button) → drill-down.
+    page.locator("[data-wars-matrix-body] tr", has_text="NOVA").locator("button").click()
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-wars-detail-title]'); return el && el.textContent.indexOf('NOVA \u2192 ENEMY') !== -1; }"
+    )
+    assert "Village 3" in page.text_content("[data-wars-entries]")
+
+    # Deleted list shows the ENEMY deletion only.
+    assert page.text_content("[data-wars-deleted-count]").strip() == "1"
+    assert "Village 4" in page.text_content("[data-wars-deleted]")
+
+    # CSV export names the selected range.
+    page.wait_for_function("() => !document.querySelector('[data-export=\"wars\"]').disabled")
+    with page.expect_download() as download_info:
+        page.click('[data-export="wars"]')
+    assert "wars-2026-08-07-2026-08-08.csv" in download_info.value.suggested_filename
     assert errors == []
     page.close()
