@@ -238,6 +238,27 @@ New images are built by CI from `main` (the `build` workflow runs the full
 test suite + lint + type check before building, smoke-tests `/healthz`, and
 verifies `/api/meta` reports the pushed commit SHA).
 
+### Backup
+
+SQLite is backed up with the **online backup API** (`sqlite3.Connection.backup`)
+— safe against a live WAL database, no need to stop the container. Backups
+are named `mufon-<UTC-timestamp>.sqlite3` and written atomically (a failed
+backup leaves no partial file).
+
+```bash
+# Inside the container (or with SQLITE_PATH pointing at a copy):
+python -m travian.backup backup --db /data/travian.db --output-dir /backups --keep 7
+# → /backups/mufon-20260813T181321Z.sqlite3   (keeps the newest 7)
+
+# Restore to a test/copy database (never over the live file):
+python -m travian.backup restore --source /backups/mufon-<timestamp>.sqlite3 --db /tmp/restored.db
+```
+
+The backup directory must live on a **persistent host path** (a container
+`/backups` disappears on recreate). Take a backup **before every update**;
+rollback = `IMAGE_TAG=<poprzedni-sha> ./update.sh` with the data volume
+intact. There is no automatic pruning of snapshots — retention stays manual.
+
 ## Development
 
 ```bash
