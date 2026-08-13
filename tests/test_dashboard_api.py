@@ -1592,6 +1592,7 @@ class TestOAuthFlow:
         "OAUTH_CLIENT_ID": "cid",
         "OAUTH_CLIENT_SECRET": "csec",
         "OAUTH_GUILD_ID": "100",
+        "OAUTH_PUBLIC_ORIGIN": "http://testserver",
         "ADMIN_ROLE_ID": "555",
     }
 
@@ -1661,13 +1662,10 @@ class TestOAuthFlow:
         client = self._client(tmp_path, monkeypatch)  # member without admin role
         with client:
             _seed_logs(tmp_path / "oa.db")  # operator errors must never leak to members
-            state = self._login_state(client)
-            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
-            token = res.headers["location"].split("session=", 1)[1]
-            headers = {"Authorization": f"Bearer {token}"}
+            self._login(client)
 
             # Status: identical freshness payload, sanitized errors.
-            status = client.get("/api/status", headers=headers)
+            status = client.get("/api/status")
             assert status.status_code == 200
             body = status.json()
             assert body["errors"] == []
@@ -1678,25 +1676,22 @@ class TestOAuthFlow:
             assert body["freshness"]["state"] in {"current", "stale", "gap"}
 
             # Intelligence and the village explorer stay open for members.
-            assert client.get("/api/analysis/players", headers=headers).status_code == 200
-            assert client.get("/api/analysis/villages", params={"q": "Village 1"}, headers=headers).status_code == 200
+            assert client.get("/api/analysis/players").status_code == 200
+            assert client.get("/api/analysis/villages", params={"q": "Village 1"}).status_code == 200
 
             # Raw logs are admin-only.
-            assert client.get("/api/logs", headers=headers).status_code == 403
-            assert client.get("/api/logs", headers=headers).json() == {"error": "admin required"}
+            assert client.get("/api/logs").status_code == 403
+            assert client.get("/api/logs").json() == {"error": "admin required"}
 
     def test_admin_sees_logs_and_status_errors(self, tmp_path: Path, monkeypatch) -> None:
         client = self._client(tmp_path, monkeypatch, member={"roles": ["555"]})
         with client:
             _seed_logs(tmp_path / "oa.db")
-            state = self._login_state(client)
-            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
-            token = res.headers["location"].split("session=", 1)[1]
-            headers = {"Authorization": f"Bearer {token}"}
+            self._login(client)
 
-            assert client.get("/api/logs", headers=headers).status_code == 200
-            assert len(client.get("/api/logs", headers=headers).json()) == 5
-            status = client.get("/api/status", headers=headers).json()
+            assert client.get("/api/logs").status_code == 200
+            assert len(client.get("/api/logs").json()) == 5
+            status = client.get("/api/status").json()
             assert [e["message"] for e in status["errors"]] == ["err4", "err3", "err0"]
 
     def test_token_mode_bearer_keeps_admin_access(self, tmp_path: Path) -> None:
@@ -1733,48 +1728,57 @@ class TestOAuthFlow:
     def test_full_flow_member_readonly(self, tmp_path: Path, monkeypatch) -> None:
         client = self._client(tmp_path, monkeypatch)  # member without admin role
         with client:
+            # OAuth mode has no Bearer transport: a bare token header is 401.
+            assert client.get("/api/status", headers={"Authorization": "Bearer whatever"}).status_code == 401
             state = self._login_state(client)
             res = client.get(f"/api/auth/callback?code=thecode&state={state}")
             assert res.status_code == 302
             location = res.headers["location"]
-            assert location.startswith("/?session=")
-            token = location.split("session=", 1)[1]
+            assert location == "/?auth=success"
+            assert "session=" not in location  # the token never rides in the URL
 
-            # The exchange saw the right arguments.
+            # The exchange saw the right arguments (trusted-origin redirect).
             assert self.exchange_calls == [("cid", "csec", "thecode", "http://testserver/api/auth/callback")]
 
-            # Session works for data endpoints.
-            headers = {"Authorization": f"Bearer {token}"}
-            assert client.get("/api/status", headers=headers).status_code == 200
-            status = client.get("/api/auth/status", headers=headers).json()
+            # The session cookie is HttpOnly + SameSite=Lax; oauth mode has
+            # no Bearer transport anymore.
+            set_cookie = res.headers["set-cookie"]
+            assert set_cookie.startswith("dashboard_session=")
+            assert "HttpOnly" in set_cookie
+            assert "SameSite=Lax" in set_cookie
+            assert "Path=/" in set_cookie
+            assert "Max-Age=604800" in set_cookie
+            assert "Secure" not in set_cookie  # http origin
+            assert client.get("/api/status").status_code == 200  # cookie session works
+
+            # Session works for data endpoints via the cookie jar.
+            assert client.get("/api/status").status_code == 200
+            status = client.get("/api/auth/status").json()
             assert status == {"method": "oauth", "user": {"name": "Tester", "admin": False}}
 
             # Member: read-only — settings and actions are 403.
-            assert client.get("/api/settings", headers=headers).status_code == 403
-            assert client.get("/api/settings", headers=headers).json() == {"error": "admin required"}
-            assert client.post("/api/actions/fetch", headers=headers).status_code == 403
+            assert client.get("/api/settings").status_code == 403
+            assert client.get("/api/settings").json() == {"error": "admin required"}
+            assert client.post("/api/actions/fetch").status_code == 403
 
-            # Logout kills the session.
-            assert client.post("/api/auth/logout", headers=headers).status_code == 204
-            assert client.get("/api/status", headers=headers).status_code == 401
+            # Logout kills the session (deletion cookie + in-memory removal).
+            assert client.post("/api/auth/logout").status_code == 204
+            assert client.get("/api/status").status_code == 401
 
     def test_admin_gets_settings_and_actions(self, tmp_path: Path, monkeypatch) -> None:
         loop = LoopThread()
         try:
             client = self._client(tmp_path, monkeypatch, member={"roles": ["555"]}, loop=loop.loop)
             with client:
-                state = self._login_state(client)
-                res = client.get(f"/api/auth/callback?code=thecode&state={state}")
-                token = res.headers["location"].split("session=", 1)[1]
-                headers = {"Authorization": f"Bearer {token}"}
+                self._login(client)
 
-                assert client.get("/api/settings", headers=headers).status_code == 200
-                assert client.get("/api/auth/status", headers=headers).json()["user"] == {
+                assert client.get("/api/settings").status_code == 200
+                assert client.get("/api/auth/status").json()["user"] == {
                     "name": "Tester",
                     "admin": True,
                 }
                 # fetch dispatches to the fake run function on the bot loop.
-                res = client.post("/api/actions/fetch", headers=headers)
+                res = client.post("/api/actions/fetch")
                 assert res.status_code == 200
                 assert res.json() == {"status": "ok", "message": "completed"}
         finally:
@@ -1787,17 +1791,92 @@ class TestOAuthFlow:
             tmp_path, monkeypatch, member={"roles": []}, guilds=[{"id": "100", "permissions": "32"}]
         )
         with client:
-            state = self._login_state(client)
-            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
-            assert res.status_code == 302
-            token = res.headers["location"].split("session=", 1)[1]
-            headers = {"Authorization": f"Bearer {token}"}
-
-            assert client.get("/api/auth/status", headers=headers).json()["user"] == {
+            self._login(client)
+            assert client.get("/api/auth/status").json()["user"] == {
                 "name": "Tester",
                 "admin": True,
             }
-            assert client.get("/api/settings", headers=headers).status_code == 200
+            assert client.get("/api/settings").status_code == 200
+
+    def test_login_uses_configured_origin_not_request_host(self, tmp_path: Path, monkeypatch) -> None:
+        """Host-header injection: the redirect URI never follows the Host."""
+        env = dict(self.OAUTH_ENV)
+        env["OAUTH_PUBLIC_ORIGIN"] = "http://dashboard.lan:8099/"
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        client = TestClient(_app(db, _env(**env)), follow_redirects=False)
+        with client:
+            res = client.get("/api/auth/login", headers={"host": "attacker.example"})
+        assert res.status_code == 302
+        qs = parse_qs(urlparse(res.headers["location"]).query)
+        assert qs["redirect_uri"] == ["http://dashboard.lan:8099/api/auth/callback"]
+
+    def test_callback_exchange_uses_configured_origin(self, tmp_path: Path, monkeypatch) -> None:
+        env = dict(self.OAUTH_ENV)
+        env["OAUTH_PUBLIC_ORIGIN"] = "http://dashboard.lan:8099"
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        client = TestClient(_app(db, _env(**env)), follow_redirects=False)
+        self.exchange_calls: list[tuple[str, str, str, str]] = []
+        monkeypatch.setattr(
+            dashboard_auth, "exchange_code",
+            lambda *a, **k: self.exchange_calls.append(a) or {"access_token": "at"},
+        )
+        monkeypatch.setattr(dashboard_auth, "fetch_user", lambda token: {"id": "u1", "username": "T"})
+        monkeypatch.setattr(dashboard_auth, "fetch_guild_member", lambda token, guild_id: {"roles": []})
+        monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: [])
+        with client:
+            res = client.get("/api/auth/login", headers={"host": "attacker.example"})
+            state = parse_qs(urlparse(res.headers["location"]).query)["state"][0]
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}", headers={"host": "attacker.example"})
+        assert res.status_code == 302
+        assert self.exchange_calls[0][3] == "http://dashboard.lan:8099/api/auth/callback"
+
+    def test_callback_secure_cookie_for_https_origin(self, tmp_path: Path, monkeypatch) -> None:
+        env = dict(self.OAUTH_ENV)
+        env["OAUTH_PUBLIC_ORIGIN"] = "https://dashboard.example.com"
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        client = TestClient(_app(db, _env(**env)), follow_redirects=False)
+        self.exchange_calls = []
+        monkeypatch.setattr(dashboard_auth, "exchange_code", lambda *a, **k: {"access_token": "at"})
+        monkeypatch.setattr(dashboard_auth, "fetch_user", lambda token: {"id": "u1", "username": "T"})
+        monkeypatch.setattr(dashboard_auth, "fetch_guild_member", lambda token, guild_id: {"roles": []})
+        monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: [])
+        with client:
+            state = parse_qs(urlparse(client.get("/api/auth/login").headers["location"]).query)["state"][0]
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+        assert "; Secure" in res.headers["set-cookie"]
+
+    def test_oauth_responses_no_store_and_no_referrer(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        with client:
+            login = client.get("/api/auth/login")
+            assert login.headers["cache-control"] == "no-store"
+            assert login.headers["referrer-policy"] == "no-referrer"
+            res = client.get(f"/api/auth/callback?code=thecode&state={self._login_state(client)}")
+            assert res.headers["cache-control"] == "no-store"
+            assert res.headers["referrer-policy"] == "no-referrer"
+            assert client.post("/api/auth/logout").headers["cache-control"] == "no-store"
+
+    def test_oauth_falls_back_to_token_without_public_origin(self, tmp_path: Path) -> None:
+        env = dict(self.OAUTH_ENV)
+        del env["OAUTH_PUBLIC_ORIGIN"]
+        db = tmp_path / "oa.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret", **env))) as client:
+            assert client.get("/api/auth/status").json()["method"] == "token"
+            assert client.get("/api/auth/login").status_code == 409
+
+    def test_client_admin_query_does_not_escalate(self, tmp_path: Path, monkeypatch) -> None:
+        """Role comes from Discord data only — client-supplied flags are inert."""
+        client = self._client(tmp_path, monkeypatch)  # plain member (no admin role)
+        with client:
+            state = self._login_state(client)
+            res = client.get(f"/api/auth/callback?code=thecode&state={state}&admin=true&role=555")
+            assert res.status_code == 302
+            assert client.get("/api/auth/status").json()["user"] == {"name": "Tester", "admin": False}
+            assert client.get("/api/settings").status_code == 403
 
     def test_callback_not_a_member(self, tmp_path: Path, monkeypatch) -> None:
         client = self._client(tmp_path, monkeypatch, member=None)  # member endpoint 404s, guilds empty
@@ -1813,6 +1892,13 @@ class TestOAuthFlow:
         res = client.get("/api/auth/login")
         assert res.status_code == 302
         return parse_qs(urlparse(res.headers["location"]).query)["state"][0]
+
+    def _login(self, client: TestClient) -> None:
+        """Full login: state → callback; the cookie lands in the client jar."""
+        state = self._login_state(client)
+        res = client.get(f"/api/auth/callback?code=thecode&state={state}")
+        assert res.status_code == 302
+        assert res.headers["location"] == "/?auth=success"
 
 
 class TestRateLimit:
@@ -1858,6 +1944,7 @@ class TestAuthStatus:
             OAUTH_CLIENT_ID="cid",
             OAUTH_CLIENT_SECRET="csec",
             OAUTH_GUILD_ID="100",
+            OAUTH_PUBLIC_ORIGIN="http://testserver",
         )
         with TestClient(_app(db, env)) as client:
             assert client.get("/api/auth/status").json() == {"method": "oauth", "user": None}

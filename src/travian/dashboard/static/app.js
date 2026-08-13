@@ -205,14 +205,12 @@
   var TOKEN_KEY = "dashboard_token";
   var tokenDialogShown = false;
 
-  // OAuth callback lands on /?session=<token> — adopt it into localStorage
-  // and drop the parameter (the UI then authenticates like any token).
+  // OAuth login lands on /?auth=success with the session in an HttpOnly
+  // cookie (never in the URL or localStorage) — just drop the marker.
+  // Token mode keeps the prompt + localStorage. A ?session= query string is
+  // never adopted.
   var urlParams = new URLSearchParams(window.location.search);
-  var urlSession = urlParams.get("session");
-  if (urlSession) {
-    localStorage.setItem(TOKEN_KEY, urlSession);
-  }
-  if (urlSession || urlParams.get("auth_error")) {
+  if (urlParams.get("auth") || urlParams.get("auth_error")) {
     history.replaceState({}, "", window.location.pathname);
   }
 
@@ -257,10 +255,9 @@
   // Resolves to the decoded auth status (or null when the request fails);
   // the bootstrap waits for it before starting any protected request.
   function loadAuthStatus() {
-    // Send the stored bearer too: in oauth mode the server resolves the
-    // session user only from the Authorization header. Without it the
-    // callback's freshly adopted ?session=<token> would read back as
-    // user:null and the login dialog would reopen despite HTTP 200.
+    // OAuth mode: the HttpOnly session cookie rides along on this
+    // same-origin request automatically. Token mode: the stored bearer is
+    // sent explicitly (the server resolves oauth sessions from the cookie).
     var headers = { Accept: "application/json" };
     var token = localStorage.getItem(TOKEN_KEY);
     if (token) headers.Authorization = "Bearer " + token;

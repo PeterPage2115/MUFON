@@ -161,22 +161,28 @@ bind with `DASHBOARD_LOOPBACK_ONLY != "true"` → `token`, otherwise `none`.
    [Discord Developer Portal](https://discord.com/developers/applications).
 2. **OAuth2 → General**: copy **Client ID** (`OAUTH_CLIENT_ID`) and **Client
    Secret** (`OAUTH_CLIENT_SECRET`).
-3. **OAuth2 → Redirects**: add one redirect URL **per host/port you will log
-   in from**, e.g. `http://192.168.1.164:8099/api/auth/callback` (the
-   redirect URI is built from the browser's request host — every host/port
-   used must be registered).
+3. **OAuth2 → Redirects**: add exactly the URL of
+   `OAUTH_PUBLIC_ORIGIN` + `/api/auth/callback`, e.g.
+   `http://192.168.1.164:8099/api/auth/callback`. The redirect URI is built
+   **only** from `OAUTH_PUBLIC_ORIGIN` (the browser's request host is never
+   trusted), so this must match your configured origin exactly.
 4. Make sure the bot is in your server, and add
    `OAUTH_GUILD_ID` (right-click the server → Copy Server ID with Developer
    Mode enabled).
-5. Set `DASHBOARD_AUTH_MODE=oauth` plus the three `OAUTH_*` keys and
+5. Set `OAUTH_PUBLIC_ORIGIN` (scheme + host + port, e.g.
+   `http://192.168.1.164:8099` or `https://dashboard.example.com`) and
+   `DASHBOARD_AUTH_MODE=oauth` plus the three other `OAUTH_*` keys, then
    restart. Members log in with **Sign in with Discord**; the first person
    to log in must be the server owner, a Discord Administrator / Manage
    Server permission holder, or an `ADMIN_ROLE_ID` holder to configure the
    dashboard.
 
 Notes: OAuth sessions live in memory (TTL 7 days) — restarting the bot logs
-everyone out. If an `OAUTH_*` key is missing while `oauth` is requested, the
-dashboard falls back to `token` mode and logs a warning.
+everyone out. Sessions travel in an **HttpOnly, SameSite=Lax cookie**
+(`Secure` on https origins); the token never appears in the URL or
+localStorage. If an `OAUTH_*` key — including `OAUTH_PUBLIC_ORIGIN` — is
+missing while `oauth` is requested, the dashboard falls back to `token`
+mode and logs a warning.
 
 ## Deployment
 

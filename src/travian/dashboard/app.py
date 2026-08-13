@@ -68,26 +68,35 @@ Endpoints:
 - ``GET /api/auth/login`` — public: 302 to Discord's authorization endpoint
   (oauth mode; 409 otherwise).
 - ``GET /api/auth/callback`` — public: Discord redirect; always 302, either
-  to ``/?session=<token>`` or ``/?auth_error=<reason>``.
-- ``POST /api/auth/logout`` — public: invalidates the Bearer session (204).
+  to ``/?auth=success`` with the session set as an HttpOnly cookie, or to
+  ``/?auth_error=<reason>``. The session token never appears in a URL.
+- ``POST /api/auth/logout`` — public: invalidates the session cookie (204).
 
 Auth: one of three modes, computed once at app creation from env
 (``_auth_method``): ``token`` (``Authorization: Bearer <DASHBOARD_TOKEN>``,
 compared constant-time; token possession = admin), ``oauth`` (Discord OAuth
-sessions from ``auth.SessionStore``; RBAC: members read-only, admins full —
-``GET/PUT /api/settings`` and ``POST /api/actions/*`` return 403 for
-members) and ``none`` (everything open, loopback use only). Admin actions
-are rate-limited per user (``ActionLimiter``, 6/60 s → 429 + ``Retry-After``;
-key = session token in oauth mode, client IP in token mode). The static UI
-(``/``, ``/static/*``), ``/healthz`` and the whole ``/api/auth/*`` surface
-are always public — the browser loads the page and logs in without
-credentials, then authenticates every other API call. OAuth sessions are
-in-memory (restart logs everyone out) and the redirect state tokens live
-10 minutes.
+sessions from ``auth.SessionStore``, transported in the ``dashboard_session``
+HttpOnly cookie — no Bearer transport in oauth mode; RBAC: members
+read-only, admins full — ``GET/PUT /api/settings`` and ``POST /api/actions/*``
+return 403 for members) and ``none`` (everything open, loopback use only).
+Admin actions are rate-limited per user (``ActionLimiter``, 6/60 s → 429 +
+``Retry-After``; key = session token in oauth mode, client IP in token
+mode). The static UI (``/``, ``/static/*``), ``/healthz``, ``/readyz``,
+``/api/meta`` and the whole ``/api/auth/*`` surface are always public — the
+browser loads the page and logs in without credentials, then authenticates
+every other API call. OAuth sessions are in-memory (restart logs everyone
+out), the redirect state tokens live 10 minutes, and the OAuth redirect URI
+is built exclusively from ``OAUTH_PUBLIC_ORIGIN`` (never from the request
+Host).
 
 - ``GET /healthz`` — always ``{"status": "ok"}``, never token-protected:
   the container HEALTHCHECK probe (the app only starts serving after
   ``main()`` passed startup validation, so a 200 implies a healthy process).
+- ``GET /readyz`` — public: 200 only when the bot AND the scheduler report
+  ready (``RuntimeState`` from ``DashboardDeps.get_runtime_state``), else
+  503; body carries both flags plus the snapshot ``freshness`` contract.
+- ``GET /api/meta`` — public: ``{"version", "build_sha"}`` build provenance
+  (no env, tokens or settings).
 
 Sqlite: every operation opens its own connection via ``store.connect``
 (``check_same_thread=False``, one connection per op, never shared) and closes
@@ -390,13 +399,46 @@ def _auth_method(env: Mapping[str, str]) -> str:
     if mode == "none":
         return "none"
     if mode == "oauth":
-        if env.get("OAUTH_CLIENT_ID") and env.get("OAUTH_CLIENT_SECRET") and env.get("OAUTH_GUILD_ID"):
+        if (
+            env.get("OAUTH_CLIENT_ID")
+            and env.get("OAUTH_CLIENT_SECRET")
+            and env.get("OAUTH_GUILD_ID")
+            and env.get("OAUTH_PUBLIC_ORIGIN")
+        ):
             return "oauth"
         logger.warning(
-            "DASHBOARD_AUTH_MODE=oauth requires OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET and OAUTH_GUILD_ID — falling back to token mode"
+            "DASHBOARD_AUTH_MODE=oauth requires OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_GUILD_ID and OAUTH_PUBLIC_ORIGIN — falling back to token mode"
         )
         return "token"
     return "token" if _auth_required(env) else "none"
+
+
+_SESSION_COOKIE = "dashboard_session"
+
+
+def _oauth_redirect_uri(env: Mapping[str, str]) -> str | None:
+    """The ONLY trusted callback URL: ``OAUTH_PUBLIC_ORIGIN`` + callback path.
+
+    ``request.base_url``/``Host``/``X-Forwarded-Host`` are never trusted for
+    the redirect URI (host-header injection). None when the origin is
+    missing or not an absolute http(s) URL — the caller must fail closed.
+    """
+    origin = (env.get("OAUTH_PUBLIC_ORIGIN") or "").strip().rstrip("/")
+    if not origin.startswith(("http://", "https://")):
+        return None
+    return origin + "/api/auth/callback"
+
+
+def _session_cookie(origin: str, token: str | None) -> str:
+    """``Set-Cookie`` value for the HttpOnly dashboard session.
+
+    ``token`` None → an expired deletion cookie (logout). ``Secure`` is set
+    only for https origins (LAN http deployments keep working).
+    """
+    secure = "; Secure" if origin.startswith("https://") else ""
+    if token is None:
+        return f"{_SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}"
+    return f"{_SESSION_COOKIE}={token}; Max-Age=604800; Path=/; HttpOnly; SameSite=Lax{secure}"
 
 
 #: OAuth login state tokens (state → expiry, UTC). Module-level so every app
@@ -707,8 +749,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             if not expected or not bearer or not hmac.compare_digest(bearer, expected):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             rate_key = request.client.host if request.client is not None else "unknown"
-        else:  # oauth
-            session = session_store.get(bearer) if bearer else None
+        else:  # oauth — the session lives in the HttpOnly cookie only
+            session = session_store.get(request.cookies.get(_SESSION_COOKIE, ""))
             if session is None:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             request.state.user = session
@@ -783,32 +825,54 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         """Public: the active auth method + the logged-in user (oauth only)."""
         user: dict[str, object] | None = None
         if auth_method == "oauth":
-            supplied = request.headers.get("authorization", "")
-            if supplied.startswith("Bearer "):
-                session = session_store.get(supplied[len("Bearer ") :])
-                if session is not None:
-                    user = {"name": session.username, "admin": session.admin}
+            session = session_store.get(request.cookies.get(_SESSION_COOKIE, ""))
+            if session is not None:
+                user = {"name": session.username, "admin": session.admin}
         return {"method": auth_method, "user": user}
 
-    def auth_login(request: Request) -> Response:
-        """Public: redirect to Discord's authorization page (oauth mode)."""
+    def auth_login() -> Response:
+        """Public: redirect to Discord's authorization page (oauth mode).
+
+        The callback URL is built from ``OAUTH_PUBLIC_ORIGIN`` only — the
+        request Host is never trusted (host-header injection).
+        """
         if auth_method != "oauth":
             return JSONResponse({"error": "oauth not enabled"}, status_code=409)
+        redirect_uri = _oauth_redirect_uri(deps.env)
+        if redirect_uri is None:
+            logger.error("OAUTH_PUBLIC_ORIGIN missing or not an http(s) origin — refusing OAuth login")
+            return JSONResponse({"error": "oauth misconfigured"}, status_code=500)
         state = secrets.token_urlsafe(16)
         _store_oauth_state(state, datetime.now(UTC) + timedelta(minutes=10))
-        redirect_uri = str(request.base_url) + "api/auth/callback"
         client_id = deps.env.get("OAUTH_CLIENT_ID", "")
-        return RedirectResponse(auth.authorize_url(client_id, redirect_uri, state), status_code=302)
+        return RedirectResponse(
+            auth.authorize_url(client_id, redirect_uri, state),
+            status_code=302,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
 
     async def auth_callback(request: Request) -> Response:
         """Public: Discord redirect target — exchanges the code, resolves
-        member/admin and lands on ``/?session=<token>`` (the UI adopts it).
-        Failures redirect to ``/?auth_error=<reason>``; always 302."""
+        member/admin, sets the HttpOnly session cookie and lands on
+        ``/?auth=success`` (the UI just cleans the query string — the token
+        never appears in a URL, localStorage or the DOM). Failures redirect
+        to ``/?auth_error=<reason>``; always 302."""
         code = request.query_params.get("code")
         state = request.query_params.get("state")
         if not code or not state or not _consume_oauth_state(state):
-            return RedirectResponse("/?#auth_error=invalid_state", status_code=302)
-        redirect_uri = str(request.base_url) + "api/auth/callback"
+            return RedirectResponse(
+                "/?#auth_error=invalid_state",
+                status_code=302,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
+        redirect_uri = _oauth_redirect_uri(deps.env)
+        if redirect_uri is None:
+            logger.error("OAUTH_PUBLIC_ORIGIN missing or not an http(s) origin — refusing OAuth callback")
+            return RedirectResponse(
+                "/?#auth_error=login_failed",
+                status_code=302,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
         client_id = deps.env.get("OAUTH_CLIENT_ID", "")
         client_secret = deps.env.get("OAUTH_CLIENT_SECRET", "")
         try:
@@ -824,7 +888,11 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             # resolve_admin uses to grant dashboard admin status.
             guilds = await asyncio.to_thread(auth.fetch_guilds, access_token_raw)
         except Exception:  # noqa: BLE001 — any OAuth failure is a login failure, never a crash
-            return RedirectResponse("/?#auth_error=login_failed", status_code=302)
+            return RedirectResponse(
+                "/?#auth_error=login_failed",
+                status_code=302,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
         guild_id_raw = deps.env.get("OAUTH_GUILD_ID", "")
         try:
             guild_id = int(guild_id_raw)
@@ -833,20 +901,39 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         cfg = deps.get_config()
         is_member, is_admin = auth.resolve_admin(member, guilds, guild_id, cfg.admin_role_id)
         if not is_member:
-            return RedirectResponse("/?#auth_error=not_a_member", status_code=302)
+            return RedirectResponse(
+                "/?#auth_error=not_a_member",
+                status_code=302,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
         user_id_raw = user.get("id")
         username_raw = user.get("username")
         user_id = str(user_id_raw) if user_id_raw is not None else ""
         username = str(username_raw) if username_raw is not None else "unknown"
         token = session_store.create(user_id, username, is_admin)
-        return RedirectResponse(f"/?session={token}", status_code=302)
+        origin = (deps.env.get("OAUTH_PUBLIC_ORIGIN") or "").strip().rstrip("/")
+        return RedirectResponse(
+            "/?auth=success",
+            status_code=302,
+            headers={
+                "Set-Cookie": _session_cookie(origin, token),
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     async def auth_logout(request: Request) -> Response:
-        """Public: invalidate the session from the Bearer header (204)."""
-        supplied = request.headers.get("authorization", "")
-        if supplied.startswith("Bearer "):
-            session_store.delete(supplied[len("Bearer ") :])
-        return Response(status_code=204)
+        """Public: invalidate the session cookie (204)."""
+        session_store.delete(request.cookies.get(_SESSION_COOKIE, ""))
+        origin = (deps.env.get("OAUTH_PUBLIC_ORIGIN") or "").strip().rstrip("/")
+        return Response(
+            status_code=204,
+            headers={
+                "Set-Cookie": _session_cookie(origin, None),
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     async def status(request: Request) -> StatusData:
         # get_status builds a fresh payload dict per call — safe to sanitize
