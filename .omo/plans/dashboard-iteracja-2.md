@@ -1,6 +1,12 @@
 # Dashboard — Iteracja 2 (naprawy + analityka) — Work Plan
 
-Status: **propozycja do zatwierdzenia** — 2026-08-12, po pełnym przeglądzie kodu + smoke-teście UI + przeglądzie produkcji.
+Status: **historyczny / superseded** — 2026-08-13. Faza A (A1–A4) oraz B1/B3/B4
+zostały wdrożone w kolejnych iteracjach dashboardu (scheduler sync, vendored
+Chart.js, gap-aware Changes, Village explorer, VP ranking, limit Events — patrz
+`ROADMAP.md` §7). B2 War scoreboard (`metrics.conquests_between`,
+`GET /api/analysis/wars`, podzakładka „Wars") NIE został wdrożony i pozostaje
+kandydatem na przyszły slice. Ten dokument nie jest aktywnym planem; aktywnym
+kontraktem produktowym jest `ROADMAP.md`.
 
 ## TL;DR (For humans)
 

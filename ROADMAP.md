@@ -28,7 +28,7 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 7. Browser smoke (Playwright) pokrywa główne widoki; live smoke jest sekret-free i read-only.
 8. Pełny zestaw `pytest + ruff + basedpyright` przechodzi w CI przed publikacją obrazu.
 
-## 3. Zrobione (stan na 2026-08-13, HEAD `1a4f3c2`)
+## 3. Zrobione (stan na 2026-08-13, HEAD `eba690c`)
 
 - Parser i składowanie snapshotów `map.sql` (SQLite/WAL), delta engine, backfill z Postgres.
 - Raport Discord (KPI, Regiony, Standings) + `/raport`, `/wioski`, `/regiony`.
@@ -73,6 +73,14 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
       no-data zostają ostrzeżeniami dashboardu (nie alertują).
 
 ## 7. Później (P2) — następny slice produktowy (po zamknięciu Freshness & alerts)
+
+Status carryoverów z historycznego draftu dashboardu (zweryfikowany 2026-08-13):
+
+- [x] Scheduler sync, vendored Chart.js, gap-aware Changes, Village explorer,
+      VP ranking graczy i limit Events — wdrożone i potwierdzone w kodzie i testach.
+- [ ] War scoreboard (`metrics.conquests_between`, `GET /api/analysis/wars`,
+      zakładka „Wars" z macierzą kto-komu) — brak implementacji; kandydat na
+      kolejny konkretny slice Intelligence (porównania okresów).
 
 Rekomendowany: **Intelligence** — drill-down region/player, porównania
 okresów, zapisane widoki.
