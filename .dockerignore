@@ -14,6 +14,7 @@ __pycache__/
 .basedpyright*
 .codegraph/
 .playwright-mcp/
+.hermes/
 .omo/
 .idea/
 .vscode/
