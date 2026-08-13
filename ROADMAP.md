@@ -46,7 +46,12 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 - [x] Task 2: sekret-free live smoke (`tests/test_dashboard_live.py`, marker `live`).
 - [x] Task 3: browser smoke dla głównych widoków Intelligence/Overview + ścieżek pustych.
 - [x] Task 4: browser smoke dla token gate i widoku Operations (admin-only).
-- [ ] Autoryzowany dogfood live (wymaga bezpiecznej sesji token/OAuth — tylko po zgodzie).
+- [x] Autoryzowany dogfood live — wykonany 2026-08-13 za zgodą operatora:
+      pin deploy `de895d8` (`IMAGE_TAG` na serwerze, `build_sha` zweryfikowany
+      w `/api/meta`), backup SQLite przed aktualizacją, live suite
+      `tests/test_dashboard_live.py -m live` 7/7 (w tym trasy chronione tokenem),
+      dogfood UI w przeglądarce z prawdziwą sesją token (Wars/Events/Changes/
+      Villages bez błędów JS, freshness `current`).
 
 ## 5. Zrobione (P1, 2026-08-13) — hardening przed szerszym udostępnieniem na LAN-ie
 
