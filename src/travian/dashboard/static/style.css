@@ -487,6 +487,11 @@ code,
   box-shadow: 0 0 8px rgba(212, 119, 105, 0.55);
 }
 
+.card-state--warning .status-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 8px rgba(214, 165, 82, 0.55);
+}
+
 .card__footer {
   padding: var(--space-3) var(--space-6);
   border-top: 1px solid var(--border-default);
@@ -652,6 +657,15 @@ code,
 
 .status-alert.is-hidden {
   display: none;
+}
+
+/* Freshness warning: same alert spacing/responsive rules as the error
+   container, warning tokens instead of error tokens. Text-first — color is
+   never the only freshness signal. */
+.status-alert--warning {
+  border-color: rgba(214, 165, 82, 0.55);
+  background: rgba(214, 165, 82, 0.08);
+  color: var(--status-warning);
 }
 
 .status-alert__head {

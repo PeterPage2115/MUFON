@@ -95,6 +95,13 @@ DELTA_MINUS = "−"  # U+2212 MINUS SIGN
 MORE_LINE = "…and {n} more"
 NO_DATA_YET = "No data yet."
 
+# --- Failure alert (freshness & alerts) ---------------------------------------------
+# Opt-in Discord alert after a terminal fetch/report failure: title, a
+# description with the job/time, the normalized one-line reason and a pointer
+# to the dashboard job log.
+ALERT_TITLE = "MUFON job failure"
+ALERT_DESCRIPTION = "{job} failed at {occurred_at}.\n{reason}\n\nSee the dashboard job log for details."
+
 # --- /raport command (task 11) ------------------------------------------------------
 COMMAND_RAPORT_DESCRIPTION = "Send the daily report now (admin only)"
 RAPORT_NO_PERMISSION = "No permission: /raport is restricted to admins."

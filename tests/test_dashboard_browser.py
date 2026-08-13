@@ -15,7 +15,9 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Generator
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -143,6 +145,18 @@ def browser_app_empty(tmp_path: Path) -> Generator[tuple[str, Browser], None, No
 
 
 @pytest.fixture()
+def browser_app_gap(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over a 3-day-gap pair (2026-08-04 → 2026-08-08)."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_gap_db)
+
+
+@pytest.fixture()
+def browser_app_current(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over a current (today+yesterday) snapshot pair."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_current_db)
+
+
+@pytest.fixture()
 def browser_app_token(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
     """Token-mode dashboard for the auth-gate scenarios (test token only).
 
@@ -165,6 +179,37 @@ def _seed_empty_db(db: Path) -> None:
     """Schema only, no snapshots — the empty/no-data contract."""
     conn = store.connect(db)
     store.init_schema(conn)
+    conn.close()
+
+
+def _seed_gap_db(db: Path) -> None:
+    """Two snapshots with a 3-day gap (2026-08-04 → 2026-08-08)."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    store.save_snapshot(
+        conn,
+        "2026-08-04",
+        [_row(1, x=1, population=100, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA")],
+    )
+    store.save_snapshot(
+        conn,
+        "2026-08-08",
+        [_row(1, x=1, population=110, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA")],
+    )
+    conn.close()
+
+
+def _seed_current_db(db: Path) -> None:
+    """Yesterday + today (FETCH_TZ=Europe/London) — a current, gap-free pair."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    today = datetime.now(ZoneInfo("Europe/London")).date()
+    for day, population in ((today - timedelta(days=1), 100), (today, 110)):
+        store.save_snapshot(
+            conn,
+            day.isoformat(),
+            [_row(1, x=1, population=population, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA")],
+        )
     conn.close()
 
 
@@ -388,6 +433,19 @@ def test_overview_view_status_and_job_log(browser_app: tuple[str, Browser]) -> N
     # Fixed seed dates are in the past → the text-first freshness label says Stale.
     assert page.text_content('[data-status-value="freshness"]').strip().startswith("Stale \u00b7")
 
+    # Stale state drives the card badge (no job-log errors to outrank it) and
+    # the freshness warning carries the API-provided age + latest date.
+    assert page.text_content("[data-status-state-label]").strip() == "Stale data"
+    warning = page.text_content("[data-status-freshness]")
+    assert warning.startswith("Snapshot is ")
+    assert "day" in warning
+    assert "old. Latest snapshot: 2026-08-08." in warning
+    assert page.get_attribute("[data-status-freshness]", "class").count("is-hidden") == 0
+
+    # No success log rows exist → both last-success fields render "Never".
+    assert page.text_content('[data-status-value="last_successful_fetch"]').strip() == "Never"
+    assert page.text_content('[data-status-value="last_successful_report"]').strip() == "Never"
+
     # The admin job log settles (seed DB has no log rows -> "No activity yet.").
     page.wait_for_function(
         "() => document.getElementById('job-log').getAttribute('aria-busy') === 'false'"
@@ -520,6 +578,57 @@ def test_empty_db_no_data_states(browser_app_empty: tuple[str, Browser]) -> None
     assert page.text_content("[data-header-snapshot]").strip() == "No snapshot yet"
     assert page.text_content('[data-status-value="snapshot_date"]').strip() == "—"
     assert page.text_content('[data-status-value="freshness"]').strip() == "No data"
+    # Empty DB: the badge says "No snapshot" and the freshness warning text
+    # explains the state (metric label "No data" stays).
+    assert page.text_content("[data-status-state-label]").strip() == "No snapshot"
+    assert "No snapshot has been stored yet" in page.text_content("[data-status-freshness]")
+    assert page.get_attribute("[data-status-freshness]", "class").count("is-hidden") == 0
+    assert page.text_content('[data-status-value="last_successful_fetch"]').strip() == "Never"
+    assert page.text_content('[data-status-value="last_successful_report"]').strip() == "Never"
+    assert errors == []
+    page.close()
+
+
+def test_overview_gap_badge_warning_and_note(browser_app_gap: tuple[str, Browser]) -> None:
+    """Seeded 3-day gap: badge + warning show the count and BOTH dates; the
+    freshness note exposes the previous date as the comparison baseline."""
+    url, browser = browser_app_gap
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.click("#dashboard-tab-overview")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() !== '—'; }"
+    )
+
+    assert page.text_content("[data-status-state-label]").strip() == "Snapshot gap"
+    assert page.text_content('[data-status-value="freshness"]').strip() == "Gap \u00b7 3 missing days"
+    warning = page.text_content("[data-status-freshness]")
+    assert "3 days missing between 2026-08-04 and 2026-08-08." in warning
+    assert page.get_attribute("[data-status-freshness]", "class").count("is-hidden") == 0
+    # The note names the stored previous date — never inferred in JS.
+    assert "prev 2026-08-04" in page.text_content('[data-status-note="freshness"]')
+    assert errors == []
+    page.close()
+
+
+def test_overview_current_hides_warning(browser_app_current: tuple[str, Browser]) -> None:
+    """Current snapshot pair: badge stays Watching, the freshness warning is
+    hidden and the metric label says Current."""
+    url, browser = browser_app_current
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.click("#dashboard-tab-overview")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() !== '—'; }"
+    )
+
+    assert page.text_content("[data-status-state-label]").strip() == "Watching"
+    assert page.text_content('[data-status-value="freshness"]').strip() == "Current"
+    assert page.get_attribute("[data-status-freshness]", "class").count("is-hidden") == 1
     assert errors == []
     page.close()
 

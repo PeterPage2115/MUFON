@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Final, TypedDict, cast
 
 from travian.models import AllianceDay, RegionDay, SummaryDay, VillageHistoryPoint, VillageRow
 
@@ -421,6 +421,48 @@ def recent_logs(conn: sqlite3.Connection, n: int = 50) -> list[dict[str, str]]:
         ).fetchall(),
     )
     return [dict(row) for row in rows]
+
+
+#: Success-message prefixes the bot jobs write (main.py) and the dashboard
+#: status reads back (app.py) — part of the status contract: only rows
+#: starting with these count as successful fetches/reports. Keep writer and
+#: reader in sync in the same change.
+FETCH_SUCCESS_PREFIX: Final = "snapshot saved for "
+REPORT_SUCCESS_PREFIX: Final = "report sent to channel "
+
+
+def latest_log_timestamp(
+    conn: sqlite3.Connection, *, job: str, level: str, message_prefix: str
+) -> str | None:
+    """The ``ts`` of the newest ``job_log`` row matching ``job``, ``level``
+    and the literal ``message_prefix``, or None when no row matches.
+
+    Ordered by the autoincrement ``id`` (insertion order), so two entries
+    written in the same second still resolve to the newest one; the prefix is
+    matched literally (LIKE-wildcards escaped).
+    """
+    row = cast(
+        Mapping[str, str] | None,
+        conn.execute(
+            "SELECT ts FROM job_log WHERE job = ? AND level = ? AND message LIKE ? ESCAPE '\\'"
+            + " ORDER BY id DESC LIMIT 1",
+            (job, level, _escape_like(message_prefix) + "%"),
+        ).fetchone(),
+    )
+    return row["ts"] if row is not None else None
+
+
+def has_log_marker(conn: sqlite3.Connection, marker: str) -> bool:
+    """True when a ``job='alert'``, ``level='info'`` row has exactly
+    ``marker`` in its ``message`` (the failure-alert dedupe lookup)."""
+    row = cast(
+        Mapping[str, str] | None,
+        conn.execute(
+            "SELECT 1 FROM job_log WHERE job = 'alert' AND level = 'info' AND message = ? LIMIT 1",
+            (marker,),
+        ).fetchone(),
+    )
+    return row is not None
 
 
 # --- analysis aggregators (dashboard) -------------------------------------------

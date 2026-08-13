@@ -90,6 +90,17 @@ DECISIONS (documented for the plan):
   ``asyncio.run_coroutine_threadsafe``; actions before ``on_ready`` → 409
   "bot not ready".
 
+- **Failure alerts (freshness & alerts)**: ``ALERT_CHANNEL_ID`` is an
+  env-only OPTIONAL int (never read from the ``settings`` table, never
+  exposed by the dashboard). On terminal fetch/report failures
+  (``FETCH_STATUS_EMPTY_PARSE``/``FETCH_STATUS_FAILED``,
+  ``REPORT_STATUS_FAILED``/``REPORT_STATUS_CHANNEL_NOT_FOUND``) the runner
+  sends ONE Discord alert embed, deduped per ``(job, UTC calendar day,
+  alert channel)`` via a persisted ``job_log`` marker written only after the
+  send succeeds; the shared run lock stays held through send + marker write.
+  Best-effort: any failure logs ``job='alert', level='error'`` and leaves the
+  original job status untouched. Skipped/expected states (stale, no data, no
+  alliance) never alert.
 - **Settings→scheduler sync (iteration 2)**: the dashboard factory is bound
   to the concrete ``TravianBot``; ``PUT /api/settings`` schedule changes are
   dispatched onto the bot loop via ``run_coroutine_threadsafe`` and land in
@@ -114,7 +125,7 @@ import threading
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -130,7 +141,7 @@ from fastapi import FastAPI
 
 from travian import store
 from travian.bot.commands import register_commands
-from travian.bot.report_embed import DAILY_SECTIONS, build_report_embed
+from travian.bot.report_embed import DAILY_SECTIONS, build_failure_alert, build_report_embed
 from travian.dashboard.app import DashboardDeps, RuntimeState, create_app, make_status_provider
 from travian.map_sql import fetch_map_sql, parse_map_sql
 from travian.metrics import (
@@ -217,6 +228,7 @@ class MergedConfig:
     discord_token: str = ""
     sqlite_path: str = DEFAULT_SQLITE_PATH
     channel_id: int | None = None
+    alert_channel_id: int | None = None
     alliance_tags: list[str] = field(default_factory=list)
     tracked_alliances: list[str] = field(default_factory=list)
     fetch_hour: int = DEFAULT_FETCH_HOUR
@@ -257,6 +269,7 @@ def load_merged_config(conn: sqlite3.Connection, env: Mapping[str, str]) -> Merg
         admin_role_id=(
             None if _pick(env, db, "ADMIN_ROLE_ID") is None else _as_int("ADMIN_ROLE_ID", _pick(env, db, "ADMIN_ROLE_ID"))
         ),
+        alert_channel_id=_optional_env_int("ALERT_CHANNEL_ID", env),
         report_embed_color=_as_color("REPORT_EMBED_COLOR", _pick(env, db, "REPORT_EMBED_COLOR", DEFAULT_EMBED_COLOR)),
     )
 
@@ -317,6 +330,19 @@ def _as_int(key: str, raw: object) -> int:
         except ValueError:
             raise ValueError(f"setting {key}: expected an integer, got {raw!r}") from None
     raise ValueError(f"setting {key}: expected an integer, got {raw!r}")
+
+
+def _optional_env_int(key: str, env: Mapping[str, str]) -> int | None:
+    """Env-only optional integer: absent or empty → None, non-empty
+    non-integer → ``ValueError`` (same style as the other integer settings).
+
+    Never reads the ``settings`` table — ``ALERT_CHANNEL_ID`` stays out of
+    the dashboard settings surface by contract.
+    """
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return None
+    return _as_int(key, raw)
 
 
 def _as_str(key: str, raw: object) -> str:
@@ -448,6 +474,10 @@ def _record_failure_blocking(job: str, exc: Exception) -> None:
 
 # --- shared run functions (jobs, dashboard, /raport) ------------------------------
 
+#: Fixed reason for the empty-parse failure — the same text in the job_log
+#: error entry and the failure alert.
+_EMPTY_PARSE_REASON: Final = "empty parse (0 villages) from map.sql, snapshot not saved"
+
 
 async def run_fetch() -> RunFetchStatus:
     """Fetch → parse → save today's map.sql snapshot (in ``FETCH_TZ``).
@@ -467,8 +497,14 @@ async def run_fetch() -> RunFetchStatus:
     try:
         text = await asyncio.to_thread(fetch_map_sql, MAP_SQL_URL)
         result = await asyncio.to_thread(_fetch_snapshot_phase, text)
+        if result == FETCH_STATUS_EMPTY_PARSE:
+            # Alert while the shared run lock is still held (like the FAILED
+            # path above): a concurrent claim of the same job/day marker can
+            # never race the send+marker write.
+            await _maybe_send_failure_alert("fetch", _EMPTY_PARSE_REASON)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "fetch", exc)
+        await _maybe_send_failure_alert("fetch", str(exc))
         return FETCH_STATUS_FAILED
     finally:
         _release()
@@ -489,11 +525,11 @@ def _fetch_snapshot_phase(text: str) -> RunFetchStatus:
         cfg = load_merged_config(conn, os.environ)
         rows = parse_map_sql(text)
         if not rows:
-            store.append_log(conn, "fetch", "error", "empty parse (0 villages) from map.sql, snapshot not saved")
+            store.append_log(conn, "fetch", "error", _EMPTY_PARSE_REASON)
             return FETCH_STATUS_EMPTY_PARSE
         snapshot_date = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
         store.save_snapshot(conn, snapshot_date, rows)
-        store.append_log(conn, "fetch", "info", f"snapshot saved for {snapshot_date} ({len(rows)} villages)")
+        store.append_log(conn, "fetch", "info", f"{store.FETCH_SUCCESS_PREFIX}{snapshot_date} ({len(rows)} villages)")
         return FETCH_STATUS_COMPLETED
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         _record_failure("fetch", exc, conn)
@@ -515,6 +551,7 @@ class _ReportPhase:
     action: Literal["send", "no_data", "stale", "no_alliance", "failed"]
     embeds: list[discord.Embed]
     snapshot_date: str = ""
+    failure_reason: str | None = None
 
 
 def _report_phase(require_today: bool) -> _ReportPhase:
@@ -561,7 +598,7 @@ def _report_phase(require_today: bool) -> _ReportPhase:
         return _ReportPhase(action="send", embeds=embeds, snapshot_date=latest.snapshot_date)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         _record_failure("report", exc, conn)
-        return _ReportPhase(action="failed", embeds=[])
+        return _ReportPhase(action="failed", embeds=[], failure_reason=str(exc))
     finally:
         if conn is not None:
             conn.close()
@@ -596,13 +633,15 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
             case "no_alliance":
                 return REPORT_STATUS_NO_ALLIANCE
             case "failed":
+                await _maybe_send_failure_alert("report", phase.failure_reason or "report failed")
                 return REPORT_STATUS_FAILED
             case "send":
-                message = f"report sent to channel {channel_id} (snapshot {phase.snapshot_date})"
+                message = f"{store.REPORT_SUCCESS_PREFIX}{channel_id} (snapshot {phase.snapshot_date})"
             case "no_data":
                 message = f"no snapshots yet, sent no-data embed to channel {channel_id}"
         channel = await _get_channel_on_loop(channel_id)
         if channel is None:
+            await _maybe_send_failure_alert("report", f"channel {channel_id} not found")
             return REPORT_STATUS_CHANNEL_NOT_FOUND
         embeds = phase.embeds
         assert embeds  # send/no_data always carry the embeds (see _ReportPhase)
@@ -632,6 +671,59 @@ async def _get_channel_on_loop(channel_id: int) -> Messageable | None:
         await asyncio.to_thread(_log_entry, "report", "error", f"channel {channel_id} not found")
         return None
     return cast(Messageable, channel)
+
+
+def _alert_marker_exists(marker: str) -> bool:
+    """``store.has_log_marker`` in a worker thread (own connection)."""
+    conn = store.connect(_sqlite_path(os.environ))
+    try:
+        return store.has_log_marker(conn, marker)
+    finally:
+        conn.close()
+
+
+async def _maybe_send_failure_alert(job: Literal["fetch", "report"], reason: str) -> None:
+    """Opt-in, best-effort Discord alert for a terminal fetch/report failure.
+
+    Reads the merged config off the loop and returns immediately when
+    ``ALERT_CHANNEL_ID`` is not configured. Dedupes per ``(job, UTC calendar
+    day, alert channel)`` via a persisted ``job_log`` marker: one alert per
+    job per day, surviving restarts — a same-day retry with a different
+    reason is suppressed by design. Runs on the bot loop (channel resolution
+    + send are loop-owned) while the caller still holds the shared run lock,
+    so two concurrent runs of the same job can never claim the marker in
+    parallel. Any failure (config lookup, absent channel, send, marker
+    write) logs a best-effort ``job='alert', level='error'`` entry and
+    returns — it never recurses into another alert and never changes the
+    original job status.
+    """
+    try:
+        cfg = await asyncio.to_thread(_current_config)
+        channel_id = cfg.alert_channel_id
+        if channel_id is None:
+            return
+        marker = f"failure-alert:{job}:{datetime.now(UTC).date().isoformat()}:{channel_id}"
+        if await asyncio.to_thread(_alert_marker_exists, marker):
+            return
+        bot = current_bot
+        if bot is None:
+            await asyncio.to_thread(_log_entry, "alert", "error", f"failure alert for {job}: bot not initialized")
+            return
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            await asyncio.to_thread(
+                _log_entry, "alert", "error", f"failure alert for {job}: alert channel {channel_id} not found"
+            )
+            return
+        embed = build_failure_alert(job, reason, datetime.now(UTC).isoformat())
+        _ = await cast(Messageable, channel).send(embed=embed)
+        await asyncio.to_thread(_log_entry, "alert", "info", marker)
+    except Exception as exc:  # noqa: BLE001 — best-effort: never crash the job or recurse
+        logger.error("failure alert for %s failed: %s", job, exc)
+        try:
+            await asyncio.to_thread(_log_entry, "alert", "error", f"failure alert for {job} failed: {exc}")
+        except Exception:
+            logger.exception("could not log failure-alert entry for %s", job)
 
 
 def _previous_date(conn: sqlite3.Connection, latest: str) -> str | None:

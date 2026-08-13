@@ -30,7 +30,9 @@ from travian.store import (
     connect,
     get_setting,
     get_settings,
+    has_log_marker,
     init_schema,
+    latest_log_timestamp,
     list_dates,
     load_latest,
     load_villages,
@@ -486,6 +488,82 @@ def test_recent_logs_limits_when_n_smaller_than_count(conn: sqlite3.Connection) 
 
 def test_recent_logs_empty_when_no_logs(conn: sqlite3.Connection) -> None:
     assert recent_logs(conn) == []
+
+
+# --- job log: latest-success + alert markers ---------------------------------
+
+
+def test_latest_log_timestamp_newest_matching_row_wins(conn: sqlite3.Connection) -> None:
+    # Given: success rows interleaved with unrelated info rows, other levels
+    # and other jobs carrying the same prefix
+    append_log(conn, "fetch", "info", "snapshot saved for 2026-08-07 (10 villages)")
+    append_log(conn, "fetch", "info", "unrelated info row")
+    append_log(conn, "fetch", "warning", "snapshot saved for 2026-08-06 (10 villages)")
+    append_log(conn, "report", "info", "snapshot saved for 2026-08-08 (10 villages)")
+
+    # When: the newest matching fetch row is looked up
+    ts = latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for ")
+    append_log(conn, "fetch", "info", "snapshot saved for 2026-08-09 (12 villages)")
+    newer = latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for ")
+
+    # Then: the newest matching row's UTC ISO ts wins, unrelated rows don't count
+    first_ts = next(e["ts"] for e in recent_logs(conn) if e["message"] == "snapshot saved for 2026-08-07 (10 villages)")
+    assert ts == first_ts
+    assert newer != ts
+    assert newer.endswith("+00:00")
+    # The newest row is exactly the second appended match (id ordering beats
+    # same-second ts ties).
+    logs = recent_logs(conn)
+    assert logs[0]["message"] == "snapshot saved for 2026-08-09 (12 villages)"
+    assert newer == logs[0]["ts"]
+
+
+def test_latest_log_timestamp_none_when_no_match(conn: sqlite3.Connection) -> None:
+    append_log(conn, "fetch", "info", "no success here")
+    append_log(conn, "report", "info", "snapshot saved for 2026-08-09 (10 villages)")
+
+    assert latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for ") is None
+    assert (
+        latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for")
+        is None  # prefix is a literal prefix, not a substring
+    )
+
+
+def test_latest_log_timestamp_prefix_matched_literally(conn: sqlite3.Connection) -> None:
+    append_log(conn, "fetch", "info", "snapshot saved forX2026-08-09 (10 villages)")
+    append_log(conn, "fetch", "info", "snapshot saved for_2026-08-09 (10 villages)")
+
+    # A wildcard char inside the prefix is a LITERAL character (escaped): the
+    # "_"-bearing prefix must not match the X-message, only the literal
+    # underscore message.
+    assert (
+        latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for_")
+        is not None
+    )
+    # And a plain prefix matches only rows that start with it (trailing space
+    # is part of the prefix): the no-space prefix is a strict prefix of the
+    # seeded messages.
+    assert (
+        latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for")
+        is not None
+    )
+
+
+def test_has_log_marker_exact_message_match(conn: sqlite3.Connection) -> None:
+    marker = "failure-alert:fetch:2026-08-13:42"
+    append_log(conn, "alert", "info", marker)
+
+    assert has_log_marker(conn, marker) is True
+    assert has_log_marker(conn, "failure-alert:fetch:2026-08-13:43") is False
+    assert has_log_marker(conn, "failure-alert:fetch:2026-08-14:42") is False
+
+
+def test_has_log_marker_ignores_other_levels_and_jobs(conn: sqlite3.Connection) -> None:
+    marker = "failure-alert:report:2026-08-13:42"
+    append_log(conn, "alert", "error", marker)
+    append_log(conn, "fetch", "info", marker)
+
+    assert has_log_marker(conn, marker) is False
 
 
 # --- village explorer -------------------------------------------------------

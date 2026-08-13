@@ -31,6 +31,7 @@ from travian.strings import NO_DATA_YET
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "map_sql_sample.txt"
 CHANNEL_ID = 111111111111111111
+ALERT_CHANNEL_ID = 222222222222222222
 
 
 # --- helpers -----------------------------------------------------------------
@@ -138,6 +139,18 @@ class FakeBot:
 
     def get_channel(self, channel_id: int) -> FakeChannel | None:
         return self._channels.get(channel_id)
+
+
+class FailingChannel(FakeChannel):
+    """``FakeChannel`` whose ``send`` always raises (alert-send failure seam)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_attempts = 0
+
+    async def send(self, embed: discord.Embed | None = None, embeds: list[discord.Embed] | None = None, **kwargs: object) -> object:
+        self.send_attempts += 1
+        raise RuntimeError("discord api down")
 
 
 def _install_bot(channels: dict[int, FakeChannel]) -> FakeChannel:
@@ -354,6 +367,45 @@ class TestLoadMergedConfig:
         try:
             with pytest.raises(ValueError, match="CHANNEL_ID"):
                 bot_main.load_merged_config(conn, {"CHANNEL_ID": "abc"})
+        finally:
+            conn.close()
+
+    def test_alert_channel_id_unset_or_empty_is_none(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            assert bot_main.load_merged_config(conn, {}).alert_channel_id is None
+            assert bot_main.load_merged_config(conn, {"ALERT_CHANNEL_ID": ""}).alert_channel_id is None
+        finally:
+            conn.close()
+
+    def test_alert_channel_id_env_parsed(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {"ALERT_CHANNEL_ID": "222222222222222222"})
+        finally:
+            conn.close()
+        assert cfg.alert_channel_id == 222222222222222222
+
+    def test_alert_channel_id_invalid_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(ValueError, match="ALERT_CHANNEL_ID"):
+                bot_main.load_merged_config(conn, {"ALERT_CHANNEL_ID": "abc"})
+        finally:
+            conn.close()
+
+    def test_alert_channel_id_never_read_from_settings_table(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"ALERT_CHANNEL_ID": 42})
+        try:
+            # Env-only by contract: a table value must NOT enable the alert.
+            assert bot_main.load_merged_config(conn, {}).alert_channel_id is None
+            # And env always wins over a table value.
+            assert bot_main.load_merged_config(conn, {"ALERT_CHANNEL_ID": "7"}).alert_channel_id == 7
         finally:
             conn.close()
 
@@ -726,6 +778,215 @@ class TestRunStatusReturns:
         conn.close()
         bot_main.current_bot = cast(bot_main.TravianBot, FakeBot({}))  # get_channel -> None
         assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_CHANNEL_NOT_FOUND
+
+
+# --- failure alerts (freshness & alerts) --------------------------------------
+
+
+class TestFailureAlertEmbed:
+    def test_build_failure_alert_normalizes_and_caps_reason(self) -> None:
+        embed = bot_main.build_failure_alert("fetch", "line1\n\n  line2   with  spaces", "2026-08-13T10:00:00+00:00")
+
+        assert embed.title == strings.ALERT_TITLE
+        assert "fetch failed at 2026-08-13T10:00:00+00:00." in embed.description
+        assert "line1 line2 with spaces" in embed.description  # one line
+        assert "\nline1\nline2" not in embed.description  # no multi-line reason
+        assert "See the dashboard job log for details." in embed.description
+        assert embed.colour.value == 0xD47769
+
+    def test_build_failure_alert_truncates_long_reason(self) -> None:
+        embed = bot_main.build_failure_alert("report", "boom " * 500, "2026-08-13T10:00:00+00:00")
+
+        assert len(embed.description) < 4096  # Discord description limit
+        # The capped one-line reason ends with … right before the trailer.
+        assert "…\n\nSee the dashboard job log for details." in embed.description
+        assert "boom \nboom" not in embed.description  # reason is still a single line
+
+
+class TestFailureAlerts:
+    def test_alerts_disabled_send_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)  # no ALERT_CHANNEL_ID
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        channels = {CHANNEL_ID: FakeChannel()}
+        _ = _install_bot(channels)
+
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+        assert asyncio.run(bot_main.run_fetch()) == bot_main.FETCH_STATUS_FAILED
+
+        assert channels[CHANNEL_ID].sent == []  # nothing was sent anywhere
+        assert not any(e["job"] == "alert" for e in _logs(_db_path(tmp_path)))
+
+    def test_fetch_failure_alerts_once_per_utc_day(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        channels = {CHANNEL_ID: FakeChannel(), ALERT_CHANNEL_ID: FakeChannel()}
+        _ = _install_bot(channels)
+
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+
+        async def scenario() -> None:
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_FAILED
+            # Same job failing again on the same UTC day: deduped, no second send.
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_FAILED
+
+        asyncio.run(scenario())
+
+        alert_channel = channels[ALERT_CHANNEL_ID]
+        assert len(alert_channel.sent) == 1
+        embed = alert_channel.sent[0][0]
+        assert embed.title == strings.ALERT_TITLE
+        assert "fetch failed at" in embed.description
+        assert "fetch failed after 4 attempts" in embed.description
+        assert "See the dashboard job log for details." in embed.description
+        logs = _logs(_db_path(tmp_path))
+        markers = [e for e in logs if e["job"] == "alert" and e["level"] == "info"]
+        assert len(markers) == 1  # one marker survives both failures
+        assert markers[0]["message"].startswith("failure-alert:fetch:")
+        assert markers[0]["message"].endswith(f":{ALERT_CHANNEL_ID}")
+
+    def test_empty_parse_alerts_with_fixed_reason(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        channels = {CHANNEL_ID: FakeChannel(), ALERT_CHANNEL_ID: FakeChannel()}
+        _ = _install_bot(channels)
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: "")
+
+        assert asyncio.run(bot_main.run_fetch()) == bot_main.FETCH_STATUS_EMPTY_PARSE
+
+        embed = channels[ALERT_CHANNEL_ID].sent[0][0]
+        assert "empty parse (0 villages) from map.sql, snapshot not saved" in embed.description
+
+    def test_empty_parse_alert_holds_run_lock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The shared run lock stays held through the alert send + marker
+        write on the EMPTY-PARSE path too: a concurrent run is skipped, so
+        two claims of the same job/day marker can never race."""
+        _set_bot_env(monkeypatch, tmp_path, ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingChannel(FakeChannel):
+            async def send(
+                self,
+                embed: discord.Embed | None = None,
+                embeds: list[discord.Embed] | None = None,
+                **kwargs: object,
+            ) -> object:
+                entered.set()
+                await release.wait()
+                return await super().send(embed=embed, embeds=embeds, **kwargs)
+
+        channels = {CHANNEL_ID: FakeChannel(), ALERT_CHANNEL_ID: BlockingChannel()}
+        _ = _install_bot(channels)
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: "")
+
+        async def scenario() -> None:
+            first = asyncio.create_task(bot_main.run_fetch())
+            await entered.wait()  # the first run is inside the alert send
+            # The lock must still be held: a second run is SKIPPED, never queued.
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_SKIPPED
+            release.set()
+            assert await first == bot_main.FETCH_STATUS_EMPTY_PARSE
+
+        asyncio.run(scenario())
+
+        assert len(channels[ALERT_CHANNEL_ID].sent) == 1  # the blocked send landed
+        markers = [e for e in _logs(_db_path(tmp_path)) if e["job"] == "alert" and e["level"] == "info"]
+        assert len(markers) == 1  # marker written only after the send completed
+
+    def test_report_failure_alerts_and_fetch_alerts_independently(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA", ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        channels = {CHANNEL_ID: FakeChannel(), ALERT_CHANNEL_ID: FakeChannel()}
+        _ = _install_bot(channels)
+
+        # Fetch failure first (its own marker + embed)…
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+        # …then a report compute failure (a DIFFERENT job: must alert independently).
+        monkeypatch.setattr(
+            bot_main,
+            "_report_phase",
+            lambda require_today: bot_main._ReportPhase(
+                action="failed", embeds=[], failure_reason="report compute boom"
+            ),
+        )
+
+        async def scenario() -> None:
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_FAILED
+            assert await bot_main.run_report(CHANNEL_ID) == bot_main.REPORT_STATUS_FAILED
+
+        asyncio.run(scenario())
+
+        alert_channel = channels[ALERT_CHANNEL_ID]
+        assert len(alert_channel.sent) == 2
+        report_embed = alert_channel.sent[1][0]
+        assert "report failed at" in report_embed.description
+        assert "report compute boom" in report_embed.description
+        markers = [e["message"] for e in _logs(_db_path(tmp_path)) if e["job"] == "alert" and e["level"] == "info"]
+        assert len(markers) == 2
+        assert any(m.startswith("failure-alert:fetch:") for m in markers)
+        assert any(m.startswith("failure-alert:report:") for m in markers)
+
+    def test_report_channel_not_found_alerts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA", ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1)])
+        conn.close()
+        # The REPORT channel is missing; only the alert channel resolves.
+        channels = {ALERT_CHANNEL_ID: FakeChannel()}
+        bot_main.current_bot = cast(bot_main.TravianBot, FakeBot(channels))
+
+        assert asyncio.run(bot_main.run_report(CHANNEL_ID)) == bot_main.REPORT_STATUS_CHANNEL_NOT_FOUND
+
+        embed = channels[ALERT_CHANNEL_ID].sent[0][0]
+        assert f"channel {CHANNEL_ID} not found" in embed.description
+
+    def test_alert_send_failure_preserves_status_and_releases_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALERT_CHANNEL_ID=str(ALERT_CHANNEL_ID))
+        store.init_schema(store.connect(_db_path(tmp_path)))
+        alert_channel = FailingChannel()
+        bot_main.current_bot = cast(bot_main.TravianBot, FakeBot({ALERT_CHANNEL_ID: alert_channel}))
+        state = {"fail": True}
+
+        def fetch(url: str) -> str:
+            if state["fail"]:
+                raise MapSqlFetchError("fetch failed after 4 attempts")
+            return FIXTURE_PATH.read_text()
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fetch)
+
+        async def scenario() -> None:
+            # Original failed status preserved despite the alert-send failure…
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_FAILED
+            state["fail"] = False
+            # …and the shared run lock was released (a second run is NOT skipped).
+            assert await bot_main.run_fetch() == bot_main.FETCH_STATUS_COMPLETED
+
+        asyncio.run(scenario())
+
+        assert alert_channel.send_attempts == 1
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            e["job"] == "alert" and e["level"] == "error" and "failure alert for fetch failed" in e["message"]
+            for e in logs
+        )
+        # The marker was never written (the send never succeeded) — a later
+        # retry may legitimately send again.
+        assert not any(e["job"] == "alert" and e["level"] == "info" for e in logs)
 
 
 # --- bot class: on_ready + scheduler -------------------------------------------

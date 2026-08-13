@@ -404,12 +404,23 @@
               <strong data-status-value="next_report">—</strong>
               <span class="schedule-zone" data-status-value="report_tz">—</span>
             </div>
+            <div class="schedule-row">
+              <span class="metric-label">Last successful fetch</span>
+              <strong data-status-value="last_successful_fetch">—</strong>
+              <span class="schedule-zone">UTC</span>
+            </div>
+            <div class="schedule-row">
+              <span class="metric-label">Last successful report</span>
+              <strong data-status-value="last_successful_report">—</strong>
+              <span class="schedule-zone">UTC</span>
+            </div>
             </div>
             <footer class="card__footer status-footer">
               <span><span class="metric-label">Snapshot date</span> <strong data-status-value="snapshot_date">—</strong></span>
               <span><span class="metric-label">Source</span> <strong data-status-value="snapshot_source">—</strong></span>
             </footer>
             <div class="status-alert is-hidden" data-status-errors role="status" aria-live="polite"></div>
+            <div class="status-alert status-alert--warning is-hidden" data-status-freshness role="status" aria-live="polite"></div>
           </article>
 
           <article class="card card--logs" aria-labelledby="logs-title" data-admin-only>

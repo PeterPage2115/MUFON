@@ -17,6 +17,7 @@
     headerSource: document.querySelector("[data-header-source]"),
     headerBuild: document.querySelector("[data-header-build]"),
     statusAlert: document.querySelector("[data-status-errors]"),
+    statusFreshness: document.querySelector("[data-status-freshness]"),
     statusValues: document.querySelectorAll("[data-status-value]"),
     metricGrid: document.querySelector(".metric-grid"),
     settingsForm: document.getElementById("settings-form"),
@@ -94,6 +95,17 @@
     } catch (_e) {
       return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + " UTC";
     }
+  }
+
+  // Calendar date + time in UTC for the last-success rows (server persists
+  // job_log timestamps in UTC — never the browser timezone). Missing or
+  // invalid input renders "Never": a job that never succeeded is a fact, not
+  // a dash.
+  function formatTimestamp(iso) {
+    if (!iso) return "Never";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "Never";
+    return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "") + " UTC";
   }
 
   /* --- API client ---------------------------------------------------------- */
@@ -442,6 +454,10 @@
         case "snapshot_source":
           value = data.snapshot_source || "—";
           break;
+        case "last_successful_fetch":
+        case "last_successful_report":
+          value = formatTimestamp(data[key]);
+          break;
         case "freshness":
           value = freshnessLabel(data.freshness);
           break;
@@ -459,7 +475,14 @@
         if (note) {
           var noteText = "from snapshots";
           if (data.freshness.state === "no_data") noteText = "no snapshots stored";
-          else if (data.freshness.snapshot_date) noteText = "as of " + data.freshness.snapshot_date;
+          else if (data.freshness.snapshot_date) {
+            // The comparison baseline is server-provided, never inferred in
+            // JS (same no-false-day-over-day contract as the Changes tab).
+            noteText = "as of " + data.freshness.snapshot_date;
+            if (data.freshness.state === "gap" && data.freshness.previous_snapshot_date) {
+              noteText = "prev " + data.freshness.previous_snapshot_date + " \u00b7 " + noteText;
+            }
+          }
           if (note.textContent !== noteText) setText(note, noteText);
         }
       }
@@ -467,11 +490,10 @@
 
     var alertBox = els.statusAlert;
     var errors = data.errors || [];
-    // The card badge describes the ``_recent_errors`` data (recent job-log
-    // errors), NOT the /healthz probe — "Watching" stays honest while the
-    // alert box carries the details.
-    var stateLabel = document.querySelector("[data-status-state-label]");
-    var stateBadge = stateLabel ? stateLabel.closest(".card-state") : null;
+    var freshness = data.freshness || null;
+
+    // Job-log errors (visible to admins only) — the error badge must NOT
+    // suppress the separate freshness warning: both may show at once.
     if (errors.length) {
       alertBox.textContent = "";
       var head = document.createElement("span");
@@ -487,18 +509,56 @@
         .join("\n");
       alertBox.appendChild(lines);
       alertBox.classList.remove("is-hidden");
-      if (stateBadge) {
-        stateBadge.classList.remove("card-state--healthy");
-        stateBadge.classList.add("card-state--attention");
-        setText(stateLabel, "Attention · " + errors.length + " recent error" + (errors.length === 1 ? "" : "s"));
-      }
     } else {
       alertBox.classList.add("is-hidden");
-      if (stateBadge) {
-        stateBadge.classList.remove("card-state--attention");
-        stateBadge.classList.add("card-state--healthy");
-        setText(stateLabel, "Watching");
+    }
+
+    // Freshness warning: text-first states from the server payload (never
+    // recomputed in JS). Visible to members even when errors are sanitized.
+    var freshnessBox = els.statusFreshness;
+    var freshnessText = "";
+    if (freshness && freshness.state === "no_data") {
+      freshnessText = "No snapshot has been stored yet. Fetch data to populate the dashboard.";
+    } else if (freshness && freshness.state === "stale") {
+      freshnessText =
+        "Snapshot is " + freshness.age_days + " day" + (freshness.age_days === 1 ? "" : "s") +
+        " old. Latest snapshot: " + freshness.snapshot_date + ".";
+    } else if (freshness && freshness.state === "gap") {
+      freshnessText =
+        freshness.gap_days + " day" + (freshness.gap_days === 1 ? "" : "s") +
+        " missing between " + freshness.previous_snapshot_date + " and " + freshness.snapshot_date + ".";
+    }
+    if (freshnessBox) {
+      if (freshnessText) {
+        setText(freshnessBox, freshnessText);
+        freshnessBox.classList.remove("is-hidden");
+      } else {
+        freshnessBox.classList.add("is-hidden");
       }
+    }
+
+    // Card badge precedence: job-log errors → gap → stale → no_data → watching.
+    var stateLabel = document.querySelector("[data-status-state-label]");
+    var stateBadge = stateLabel ? stateLabel.closest(".card-state") : null;
+    var badgeText = "Watching";
+    var badgeClass = "card-state--healthy";
+    if (errors.length) {
+      badgeText = "Attention \u00b7 " + errors.length + " recent error" + (errors.length === 1 ? "" : "s");
+      badgeClass = "card-state--attention";
+    } else if (freshness && freshness.state === "gap") {
+      badgeText = "Snapshot gap";
+      badgeClass = "card-state--warning";
+    } else if (freshness && freshness.state === "stale") {
+      badgeText = "Stale data";
+      badgeClass = "card-state--warning";
+    } else if (freshness && freshness.state === "no_data") {
+      badgeText = "No snapshot";
+      badgeClass = "card-state--warning";
+    }
+    if (stateBadge) {
+      stateBadge.classList.remove("card-state--healthy", "card-state--attention", "card-state--warning");
+      stateBadge.classList.add(badgeClass);
+      setText(stateLabel, badgeText);
     }
 
     allianceTags = data.alliance_tags || [];

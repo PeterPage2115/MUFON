@@ -108,6 +108,7 @@ default. Settings edited in the dashboard are stored in the DB and
 |---|---|---|
 | `DISCORD_TOKEN` | *(required)* | Bot token — env only, never in the DB. |
 | `CHANNEL_ID` | *(required)* | Channel where the daily report is posted. |
+| `ALERT_CHANNEL_ID` | *(empty)* | Optional dedicated channel for failure alerts (snowflake) — env only, never in the DB. Empty = alerts disabled. One alert per failed fetch/report per UTC day. |
 | `ALLIANCE_TAGS` | *(empty)* | Comma-separated alliance tags, e.g. `UFO,PR-U`. Empty → daily report skipped with a warning. |
 | `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** card. OUR tags (`ALLIANCE_TAGS`) are bold; empty → no Standings card. |
 | `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server) and the dashboard admin role in OAuth mode. Dashboard admins in OAuth mode are `ADMIN_ROLE_ID` holders, the server owner, and Discord Administrator / Manage Server permission holders. |
@@ -183,6 +184,25 @@ everyone out. Sessions travel in an **HttpOnly, SameSite=Lax cookie**
 localStorage. If an `OAUTH_*` key — including `OAUTH_PUBLIC_ORIGIN` — is
 missing while `oauth` is requested, the dashboard falls back to `token`
 mode and logs a warning.
+
+## Failure alerts
+
+Set `ALERT_CHANNEL_ID` to a **dedicated** Discord channel to get one
+best-effort alert embed when a job fails terminally:
+
+- Fetch: **empty parse** (0 villages) and **failed** (network/parse/IO).
+- Report: **failed** (build/compute/send errors) and **channel not found**.
+
+Alerts are deduplicated per job + UTC calendar day: the same job failing
+again on the same day sends nothing (a `job_log` marker persists across
+restarts). `ALERT_CHANNEL_ID` is environment-only (never in the settings
+DB, never exposed by the dashboard — a `PUT /api/settings` with that key is
+rejected) and empty by default, so an unnoticed deployment can never emit
+Discord messages. Expected/configuration states — stale snapshot, missing
+snapshot, no data, no alliance — stay **dashboard warnings** (badge +
+freshness alert on the Status card) and never alert. The alert is
+best-effort: any failure is logged to the job log without changing the
+original job status.
 
 ## Deployment
 

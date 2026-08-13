@@ -342,6 +342,41 @@ class TestStatus:
         assert [e["message"] for e in body["errors"]] == ["err4", "err3", "err0"]
         assert all(e["level"] == "error" for e in body["errors"])
         assert body["alliance_tags"] == ["NOVA"]
+        # No seeded row matches the success prefixes (the "info2" row is an
+        # unrelated info message) → both last-success fields are null.
+        assert body["last_successful_fetch"] is None
+        assert body["last_successful_report"] is None
+
+    def test_status_last_success_timestamps(self, tmp_path: Path) -> None:
+        db = tmp_path / "s.db"
+        _seed_db(db)
+        conn = store.connect(db)
+        store.append_log(conn, "fetch", "info", "snapshot saved for 2026-08-07 (3 villages)")
+        store.append_log(conn, "report", "info", "report sent to channel 111111111111111111 (snapshot 2026-08-07)")
+        store.append_log(conn, "fetch", "info", "snapshot saved for 2026-08-09 (3 villages)")  # newest fetch
+        store.append_log(conn, "fetch", "error", "snapshot saved for 2026-08-10 (0 villages)")  # error: not a success
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/status").json()
+
+        # The persisted UTC ISO ts of the NEWEST matching success row wins;
+        # unrelated levels never count.
+        conn = store.connect(db)
+        try:
+            by_message = {e["message"]: e["ts"] for e in store.recent_logs(conn)}
+        finally:
+            conn.close()
+        assert body["last_successful_fetch"] == by_message["snapshot saved for 2026-08-09 (3 villages)"]
+        assert body["last_successful_fetch"].endswith("+00:00")
+        assert body["last_successful_report"] == by_message[
+            "report sent to channel 111111111111111111 (snapshot 2026-08-07)"
+        ]
+        # The existing freshness + error contract is preserved alongside the
+        # new fields: the seeded error row still surfaces in errors, but it
+        # never counts as a successful fetch.
+        assert body["freshness"]["state"] == "stale"
+        assert body["freshness"]["snapshot_date"] == SNAPSHOT_DATE
+        assert [e["message"] for e in body["errors"]] == ["snapshot saved for 2026-08-10 (0 villages)"]
 
     def test_status_without_snapshot(self, tmp_path: Path) -> None:
         db = tmp_path / "s.db"
@@ -356,6 +391,8 @@ class TestStatus:
         assert body["total_population"] == 0
         assert body["errors"] == []
         assert body["alliance_tags"] == ["NOVA"]
+        assert body["last_successful_fetch"] is None
+        assert body["last_successful_report"] is None
 
 
 # --- GET /api/settings ---------------------------------------------------------
@@ -429,6 +466,18 @@ class TestPutSettings:
             assert client.put("/api/settings", json={"BACKFILL_DSN": "postgres://x"}).status_code == 422
             assert client.put("/api/settings", json={"SQLITE_PATH": "/evil.db"}).status_code == 422
         assert _db_settings(db) == {}
+
+    def test_alert_channel_id_env_only_rejected(self, tmp_path: Path) -> None:
+        """ALERT_CHANNEL_ID is environment-only: the dashboard must refuse to
+        store it (unknown setting), so operators configure the alert route
+        only through the environment."""
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"ALERT_CHANNEL_ID": 12345})
+        assert resp.status_code == 422
+        assert "ALERT_CHANNEL_ID" in resp.json()["detail"]
+        assert _db_settings(db) == {}  # nothing written
 
     def test_bad_hour_422_and_unchanged(self, tmp_path: Path) -> None:
         db = tmp_path / "p.db"

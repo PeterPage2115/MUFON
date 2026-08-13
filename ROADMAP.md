@@ -56,10 +56,26 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 - [x] Task 8: utwardzenie OAuth (redirect-origin `OAUTH_PUBLIC_ORIGIN`, HttpOnly cookie, nagłówki).
 - [x] Task 9: pomiar retencji/wydajności na read-only kopii (seed 60k wiosek × 7 dni): najwolniejszy endpoint (Regions 7d) p95 ≈ 0,63 s — poniżej progu interwencji; bez zmian `store.py`/API i bez pruningu.
 
-## 6. Później (P2) — następny slice produktowy (wybór po P0/P1)
+## 6. Zrobione (P2, 2026-08-13) — Freshness & alerts
 
-Rekomendowany: **Freshness & alerts** — ostatni udany fetch/report, wiek danych,
-wyraźne ostrzeżenie o luce, opcjonalny alert Discord po nieudanym fetchu/reporcie.
+- [x] Ostatnie udane wykonania: `/api/status` zwraca `last_successful_fetch` /
+      `last_successful_report` (UTC ISO z `job_log`; tylko wpisy ze stałych
+      prefiksów sukcesu), karta Status pokazuje obie wartości („Never" gdy
+      brak sukcesu). Bez zmian schematu SQLite.
+- [x] Wyraźne ostrzeżenia świeżości: badge + tekstowy alert dla
+      stale/gap/no_data (precedencja: błędy jobów → gap → stale → no_data),
+      baseline z `previous_snapshot_date` — daty zawsze z payloadu serwera,
+      nigdy liczone w JS (kontrakt no-false-day-over-day jak w Changes).
+- [x] Opcjonalny alert Discord (`ALERT_CHANNEL_ID`, env-only, pusty =
+      wyłączony): jeden embed na terminalną porażkę fetch/report na
+      UTC-dzień, dedupe przez marker w `job_log` (przetrwa restart). Alert
+      best-effort — błąd wysyłki nie zmienia statusu zadania. stale/gap/
+      no-data zostają ostrzeżeniami dashboardu (nie alertują).
+
+## 7. Później (P2) — następny slice produktowy (po zamknięciu Freshness & alerts)
+
+Rekomendowany: **Intelligence** — drill-down region/player, porównania
+okresów, zapisane widoki.
 
 Alternatywy (jedna naraz, bez równoległych dużych funkcji):
 
@@ -67,7 +83,7 @@ Alternatywy (jedna naraz, bez równoległych dużych funkcji):
 - Team UX: preferencje użytkownika, szybki landing per rola, lepsza wersja mobilna.
 - Operations: historia uruchomień z retry policy i jawnym run identifier.
 
-## 7. Świadomie NIE w planie (YAGNI)
+## 8. Świadomie NIE w planie (YAGNI)
 
 - Publiczny dostęp przez internet (wymagałby proxy, TLS i zupełnie innej klasy auth).
 - Automatyczny pruning danych przed pomiarem retencji (Task 9).

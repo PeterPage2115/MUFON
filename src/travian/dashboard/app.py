@@ -206,6 +206,8 @@ class StatusData(TypedDict):
     report_tz: str
     next_fetch: str
     next_report: str
+    last_successful_fetch: str | None
+    last_successful_report: str | None
     errors: list[dict[str, str]]
     alliance_tags: list[str]
     freshness: FreshnessData
@@ -594,6 +596,12 @@ def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[],
                 report_tz=cfg.report_tz,
                 next_fetch=_next_occurrence(cfg.fetch_hour, cfg.fetch_minute, cfg.fetch_tz),
                 next_report=_next_occurrence(cfg.report_hour, cfg.report_minute, cfg.report_tz),
+                last_successful_fetch=store.latest_log_timestamp(
+                    conn, job="fetch", level="info", message_prefix=store.FETCH_SUCCESS_PREFIX
+                ),
+                last_successful_report=store.latest_log_timestamp(
+                    conn, job="report", level="info", message_prefix=store.REPORT_SUCCESS_PREFIX
+                ),
                 errors=_recent_errors(conn),
                 alliance_tags=cfg.alliance_tags,
                 freshness=compute_freshness(store.list_dates(conn), datetime.now(UTC), cfg.fetch_tz),

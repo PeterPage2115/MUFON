@@ -52,6 +52,7 @@ thousands are grouped in tables and KPIs.
 
 import logging
 from collections.abc import Set as AbstractSet
+from typing import Literal
 
 import discord
 
@@ -73,6 +74,10 @@ _ITEM_CAP_NEW_LOST = 15  # plan: village event lines per New/Lost section
 _COLOR_REGIONS = 0x1ABC9C  # teal
 _COLOR_STANDINGS = 0xE67E22  # orange
 _COLOR_VILLAGES = 0x3498DB  # blue
+#: Semantic error color for failure alerts (same token family as the UI's
+#: ``--status-error``).
+ALERT_COLOR = 0xD47769
+_ALERT_REASON_MAX = 500  # generous one-line cap: far below Discord's 4096-char description
 
 #: Every embed a report can carry; ``sections`` must be a subset of this.
 REPORT_SECTIONS = frozenset({"summary", "regions", "standings", "villages"})
@@ -113,6 +118,32 @@ def build_report_embed(
     if "villages" in sections and (data.new_villages or data.lost_villages):
         embeds.append(_villages_embed(data, footer))
     return embeds
+
+
+def build_failure_alert(job: Literal["fetch", "report"], reason: str, occurred_at: str) -> discord.Embed:
+    """One alert embed for a terminal ``job`` failure (pure, unit-testable).
+
+    ``reason`` is normalized to a single line and capped so a long exception
+    cannot exceed Discord limits or produce a multi-line alert;
+    ``occurred_at`` is the UTC ISO failure timestamp. All user-facing text
+    lives in ``travian.strings``.
+    """
+    return discord.Embed(
+        title=strings.ALERT_TITLE,
+        description=strings.ALERT_DESCRIPTION.format(
+            job=job,
+            occurred_at=occurred_at,
+            reason=_normalize_reason(reason),
+        ),
+        color=ALERT_COLOR,
+    )
+
+
+def _normalize_reason(reason: str, max_len: int = _ALERT_REASON_MAX) -> str:
+    """Collapse ``reason`` to ONE line (whitespace/newlines → single spaces)
+    and truncate to ``max_len`` chars with a trailing ``…``."""
+    line = " ".join(reason.split())
+    return _truncate(line, max_len) if len(line) > max_len else line
 
 
 def _is_baseline(data: ReportData) -> bool:
