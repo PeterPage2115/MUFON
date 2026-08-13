@@ -121,6 +121,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from travian import analysis, store
+from travian.build_info import get_build_info
 from travian.dashboard import auth
 from travian.metrics import region_alliance_totals, region_stats, top_players, village_events
 from travian.models import RegionDay, VillageEvent
@@ -622,7 +623,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         # The static UI, the healthcheck probe and the whole /api/auth/*
         # surface stay public so the browser can load the page and log in
         # without credentials; every other /api/* route is protected.
-        return path == "/" or path == "/healthz" or path.startswith(("/static/", "/api/auth/"))
+        return path in ("/", "/healthz", "/api/meta") or path.startswith(("/static/", "/api/auth/"))
 
     def _rate_limited(path: str, method: str, key: str) -> bool:
         if not (path.startswith("/api/actions/") or (path == "/api/settings" and method == "PUT")):
@@ -677,6 +678,15 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         semantics of /api/status, without needing the Bearer header).
         """
         return {"status": "ok"}
+
+    def meta() -> dict[str, str]:
+        """Public build provenance: package version + injected build SHA.
+
+        Deliberately minimal — no env, tokens, DSN or settings — so the
+        payload can be served anonymously and diffed against the expected
+        image tag after a deployment.
+        """
+        return get_build_info(deps.env)
 
     def _admin_ok(request: Request) -> bool:
         """RBAC gate: token mode treats token possession as admin; oauth mode
@@ -1168,6 +1178,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.middleware("http")(_auth_middleware)
     _ = app.get("/")(index)
     _ = app.get("/healthz")(healthz)
+    _ = app.get("/api/meta")(meta)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     _ = app.get("/api/auth/status")(auth_status)

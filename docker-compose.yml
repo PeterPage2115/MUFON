@@ -2,10 +2,19 @@
 # Setup: `cp .env.example .env`, fill in DISCORD_TOKEN/CHANNEL_ID, then
 # `docker compose up -d`. The image is published to GHCR by CI (T15);
 # `build: .` lets you build locally for development.
+#
+# IMAGE_TAG selects the deployed image (default: latest). Deploy/rollback a
+# specific commit with `IMAGE_TAG=<full-sha> ./update.sh` — verify what runs
+# via GET /api/meta (build_sha must equal the tag).
 services:
   bot:
-    image: ghcr.io/peterpage2115/mufon:latest
-    build: .
+    image: ghcr.io/peterpage2115/mufon:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        # Local builds identify themselves as "dev" unless overridden;
+        # CI passes the real commit SHA.
+        BUILD_SHA: ${BUILD_SHA:-dev}
     restart: unless-stopped
     env_file: .env
     environment:

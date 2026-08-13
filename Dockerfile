@@ -35,6 +35,11 @@ FROM python:3.12-alpine
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/src /app/src
 
+# Build provenance: CI passes the commit SHA; local/dev builds stay "dev".
+# Exposed as TRAVIAN_BUILD_SHA → GET /api/meta (build_info.py).
+ARG BUILD_SHA=dev
+ENV TRAVIAN_BUILD_SHA=${BUILD_SHA}
+
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     # SQLite lives on the travian-data volume mounted at /data.

@@ -207,7 +207,7 @@ volume keeps the data.
 ### Updating
 
 ```bash
-./update.sh    # docker compose pull && docker compose up -d
+./update.sh    # docker compose pull && docker compose up -d (IMAGE_TAG=latest)
 ```
 
 The GHCR package is **public**, so `docker compose pull` works anonymously —
@@ -218,9 +218,25 @@ per server: `echo <PAT> | docker login ghcr.io -u PeterPage2115
 --password-stdin`, where `<PAT>` is a GitHub Personal Access Token with the
 `read:packages` scope).
 
+Every image carries its commit SHA: `GET /api/meta` (public, no auth)
+returns `{"version": ..., "build_sha": ...}` — the header bar of the
+dashboard shows `build_sha` too. The SHA tag (`ghcr.io/peterpage2115/mufon:<sha>`)
+is pushed by CI alongside `latest`, so a pinned deploy or a rollback to a
+known-good commit is `IMAGE_TAG=<full-sha> ./update.sh`.
+
+Recommended update sequence (deploy or rollback):
+
+1. **Back up** the SQLite database (see Backup) and note the **current**
+   `/api/meta` `build_sha`.
+2. `IMAGE_TAG=<nowy-sha> ./update.sh` (defaults to `latest` when unset).
+3. Verify: `GET /healthz` → 200, `GET /readyz` → 200, and `GET /api/meta`
+   → `build_sha` equals the deployed tag.
+4. On regression: `IMAGE_TAG=<poprzedni-sha> ./update.sh` and re-check the
+   same endpoints plus the data volume.
+
 New images are built by CI from `main` (the `build` workflow runs the full
-test suite + lint + type check before building, and smoke-tests `/healthz`
-on the pushed image).
+test suite + lint + type check before building, smoke-tests `/healthz`, and
+verifies `/api/meta` reports the pushed commit SHA).
 
 ## Development
 
@@ -244,7 +260,8 @@ DASHBOARD_LIVE_URL='http://<host>:8099' DASHBOARD_TOKEN='<token>' uv run pytest 
 
 The token (when set) is read from the environment only and never logged; the
 tests hit `/healthz`, the static UI, `/api/auth/status`, anonymous 401s and
-(read-only) `/api/status` + `/api/analysis/dates`.
+(read-only) `/api/status` + `/api/analysis/dates` + `/api/analysis/regions`.
+With `DASHBOARD_EXPECTED_SHA` set, `/api/meta` must report that exact SHA.
 
 CI runs exactly these gates on every push to `main` and every pull request
 (the `quality` job installs Chromium with `playwright install --with-deps`

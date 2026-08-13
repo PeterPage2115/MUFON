@@ -82,6 +82,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
           tags: |
             ghcr.io/peterpage2115/mufon:latest
             ghcr.io/peterpage2115/mufon:${{ github.sha }}
@@ -143,12 +145,27 @@ jobs:
             fi
             sleep 1
           done
-          docker rm -f "$container" > /dev/null 2>&1 || true
           if [ -z "$ok" ]; then
             echo "::error::/healthz never returned 200 within 60s"
             exit 1
           fi
           echo "smoke OK: /healthz returned 200"
+          # The same contract the operator checks after a deploy: /api/meta
+          # must report exactly the pushed commit SHA.
+          meta=$(curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:8090/api/meta") || {
+            echo "::error::/api/meta did not answer"
+            docker rm -f "$container" > /dev/null 2>&1 || true
+            exit 1
+          }
+          echo "meta: $meta"
+          expected="${{ github.sha }}"
+          actual=$(printf '%s' "$meta" | sed -n 's/.*"build_sha":"\([^"]*\)".*/\1/p')
+          docker rm -f "$container" > /dev/null 2>&1 || true
+          if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::build_sha mismatch: expected $expected, got '$actual'"
+            exit 1
+          fi
+          echo "provenance OK: build_sha matches $expected"
 
   secret-scan:
     runs-on: ubuntu-latest

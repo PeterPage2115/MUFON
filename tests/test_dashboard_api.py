@@ -1229,6 +1229,44 @@ class TestAuthMiddleware:
             assert client.get("/api/status").status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer sekret"}).status_code == 200
+
+
+class TestBuildMeta:
+    def test_meta_public_with_injected_sha(self, tmp_path: Path) -> None:
+        """Anonymous GET /api/meta in token mode: exact two-key payload, no secrets."""
+        db = tmp_path / "m.db"
+        _seed_db(db)
+        env = _env(
+            DASHBOARD_BIND="0.0.0.0",
+            DASHBOARD_TOKEN="sekret",
+            TRAVIAN_BUILD_SHA="abc123",
+            BACKFILL_DSN="postgres://user:pass@example/db",
+        )
+        with TestClient(_app(db, env)) as client:
+            resp = client.get("/api/meta")
+            assert resp.status_code == 200
+            assert resp.json() == {"version": "0.1.0", "build_sha": "abc123"}
+            # No env, tokens or settings leak into the public payload.
+            text = resp.text
+            assert "sekret" not in text
+            assert "test-token" not in text
+            assert "postgres://" not in text
+            assert "Authorization" not in text
+
+    def test_meta_defaults_to_dev_without_sha(self, tmp_path: Path) -> None:
+        db = tmp_path / "m.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.get("/api/meta")
+            assert resp.status_code == 200
+            assert resp.json() == {"version": "0.1.0", "build_sha": "dev"}
+
+    def test_meta_normalizes_blank_sha_to_dev(self, tmp_path: Path) -> None:
+        db = tmp_path / "m.db"
+        _seed_db(db)
+        env = _env(TRAVIAN_BUILD_SHA="   ")
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/meta").json()["build_sha"] == "dev"
 class TestAnalysisPlayers:
     def test_payload_shape_and_rankings(self, tmp_path: Path) -> None:
         db = tmp_path / "pl.db"

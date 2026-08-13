@@ -15,6 +15,7 @@
   var els = {
     headerSnapshot: document.querySelector("[data-header-snapshot]"),
     headerSource: document.querySelector("[data-header-source]"),
+    headerBuild: document.querySelector("[data-header-build]"),
     statusAlert: document.querySelector("[data-status-errors]"),
     statusValues: document.querySelectorAll("[data-status-value]"),
     metricGrid: document.querySelector(".metric-grid"),
@@ -175,6 +176,9 @@
   var api = {
     status: function () {
       return request("GET", "/api/status");
+    },
+    meta: function () {
+      return request("GET", "/api/meta");
     },
     settings: function () {
       return request("GET", "/api/settings");
@@ -2618,6 +2622,18 @@
     els.settingsForm.addEventListener("submit", submitSettings);
   }
 
+  // Public build provenance: best-effort, never blocks the dashboard.
+  function loadMeta() {
+    return api
+      .meta()
+      .then(function (meta) {
+        setText(els.headerBuild, meta.build_sha || "—");
+      })
+      .catch(function () {
+        setText(els.headerBuild, "—");
+      });
+  }
+
   // Auth-gated bootstrap: protected requests start only after
   // /api/auth/status settles, so a member's denied settings call can never
   // emit its misleading admin-required toast. `canManage` is true for
@@ -2653,6 +2669,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     wireForm();
     wireDashboardViews();
+    loadMeta();
     loadAuthStatus().then(function (status) {
       var canManage = canManageFromAuth(status);
       if (status && status.method === "oauth") {
