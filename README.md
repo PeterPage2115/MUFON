@@ -57,11 +57,12 @@ Product decisions, priorities and acceptance criteria live in
 ### Dashboard
 
 - **Views**: `Intelligence` (Regions, Alliances, Players, Events, Wars,
-  Changes, Compare, Villages — filterable per alliance and range
-  7/30/60 days, with CSV export; player rows and region rows open
-  per-snapshot history / village drill-downs), `Overview` (command
-  center + Status + Job log), `Operations` (Actions + Settings,
-  admin-only).
+  Changes, Compare, Watch, Roster, Villages — filterable per alliance
+  and range 7/30/60 days, with CSV export; player rows and region rows
+  open per-snapshot history / village drill-downs; Watch is a
+  dashboard-only feed of gains/losses/conquests/deletions that never
+  sends Discord), `Overview` (command center + Status + Job log),
+  `Operations` (Actions + Settings + run history, admin-only).
 - **Overview command center**: freshness, last successful fetch/report,
   tracked KPI with day-over-day deltas, top regions, movement and quick
   links — the same numbers the analysis tabs show, served by

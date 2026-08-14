@@ -79,9 +79,9 @@ Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następ
 
 ## 7. P2 — Watch & roster (jeden kontrolowany slice po P0/P1)
 
-- `GET /api/analysis/watch?from=&to=&alliance=&limit=200` — znormalizowany `items[]` (`kind`: village_gained/lost/conquest/deleted, `severity`: info/warning, daty, village_id, tagi, population, message); reuse `village_events` + `conquests_between`, zero nowych alertów, zero Discord sends; mniej niż 2 snapshoty = 200 empty.
+- [x] `GET /api/analysis/watch?from=&to=&alliance=&limit=200` — znormalizowany `items[]` (`kind`: village_gained/lost/conquest/deleted, `severity`: info/warning, daty, village_id, tagi, population, message); reuse `village_events` + `conquests_between`, zero nowych alertów, zero Discord sends; mniej niż 2 snapshoty = 200 empty.
 - Zakładka `Watch`: filtry severity/kind, liczniki, linki do Village/Region/Player detail; stany no-data/gap jawne; kolor nigdy jedynym sygnałem.
-- `GET /api/analysis/roster?date=&alliance=&limit=200` — SQL aggregate po `player_id` (`player_id`, `player_name`, `alliance_tag`, `villages`, `population`, `vp`, `growth`); klik gracza → player history; brak listy wiosek w roster row.
+- [x] `GET /api/analysis/roster?date=&alliance=&limit=200` — SQL aggregate po `player_id` (`player_id`, `player_name`, `alliance_tag`, `villages`, `population`, `vp`, `growth`); klik gracza → player history; brak listy wiosek w roster row.
 - Po tym slice'u nie zaczynamy interaktywnej mapy ani oficjalnych statusów regionów — snapshot map data nie daje `locked/contested/secured`; następny kierunek wymaga osobnego kontraktu.
 
 ## 8. Świadomie NIE w planie (YAGNI) + Framework decision gate
