@@ -1,5 +1,12 @@
 # Draft: travian-discord-report-bot
 
+> **Status: historia decyzji v1 (wykonane 2026-08-09 → 2026-08-13).** Ten draft
+> nie jest aktywnym planem. Aktywnym kontraktem produktowym jest `ROADMAP.md`
+> (wersja skonsolidowana 2026-08-14: current truth w §3, kolejność P0 trust/UX →
+> P1 Intelligence/Operations → P2 Watch/roster w §4–§7, YAGNI + Framework
+> decision gate w §8). Pozycje „OUT"/scope negatywny z tego draftu (m.in.
+> analytics dashboard, wykresy) zostały wdrożone — patrz `ROADMAP.md` §3.
+
 > NOTE: This draft was hand-written because the harness `task()` delegation is currently
 > broken (UnknownError on spawn), so the scaffold script and subagent reviews (metis/momus/oracle)
 > cannot run this session. Structure follows the ulw-plan template as closely as possible.

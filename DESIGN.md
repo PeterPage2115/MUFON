@@ -78,9 +78,10 @@ All spacing derives from a 4px base unit: `--space-1` 4px, `--space-2` 8px, `--s
 ### Grid
 
 - Content limiter: `min(100% - 32px, 1240px)` with 16px mobile margins and 32px desktop margins.
-- Desktop composition: a 12-column CSS grid; Status spans 7 columns, Settings spans 5, Actions spans 5, Job log spans 7. At 1100px and below it becomes two equal columns; below 680px it becomes one column.
+- **Three-view shell**: top-level tabs switch between `Intelligence` (analysis tabs), `Overview` (Status / Job log) and `Operations` (Actions / Settings, admin-only). One view is visible at a time; each view owns its tablist.
+- Desktop composition: a 12-column CSS grid on Overview; Status spans 12, Settings spans 8, Actions spans 4, Job log spans 12. At 1100px and below Settings and Actions become two equal columns (span 6); below 680px every card spans 1 column.
 - Breakpoints: two-column switch at 1100px, single column at 680px (no breakpoint tokens in CSS; media queries are raw by design).
-- The document owns page scroll. The Job log owns its own bounded vertical scroll (`max-height: 360px`) so a noisy run never pushes actions away.
+- The document owns page scroll. Nested scroll owners are bounded and described: Job log (`max-height: 360px`), standings options list, event lists, data tables, and the mobile tab bar. A table may own a horizontal scroll on narrow viewports instead of dropping columns.
 
 ## 5. Components
 
@@ -89,10 +90,20 @@ All spacing derives from a 4px base unit: `--space-1` 4px, `--space-2` 8px, `--s
 - **Structure**: `article.card` with a header row (`overline`, title, optional status mark) and content body.
 - **Variants**: status, settings, actions, job log; `.card--status` gets the gold signal rail.
 - **Spacing**: 24px desktop / 20px mobile card padding; 24px grid gap.
-- **States**: default, loading content, empty content, error content, focused descendants.
+- **States**: default, loading content, empty content, error content (message + visible `Retry` action), focused descendants.
 - **Accessibility**: semantic heading hierarchy; no card is the sole hit target for an action.
 - **Motion**: entry fade/translate only; no decorative looping motion.
-- **Layout**: CSS grid item; Job log list is the only nested scroll owner.
+- **Layout**: CSS grid item; Job log list is a bounded vertical scroll owner, not the only one (see §4).
+
+### Global Connection State
+
+- One persistent banner (`#global-status-banner`) reflects `online | degraded | offline`, derived from the last `/api/status` result: success sets `online` and records `last_good_load`; failure keeps the last good payload on screen, shows `Connection issue` with the time of the last good read and a Retry action. The dashboard never claims "connected" without a successful `/api/status`.
+- A single `Refresh dashboard` button (label `Retry dashboard` after a failure) re-reads status, the active analysis panel, and logs for admins; it does not reload the page and never overwrites a dirty settings form.
+- Data lifecycle is `initial load → load on view activation → refresh after action → manual Refresh`. There is no background polling after initial load; freshness never fakes itself up to date.
+
+### Chart Data Table
+
+- Every Chart.js canvas (`renderRegionChart`, `renderStandingsChart`, `renderVillageChart`) has a companion `<details>` `Show data table` containing a semantic table built from the exact chart payload (same dates, values, labels). The canvas gets `aria-describedby` pointing at the table; the table is keyboard/screen-reader reachable by default, may be visually collapsed, and never replaces the data. Tooltips are never the only way to read a chart.
 
 ### Metric Tile
 
@@ -150,7 +161,7 @@ All spacing derives from a 4px base unit: `--space-1` 4px, `--space-2` 8px, `--s
 - The mechanism is adapted from the beui `button`, `input`, `animated-toast-stack`, and `loader` patterns: async actions visibly swap to loading, then resolve through a single contextual toast.
 - Only `transform`, `opacity`, and color/filter transitions are used; layout dimensions never animate.
 - Respect `prefers-reduced-motion: reduce` by removing entry/press transforms and keeping state changes immediate.
-- Log refresh runs every 15 seconds: frequent enough for a live job console without competing with form editing or creating noisy network traffic.
+- Data refresh is manual and explicit: initial load, refresh on view activation, refresh after an action, and the `Refresh dashboard` button. Job log caption reads `Manual refresh · UTC`; there is no periodic refresh timer after initial load.
 
 ## 7. Depth & Surface
 

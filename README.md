@@ -56,16 +56,24 @@ Product decisions, priorities and acceptance criteria live in
 
 ### Dashboard
 
-- **Status / Settings / Actions / Logs** cards: live snapshot overview,
-  schedule + alliance configuration (stored in SQLite, overrides env),
-  manual "Fetch now" / "Send report now", and a live job console.
-- **Analysis**: Regions (share series + control table + chart + top
-  alliances per region), Alliances (population/VP series for tracked
-  alliances), Players (top players by population / growth / new villages),
-  Events (gained/lost between two dates), Changes (daily headline history
-  with deltas). Regions/Events/Changes/Players filter by alliance
-  (**Combined** = union of `ALLIANCE_TAGS`, or a single tag); CSV export on
-  Regions/Events/Changes.
+- **Views**: `Intelligence` (Regions, Alliances, Players, Events, Wars,
+  Changes, Villages — filterable per alliance, with CSV export), `Overview`
+  (Status + Job log), `Operations` (Actions + Settings, admin-only).
+- **Status / Job log**: snapshot overview, freshness (no-data/current/
+  stale/gap), last successful fetch/report, schedule + alliance
+  configuration (stored in SQLite, overrides env), and the job log with
+  `Manual refresh · UTC` — there is no background polling and no live
+  auto-updating console.
+- **Actions / Settings**: manual "Fetch now" / "Send report now" (each run
+  is tracked with a run ID), schedule and alliance configuration with
+  validation.
+- **Data freshness**: the dashboard loads once, refreshes when you open a
+  view, after an action, or via the explicit `Refresh dashboard` button
+  (`Retry dashboard` after an error). Snapshot intelligence is **not**
+  polled in the background; a scheduled fetch on the server never pushes to
+  an open tab — press Refresh to see a new snapshot. On a failed read the
+  last good payload stays on screen with the time of the last successful
+  load and a Retry path.
 
 ### Access control
 
@@ -123,12 +131,17 @@ default. Settings edited in the dashboard are stored in the DB and
 | `DASHBOARD_PORT` | `8090` | Dashboard port — env only. |
 | `DASHBOARD_TOKEN` | *(empty)* | Bearer token required in token mode — env only. |
 | `DASHBOARD_LOOPBACK_ONLY` | `false` | `true` forces loopback mode (no auth) — only safe with a loopback bind. |
-| `DASHBOARD_AUTH_MODE` | `token` | `token` (default) \| `oauth` \| `none`. `oauth` needs the `OAUTH_*` keys; `none` disables auth entirely. |
+| `DASHBOARD_AUTH_MODE` | `token` | `token` (default) \| `oauth` \| `none`. `oauth` needs the `OAUTH_*` keys; `none` disables auth entirely and is only allowed on a loopback bind — an explicit `none` with a non-loopback `DASHBOARD_BIND` fails closed at startup (process exits with a readable message). |
 | `OAUTH_CLIENT_ID` | *(empty)* | Discord application client ID (OAuth mode). |
 | `OAUTH_CLIENT_SECRET` | *(empty)* | Discord application client secret (OAuth mode) — env only. |
 | `OAUTH_GUILD_ID` | *(empty)* | Discord guild (server) whose members may log in (OAuth mode). |
 | `REPORT_EMBED_COLOR` | `0x2ECC71` | Embed accent color as a hex value (validated at startup). |
 | `BACKFILL_DSN` | *(empty)* | Read-only Postgres DSN of the source snapshot DB (see Backfill). |
+
+OAuth is **opt-in**: it is not required, and the dashboard falls back to
+token mode (with a warning) whenever any `OAUTH_*` key is missing while
+`oauth` is requested. Only enable it once the deployment has complete
+`OAUTH_*` keys.
 
 ## Commands
 
@@ -151,7 +164,7 @@ env:
 |---|---|
 | `token` (default) | Every API call needs `Authorization: Bearer <DASHBOARD_TOKEN>` (constant-time comparison). Whoever holds the token is admin. |
 | `oauth` | Discord OAuth login; guild members get a read-only view (Settings/Actions hidden). Full control goes to `ADMIN_ROLE_ID` holders, the server owner, and Discord Administrator / Manage Server permission holders. Actions rate-limited (6/minute/user). |
-| `none` | No auth — only sensible with a loopback bind. |
+| `none` | No auth — only allowed on a loopback bind; an explicit `none` with a non-loopback `DASHBOARD_BIND` fails closed at startup (process exits). |
 
 With `DASHBOARD_AUTH_MODE` unset, the legacy heuristic applies: non-loopback
 bind with `DASHBOARD_LOOPBACK_ONLY != "true"` → `token`, otherwise `none`.

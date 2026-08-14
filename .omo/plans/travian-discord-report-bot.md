@@ -1,5 +1,14 @@
 # travian-discord-report-bot - Work Plan
 
+> **Status: historia decyzji v1 (wykonane 2026-08-09 → 2026-08-13).** Ten plan
+> i jego sekcje „Future roadmap" / „OUT / Must-NOT-Have" NIE są aktywnymi
+> zadaniami. Aktywnym kontraktem produktowym jest `ROADMAP.md` (wersja
+> skonsolidowana 2026-08-14: current truth w §3, kolejność P0 trust/UX →
+> P1 Intelligence/Operations → P2 Watch/roster w §4–§7, YAGNI + Framework
+> decision gate w §8). Kilka pozycji „OUT"/„Future" zostało już wdrożonych
+> (analytics dashboard, wykresy, alerty, roster/watch w planie) — patrz
+> `ROADMAP.md` §3.
+
 ## TL;DR (For humans)
 
 Codzienny bot Discord raportujący stan sojuszu na serwerze Travian: Legends „Community Week x2 The Eternal War" (https://cw.x2.international.travian.com) + lokalny dashboard konfiguracyjny.
