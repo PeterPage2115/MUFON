@@ -247,6 +247,63 @@ code,
   border: 1px solid var(--border-default);
 }
 
+/* Global connection state: online only after a successful /api/status;
+   degraded/offline keep the last good payload on screen with a Retry path. */
+.connection-state--online .status-dot {
+  background: var(--status-success);
+  box-shadow: 0 0 8px rgba(145, 189, 120, 0.55);
+}
+
+.connection-state--offline .status-dot {
+  background: var(--status-error);
+  box-shadow: 0 0 8px rgba(212, 119, 105, 0.55);
+}
+
+.connection-state--degraded .status-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 8px rgba(214, 165, 82, 0.55);
+}
+
+.connection-state--online {
+  color: var(--status-success);
+}
+
+.connection-state--offline,
+.connection-state--degraded {
+  color: var(--status-error);
+  border-color: var(--status-error);
+}
+
+.global-status-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--status-error);
+  background: color-mix(in srgb, var(--status-error) 10%, var(--surface-secondary));
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.global-status-banner[hidden] {
+  display: none;
+}
+
+.global-status-banner__text {
+  overflow-wrap: anywhere;
+}
+
+.last-good-load {
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -325,6 +382,7 @@ code,
 .page-intro__signal {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
   flex: none;
   font-size: 0.75rem;
@@ -1369,9 +1427,20 @@ tr.is-inactive td {
 }
 
 .control-bar {
-  color: var(--accent-teal);
-  letter-spacing: 1px;
+  display: inline-block;
+  min-width: 96px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-gold-deep) var(--fill, 0%),
+    rgba(42, 51, 40, 0.55) var(--fill, 0%)
+  );
+  color: var(--on-accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -1712,6 +1781,62 @@ tr.is-inactive td {
   text-align: center;
 }
 
+/* Persistent per-panel error with an explicit Retry (ROADMAP.md §4): the
+   panel shows only the error block so the stale payload cannot contradict
+   the message. */
+.analysis-panel.is-error > :not(.panel-error) {
+  display: none;
+}
+
+.panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: var(--space-4) var(--space-6) var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--status-error);
+  background: color-mix(in srgb, var(--status-error) 10%, var(--surface-secondary));
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.panel-error__text {
+  overflow-wrap: anywhere;
+}
+
+/* Chart data tables: the textual fallback for every canvas — keyboard and
+   screen-reader reachable by default, visually collapsible. */
+.chart-data-table {
+  margin-top: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-input, 8px);
+  background: var(--surface-secondary);
+}
+
+.chart-data-table summary {
+  cursor: pointer;
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-gold-soft);
+}
+
+.chart-data-table summary:focus-visible {
+  outline: 2px solid var(--accent-gold-soft);
+  outline-offset: 2px;
+}
+
+.chart-data-table .data-table {
+  margin: 0;
+}
+
+.chart-data-table .data-table__wrap {
+  max-height: 220px;
+}
+
 /* --- Village explorer (search + history) --------------------------------------- */
 
 .village-search {
@@ -2023,6 +2148,18 @@ tr.is-inactive td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  /* The alliance filter never fits next to the Analysis title at 375 px —
+     it takes its own row instead of widening the document. */
+  .card__header {
+    flex-wrap: wrap;
+  }
+
+  .analysis-header-side {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
   .tab-bar__tab {
     flex: 1;
     text-align: center;
@@ -2033,13 +2170,15 @@ tr.is-inactive td {
     padding-inline: var(--space-3);
   }
 
-  /* Six analysis tabs must not squeeze their labels: the bar scrolls
-     horizontally instead (activateTab keeps the chosen tab in view). */
+  /* Both tab bars scroll locally on phones instead of widening the
+     document (the view bar too, not just the six analysis tabs). */
+  .tab-bar--views,
   .tab-bar--analysis {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
 
+  .tab-bar--views .tab-bar__tab,
   .tab-bar--analysis .tab-bar__tab {
     flex: 0 0 auto;
   }
@@ -2061,20 +2200,15 @@ tr.is-inactive td {
     height: 240px;
   }
 
-  /* Compact tables on phones: smaller type, and the regions table drops
-     the two rightmost columns (Δ % / To 50%) instead of overflowing — the
-     changes table keeps all 9 columns behind the horizontal scroller. */
+  /* Compact tables on phones: smaller type. The regions table keeps ALL
+     columns — the wrap scrolls horizontally instead of dropping Δ % /
+     To 50% (data must not disappear on mobile). */
   .data-table th {
     font-size: 0.75rem;
   }
 
   .data-table td {
     font-size: 0.8125rem;
-  }
-
-  .data-table--regions th:nth-child(n + 5),
-  .data-table--regions td:nth-child(n + 5) {
-    display: none;
   }
 
   .players-grid {

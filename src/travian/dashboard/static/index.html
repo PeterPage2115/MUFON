@@ -39,7 +39,9 @@
             <span class="meta-label">Build</span>
             <strong data-header-build>—</strong>
           </div>
-          <span class="connection-state"><span class="status-dot" aria-hidden="true"></span>Local service</span>
+          <span class="connection-state" data-connection-state role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span><span data-connection-text>Local service</span>
+          </span>
           <span class="user-chip" id="user-chip" hidden></span>
         </div>
       </div>
@@ -55,8 +57,18 @@
         <div class="page-intro__signal" aria-label="Dashboard refresh status">
           <span class="signal-line" aria-hidden="true"></span>
           <span>Synced from the bot process</span>
+          <button class="button button--outline button--small" type="button" id="refresh-dashboard" data-label="Refresh dashboard">
+            <span class="button-label">Refresh dashboard</span>
+            <span class="button-spinner" aria-hidden="true"></span>
+          </button>
+          <span class="last-good-load" id="last-good-load" hidden>Last good load: <span data-last-good-load>—</span></span>
         </div>
       </section>
+
+      <div class="global-status-banner" id="global-status-banner" role="status" aria-live="polite" hidden>
+        <span class="global-status-banner__text" data-global-banner-text></span>
+        <button class="button button--outline button--small" type="button" data-retry-dashboard hidden>Retry</button>
+      </div>
 
       <div class="tab-bar tab-bar--views" id="dashboard-view-tabs" role="tablist" aria-label="Dashboard views">
         <button class="tab-bar__tab" role="tab" id="dashboard-tab-intelligence" aria-controls="dashboard-panel-intelligence" aria-selected="true" tabindex="0">Intelligence</button>
@@ -112,6 +124,7 @@
                 <div class="chart-card">
                   <div class="chart-card__head">
                     <p class="overline">Share over time</p>
+                    <span class="card-caption" data-as-of="regions" hidden></span>
                     <label class="overline" for="analysis-region-select">Region</label>
                     <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
                   </div>
@@ -130,6 +143,7 @@
               <div class="chart-card">
                 <div class="chart-card__head">
                   <p class="overline">Tracked alliances</p>
+                  <span class="card-caption" data-as-of="standings" hidden></span>
                   <div class="segmented" role="group" aria-label="Chart metric">
                     <button class="segmented__btn" type="button" aria-pressed="true" data-metric="population">Population</button>
                     <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
@@ -369,6 +383,7 @@
                 <div class="chart-card" data-village-chart hidden>
                   <div class="chart-card__head">
                     <p class="overline">Population history</p>
+                    <span class="card-caption" data-as-of="village" hidden></span>
                   </div>
                   <div class="chart-card__canvas">
                     <canvas id="analysis-chart-village" role="img" aria-label="Village population over time"></canvas>
@@ -471,7 +486,7 @@
                 <p class="overline">Recent activity</p>
                 <h2 id="logs-title">Job log</h2>
               </div>
-              <span class="card-caption" id="log-refresh-note">Auto-refresh · 15s · UTC</span>
+              <span class="card-caption" id="log-refresh-note">Manual refresh · UTC</span>
             </header>
             <ol class="log-list" id="job-log" aria-live="polite" aria-busy="true">
               <li class="log-empty">Loading recent activity…</li>

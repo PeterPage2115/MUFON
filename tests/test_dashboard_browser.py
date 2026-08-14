@@ -212,6 +212,34 @@ def browser_app_token(tmp_path: Path) -> Generator[tuple[str, Browser], None, No
         thread.join(timeout=2)
 
 
+@pytest.fixture()
+def browser_app_no_tracked(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard with EMPTY TRACKED_ALLIANCES: the standings picker
+    must stay visible with the hint even though no defaults resolve."""
+    yield from _browser_app_with_auth(
+        tmp_path, auth_mode="none", token="", env_overrides={"TRACKED_ALLIANCES": ""}
+    )
+
+
+@pytest.fixture()
+def browser_app_oauth_member(tmp_path: Path, monkeypatch) -> Generator[tuple[str, Browser], None, None]:
+    """OAuth-mode dashboard where the logged-in user is a plain member.
+
+    The Discord HTTP surface is monkeypatched in-process (the uvicorn app
+    runs in a thread of this pytest process); the browser never talks to
+    Discord. The session is created through the real callback with a state
+    seeded via the app's module-level store — the exact flow the API tests
+    use, minus the redirect to discord.com.
+    """
+    from travian.dashboard import auth as dashboard_auth
+
+    monkeypatch.setattr(dashboard_auth, "exchange_code", lambda *a, **k: {"access_token": "at"})
+    monkeypatch.setattr(dashboard_auth, "fetch_user", lambda token: {"id": "u1", "username": "Tester"})
+    monkeypatch.setattr(dashboard_auth, "fetch_guild_member", lambda token, guild_id: {"roles": []})
+    monkeypatch.setattr(dashboard_auth, "fetch_guilds", lambda token: [])
+    yield from _browser_app_with_auth(tmp_path, auth_mode="oauth", token="")
+
+
 def _seed_empty_db(db: Path) -> None:
     """Schema only, no snapshots — the empty/no-data contract."""
     conn = store.connect(db)
@@ -257,17 +285,32 @@ def _browser_app_with_auth(
     token: str,
     bot_loop: asyncio.AbstractEventLoop | None = None,
     seed: Callable[[Path], None] = _seed_browser_db,
+    env_overrides: dict[str, str] | None = None,
 ) -> Generator[tuple[str, Browser], None, None]:
     db = tmp_path / "browser.db"
     seed(db)
+    port = _free_port()
     env = _env(db)
     env["DASHBOARD_AUTH_MODE"] = auth_mode
     env["DASHBOARD_TOKEN"] = token
+    if env_overrides:
+        env.update(env_overrides)
     if auth_mode == "token":
         # The middleware decides auth from env: with a loopback bind the
         # legacy heuristic resolves to "none" and the token is never checked.
         # A non-loopback bind (compose-style) makes the token mode real.
         env["DASHBOARD_BIND"] = "0.0.0.0"
+    if auth_mode == "oauth":
+        # Complete OAuth env: the app factory resolves real oauth mode; the
+        # Discord HTTP calls are monkeypatched by the oauth fixtures.
+        env.update(
+            {
+                "OAUTH_CLIENT_ID": "cid",
+                "OAUTH_CLIENT_SECRET": "csec",
+                "OAUTH_GUILD_ID": "100",
+                "OAUTH_PUBLIC_ORIGIN": f"http://127.0.0.1:{port}",
+            }
+        )
     get_config = _config_getter(db, env)
 
     async def no_fetch() -> str:
@@ -287,7 +330,6 @@ def _browser_app_with_auth(
             env=env,
         )
     )
-    port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -344,7 +386,7 @@ def test_filter_switch_players_events_standings_picker_and_limit(
     url, browser = browser_app
     page = browser.new_page()
     page.set_default_timeout(15000)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     # Regions is the default tab — wait for its first load to settle.
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
@@ -438,27 +480,25 @@ def test_filter_switch_players_events_standings_picker_and_limit(
 
 
 def test_overview_view_status_and_job_log(browser_app: tuple[str, Browser]) -> None:
-    """Overview tab: panel switching, KPI tiles and the admin job log render."""
+    """Role-aware landing: an admin/token operator starts on Overview; panel
+    switching, KPI tiles and the admin job log all render."""
     url, browser = browser_app
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
     page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_function(
-        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
-    )
 
-    # Intelligence is the initial view; Overview starts hidden.
-    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
-    assert page.get_attribute("#dashboard-panel-overview", "hidden") is not None
-
-    page.click("#dashboard-tab-overview")
+    # Overview is the initial view for admins/token (OAuth members land on
+    # Intelligence); Intelligence starts hidden.
+    assert page.get_attribute("#dashboard-panel-overview", "hidden") is None
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is not None
     page.wait_for_function(
         "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() !== '—'; }"
     )
-    assert page.get_attribute("#dashboard-panel-overview", "hidden") is None
-    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is not None
-    assert page.get_attribute("#dashboard-tab-overview", "aria-selected") == "true"
+
+    # A successful status read marks the connection online + last good load.
+    page.wait_for_function("() => !document.getElementById('last-good-load').hidden")
+    assert "Connected" in page.text_content("[data-connection-state]")
 
     # KPI tiles carry the seeded snapshot numbers (442 villages; distinct
     # player ids are 440: the seeded player ids 1000+i collide with the
@@ -488,11 +528,19 @@ def test_overview_view_status_and_job_log(browser_app: tuple[str, Browser]) -> N
         "() => document.getElementById('job-log').getAttribute('aria-busy') === 'false'"
     )
     assert page.text_content("#log-count").strip() == "No activity yet"
+    # The log caption documents the manual-refresh lifecycle.
+    assert page.text_content("#log-refresh-note").strip() == "Manual refresh · UTC"
 
-    # Back to Intelligence: the panel pair flips again.
+    # Into Intelligence: the panel pair flips; Regions is the default tab.
     page.click("#dashboard-tab-intelligence")
     assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
     assert page.get_attribute("#dashboard-panel-overview", "hidden") is not None
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Manual Refresh exists on the shell and is idle outside a request.
+    assert page.text_content("#refresh-dashboard .button-label").strip() == "Refresh dashboard"
     assert errors == []
     page.close()
 
@@ -503,7 +551,7 @@ def test_analysis_tabs_load_without_console_errors(browser_app: tuple[str, Brows
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
@@ -523,7 +571,7 @@ def test_village_explorer_search_and_history(browser_app: tuple[str, Browser]) -
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
@@ -562,7 +610,7 @@ def test_csv_exports_for_regions_and_changes(browser_app: tuple[str, Browser]) -
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => { const el = document.querySelector('[data-regions-body] tr'); return el; }"
     )
@@ -590,7 +638,7 @@ def test_empty_db_no_data_states(browser_app_empty: tuple[str, Browser]) -> None
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
 
     # Regions is the default tab: it settles and shows the no-data message.
     page.wait_for_function(
@@ -676,7 +724,7 @@ def test_empty_db_village_search_no_results(browser_app_empty: tuple[str, Browse
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
@@ -769,7 +817,7 @@ def test_wars_tab_matrix_drilldown_and_csv(browser_app_wars: tuple[str, Browser]
     page = browser.new_page()
     page.set_default_timeout(15000)
     errors = _collect_page_errors(page)
-    page.goto(url, wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.click("#tab-wars")
     page.wait_for_function(
         "() => document.getElementById('panel-wars').getAttribute('aria-busy') === 'false'"
@@ -803,4 +851,431 @@ def test_wars_tab_matrix_drilldown_and_csv(browser_app_wars: tuple[str, Browser]
         page.click('[data-export="wars"]')
     assert "wars-2026-08-07-2026-08-08.csv" in download_info.value.suggested_filename
     assert errors == []
+    page.close()
+
+
+# --- Faza 2/2a: trust & UX contracts -----------------------------------------
+#
+# Mobile reflow, keyboard navigation, chart data tables, connection banner +
+# Retry, panel Retry, OAuth member UI, sessionStorage token, settings save
+# flow (incl. invalid hex blocked pre-PUT and the dynamic alliance filter),
+# empty standings picker, from>=to stale-list clearing, semantic region
+# meter, and the no-background-polling request trace.
+
+def _install_request_counter(page: Page) -> None:
+    """Count fetch() calls per URL prefix from inside the page.
+
+    Installed as an init script so the counter survives navigations (e.g.
+    the token-dialog reload) and wraps the page's fetch before any dashboard
+    request fires.
+    """
+    page.add_init_script(
+        """
+        window.__reqCounts = {};
+        const origFetch = window.fetch;
+        window.fetch = function (input, init) {
+            const url = typeof input === 'string' ? input : input.url;
+            const key = url.split('?')[0];
+            window.__reqCounts[key] = (window.__reqCounts[key] || 0) + 1;
+            return origFetch.apply(this, arguments);
+        };
+        """
+    )
+
+
+def _count(page: Page, prefix: str) -> int:
+    return page.evaluate(
+        """(prefix) => {
+            let total = 0;
+            for (const key of Object.keys(window.__reqCounts || {})) {
+                if (key.includes(prefix)) total += window.__reqCounts[key];
+            }
+            return total;
+        }""",
+        prefix,
+    )
+
+
+def test_mobile_375_no_document_scroll_and_full_regions_table(browser_app: tuple[str, Browser]) -> None:
+    """375 px: the document never scrolls horizontally and the regions table
+    keeps the Δ % / To 50% columns behind its own local scroller."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.set_viewport_size({"width": 375, "height": 812})
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # No horizontal document scroll at 375 px.
+    offenders = page.evaluate(
+        "() => { const w = window.innerWidth; return Array.from(document.querySelectorAll('*'))"
+        ".filter((el) => el.getBoundingClientRect().right > w + 1)"
+        ".slice(0, 8).map((el) => el.tagName + '.' + String(el.className).split(' ')[0] + ' right=' + Math.round(el.getBoundingClientRect().right)); }"
+    )
+    print("OFFENDERS:", offenders)
+    no_overflow = page.evaluate(
+        "() => document.documentElement.scrollWidth <= window.innerWidth + 1"
+    )
+    assert no_overflow
+    # The table keeps every column; the wrap scrolls locally instead.
+    assert page.locator("[data-regions-body] tr").count() == 1
+    first_row_cells = page.locator("[data-regions-body] tr").first.locator("td")
+    assert first_row_cells.count() == 6
+    wrap = page.evaluate(
+        "() => { const el = document.querySelector('.data-table__wrap'); return el.scrollWidth > el.clientWidth; }"
+    )
+    assert wrap
+    # Δ % and To 50% are visible in the DOM (never display:none).
+    assert "%" in first_row_cells.nth(4).text_content()
+    page.close()
+
+
+def test_keyboard_arrow_home_end_navigation(browser_app: tuple[str, Browser]) -> None:
+    """ArrowRight/ArrowLeft/Home/End walk both tablists (top-level + analysis)."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Analysis tablist: ArrowRight from Regions activates Alliances.
+    page.focus("#tab-regions")
+    page.keyboard.press("ArrowRight")
+    assert page.get_attribute("#tab-alliances", "aria-selected") == "true"
+    page.keyboard.press("End")
+    assert page.get_attribute("#tab-villages", "aria-selected") == "true"
+    page.keyboard.press("Home")
+    assert page.get_attribute("#tab-regions", "aria-selected") == "true"
+    page.keyboard.press("ArrowLeft")
+    assert page.get_attribute("#tab-villages", "aria-selected") == "true"
+
+    # Top-level tablist: End jumps to the last visible view — for an admin
+    # that is Operations (the hidden-tab filter skips nothing here).
+    page.focus("#dashboard-tab-intelligence")
+    page.keyboard.press("End")
+    assert page.get_attribute("#dashboard-tab-operations", "aria-selected") == "true"
+    assert page.get_attribute("#dashboard-panel-operations", "hidden") is None
+    page.keyboard.press("Home")
+    assert page.get_attribute("#dashboard-tab-intelligence", "aria-selected") == "true"
+    page.close()
+
+
+def test_chart_data_table_textual_fallback(browser_app: tuple[str, Browser]) -> None:
+    """Every chart canvas describes its exact payload through a semantic
+    Show data table (regions + village) — tooltips are never the only read."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Regions chart: canvas describes the table; the table carries the dates.
+    assert page.get_attribute("#analysis-chart-regions", "aria-describedby") == "chart-data-regions"
+    page.click("#chart-data-regions summary")
+    head = page.text_content("#chart-data-regions thead")
+    assert "Date" in head and "Share" in head and "Our pop" in head and "Total pop" in head
+    body = page.text_content("#chart-data-regions tbody")
+    assert "2026-08-08" in body and "%" in body
+    # The data-as-of caption names the server-provided latest date.
+    assert "as of 2026-08-08" in page.text_content('[data-as-of="regions"]')
+
+    # Village chart table (history payload) — Village 1 exists on both days;
+    # its owner NOVA-P0 is a unique player-name match (population-ordered
+    # results would otherwise bury the two-day base village under 50 gains).
+    page.click("#tab-villages")
+    page.fill("#village-search-input", "NOVA-P0")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-villages-table]'); return el && !el.hidden; }"
+    )
+    page.click('[aria-label="Open history for Village 1"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-village-history-table]'); return el && !el.hidden; }"
+    )
+    assert page.get_attribute("#analysis-chart-village", "aria-describedby") == "chart-data-village"
+    page.click("#chart-data-village summary")
+    body = page.text_content("#chart-data-village tbody")
+    assert "2026-08-08" in body and "2026-08-07" in body
+    page.close()
+
+
+def test_connection_issue_banner_retry_and_stale_payload(browser_app: tuple[str, Browser]) -> None:
+    """A failed status read keeps the last good payload, shows the persistent
+    Connection issue banner with last-good time and a Retry that recovers."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    page.wait_for_function("() => !document.getElementById('last-good-load').hidden")
+    assert "Connected" in page.text_content("[data-connection-state]")
+
+    # Break /api/status, then force a read via the manual Refresh button.
+    page.route("**/api/status*", lambda route: route.abort())
+    page.click("#refresh-dashboard")
+    page.wait_for_function(
+        "() => document.getElementById('global-status-banner').hidden === false"
+    )
+    # The banner is the persistent, non-toast error path with a Retry label.
+    banner = page.text_content("[data-global-banner-text]")
+    assert "Connection issue" in banner
+    assert "Last good load:" in banner
+    assert page.text_content("#refresh-dashboard .button-label").strip() == "Retry dashboard"
+    assert "Connection issue" in page.text_content("[data-connection-state]")
+    # The last good payload stays visible — KPI values are never zeroed.
+    assert page.text_content('[data-status-value="villages"]').strip() == "442"
+
+    # Un-break and Retry: banner clears, connection returns, label resets.
+    page.unroute("**/api/status*")
+    page.click("#refresh-dashboard")
+    page.wait_for_function(
+        "() => document.getElementById('global-status-banner').hidden === true"
+    )
+    assert "Connected" in page.text_content("[data-connection-state]")
+    assert page.text_content("#refresh-dashboard .button-label").strip() == "Refresh dashboard"
+    page.close()
+
+
+def test_panel_error_retry_recovers(browser_app: tuple[str, Browser]) -> None:
+    """A failed analysis load renders a panel error with its own Retry —
+    tab switching is not the only recovery path."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.route("**/api/analysis/regions*", lambda route: route.abort())
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_selector("#panel-regions .panel-error", timeout=15000)
+    assert "Couldn't load analysis data." in page.text_content("#panel-regions .panel-error")
+    assert page.locator("#panel-regions .panel-error button", has_text="Retry").count() == 1
+
+    # Retry (route restored) recovers the table.
+    page.unroute("**/api/analysis/regions*")
+    page.click("#panel-regions .panel-error button")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-regions-body] tr'); return el; }"
+    )
+    assert page.locator("#panel-regions .panel-error").count() == 0
+    page.close()
+
+
+def test_oauth_member_landing_intelligence_and_readonly(browser_app_oauth_member: tuple[str, Browser]) -> None:
+    """OAuth member: lands on Intelligence, never sees Operations/logs, and
+    no /api/logs request is ever issued."""
+    from datetime import UTC, datetime, timedelta
+
+    from travian.dashboard import app as dashboard_app
+
+    url, browser = browser_app_oauth_member
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    _install_request_counter(page)
+    # Seed the OAuth state directly (the Discord redirect is external); the
+    # callback runs the real flow with monkeypatched Discord calls.
+    dashboard_app._store_oauth_state("browser-member-state", datetime.now(UTC) + timedelta(minutes=5))
+    page.goto(url + "/api/auth/callback?code=x&state=browser-member-state", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Member lands on Intelligence; Overview/Operations are out of reach.
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
+    assert page.get_attribute("#dashboard-panel-overview", "hidden") is not None
+    assert page.get_attribute("#dashboard-tab-operations", "hidden") is not None
+    # The user chip shows the member role.
+    assert "member" in page.text_content("#user-chip")
+    # Alliance filter is available (intelligence scope).
+    assert page.locator("#analysis-alliance-filter .segmented__btn").count() == 3
+
+    # The member session never requests /api/logs or settings.
+    assert _count(page, "/api/logs") == 0
+    assert _count(page, "/api/settings") == 0
+    assert errors == []
+    page.close()
+
+
+def test_token_stored_in_session_storage(browser_app_token: tuple[str, Browser]) -> None:
+    """The dashboard token lives in sessionStorage (same key), never
+    localStorage — it survives the tab reload but not the browser session."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    assert page.evaluate("() => sessionStorage.getItem('dashboard_token')") == "browser-smoke-test-token"
+    assert page.evaluate("() => localStorage.getItem('dashboard_token')") is None
+    page.close()
+
+
+def test_settings_save_dynamic_alliance_filter_and_invalid_hex_blocked(browser_app_token: tuple[str, Browser]) -> None:
+    """Full settings save flow: a new alliance tag appears in the analysis
+    filter after Save, and an invalid hex color is blocked BEFORE any PUT."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    _install_request_counter(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    page.click("#dashboard-tab-operations")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('ALLIANCE_TAGS'); return el && el.value.includes('NOVA'); }"
+    )
+
+    # Invalid hex: client-side validation blocks the PUT (no request).
+    before_puts = _count(page, "/api/settings")
+    page.fill("#REPORT_EMBED_COLOR_TEXT", "zzzzzz")
+    page.click("#save-settings")
+    assert "Color must be six hex digits" in page.text_content("#REPORT_EMBED_COLOR-error")
+    assert _count(page, "/api/settings") == before_puts
+    # The picker never accepted the invalid value (stays on the last valid).
+    assert page.input_value("#REPORT_EMBED_COLOR_TEXT") == "zzzzzz"  # user text kept for correction
+    page.fill("#REPORT_EMBED_COLOR_TEXT", "#D1A84A")
+
+    # Valid save with a new tag: feedback success, filter rebuilds later.
+    # One PUT + the post-save settings refresh GET (the save flow re-reads
+    # settings and status after writing).
+    page.fill("#ALLIANCE_TAGS", "NOVA\nENEMY\nFOO")
+    page.click("#save-settings")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('settings-feedback'); return el.textContent.includes('Settings saved'); }"
+    )
+    assert _count(page, "/api/settings") == before_puts + 2
+
+    # Back to Intelligence: the rebuilt filter includes the new tag.
+    page.click("#dashboard-tab-intelligence")
+    page.wait_for_function(
+        "() => { const btns = document.querySelectorAll('#analysis-alliance-filter .segmented__btn'); return btns.length === 4; }"
+    )
+    assert page.locator('[data-alliance="FOO"]').count() == 1
+    page.close()
+
+
+def test_standings_empty_selection_keeps_picker(browser_app_no_tracked: tuple[str, Browser]) -> None:
+    """Empty TRACKED_ALLIANCES: the picker stays visible with the hint (the
+    map's available tags are listed) — the user can always choose."""
+    url, browser = browser_app_no_tracked
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-alliances")
+    # available_tags come from the snapshot map (NOVA + ENEMY) while no
+    # defaults resolve — the picker must stay visible with the hint.
+    page.wait_for_function(
+        "() => document.getElementById('analysis-standings-feedback').textContent.includes('Select at least one alliance')"
+    )
+    assert page.locator("#analysis-standings-options label").count() == 2
+    assert not page.evaluate("() => document.getElementById('analysis-standings-options').offsetParent === null")
+    # Recovery: check one and apply — the chart returns.
+    page.check("#analysis-standings-options input[value='NOVA']")
+    page.click("#analysis-standings-apply")
+    page.wait_for_function(
+        "() => { const c = Chart.getChart(document.getElementById('analysis-chart-standings')); return c && c.data.datasets.length === 1; }"
+    )
+    assert _standings_labels(page) == ["NOVA"]
+    page.close()
+
+
+def test_events_from_equals_to_hides_stale_list(browser_app: tuple[str, Browser]) -> None:
+    """from >= to shows the controls error and hides the previous result —
+    the list never contradicts the message."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-events")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-events-gained-count]'); return el && el.textContent.trim() === '200 / 440'; }"
+    )
+    # Both selects to the same date → error + hidden grid.
+    page.select_option("#analysis-events-from", "2026-08-08")
+    page.select_option("#analysis-events-to", "2026-08-08")
+    assert page.evaluate("() => document.querySelector('.analysis-controls__error').hidden === false")
+    assert "From must be earlier than To." in page.text_content(".analysis-controls__error")
+    assert page.evaluate("() => document.querySelector('.events-grid').hidden === true")
+    page.close()
+
+
+def test_region_meter_is_semantic_progressbar(browser_app: tuple[str, Browser]) -> None:
+    """The control bar is a real progressbar with a visible percentage."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-regions-body] tr'); return el; }"
+    )
+    meter = page.locator("[data-regions-body] .control-bar").first
+    assert meter.get_attribute("role") == "progressbar"
+    assert meter.get_attribute("aria-valuemin") == "0"
+    assert meter.get_attribute("aria-valuemax") == "100"
+    assert meter.get_attribute("aria-valuenow") == "100.0"
+    assert meter.text_content() == "100.0%"
+    page.close()
+
+
+def test_no_background_polling_after_initial_load(browser_app: tuple[str, Browser]) -> None:
+    """Lifecycle contract: after the initial settle no /api/status or
+    /api/analysis/* request happens without view activation, action or the
+    manual Refresh; Refresh adds exactly one cycle."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    _install_request_counter(page)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    status0 = _count(page, "/api/status")
+    analysis0 = _count(page, "/api/analysis")
+    logs0 = _count(page, "/api/logs")
+
+    # 2 s of idle: nothing grows (no setInterval pollers).
+    page.wait_for_timeout(2000)
+    assert _count(page, "/api/status") == status0
+    assert _count(page, "/api/analysis") == analysis0
+    assert _count(page, "/api/logs") == logs0
+
+    # Entering a tab loads it exactly once.
+    page.click("#tab-players")
+    page.wait_for_function(
+        "() => document.getElementById('panel-players').getAttribute('aria-busy') === 'false'"
+    )
+    assert _count(page, "/api/analysis") == analysis0 + 1
+
+    # Manual Refresh: one status + one active-analysis + one logs cycle.
+    page.click("#refresh-dashboard")
+    page.wait_for_function(
+        "() => document.querySelector('#refresh-dashboard').getAttribute('aria-busy') === 'false'"
+    )
+    assert _count(page, "/api/status") == status0 + 1
+    assert _count(page, "/api/analysis") == analysis0 + 2
+    assert _count(page, "/api/logs") == logs0 + 1
+
+    # Idle again after the manual cycle.
+    page.wait_for_timeout(2000)
+    assert _count(page, "/api/status") == status0 + 1
+    assert _count(page, "/api/analysis") == analysis0 + 2
     page.close()

@@ -6,11 +6,14 @@
 (function () {
   "use strict";
 
-  var LOG_REFRESH_MS = 15000; // 15s: live job console without noisy traffic (DESIGN.md §6)
   var LOG_LIMIT = 50;
   var TOAST_DISMISS_MS = 4000; // DESIGN.md §5 Toast: auto-dismiss after 4s
   var TOAST_OUT_MS = 220; // matches --motion-standard
   var MAX_LOGS = 50;
+  //: Data lifecycle is initial load → view activation → after-action →
+  //: manual Refresh. There is deliberately NO background polling (see
+  //: DESIGN.md §Global Connection State / ROADMAP.md §4).
+  var VIEW_PREF_KEY = "mufon.dashboard.view.v1"; // role/URL state, never near the token
 
   var els = {
     headerSnapshot: document.querySelector("[data-header-snapshot]"),
@@ -31,12 +34,21 @@
     logUpdated: document.getElementById("log-updated"),
     logFooter: document.querySelector(".log-footer"),
     toastContainer: document.getElementById("toast-container"),
+    connectionState: document.querySelector("[data-connection-state]"),
+    connectionText: document.querySelector("[data-connection-text]"),
+    globalBanner: document.getElementById("global-status-banner"),
+    globalBannerText: document.querySelector("[data-global-banner-text]"),
+    retryButton: document.querySelector("[data-retry-dashboard]"),
+    refreshButton: document.getElementById("refresh-dashboard"),
+    lastGoodLoad: document.querySelector("[data-last-good-load]"),
+    lastGoodLoadWrap: document.getElementById("last-good-load"),
   };
 
   var currentSettings = null;
   var knownLogKeys = new Set();
   var logEls = {}; // logKey -> <li> element (avoids attribute-selector escaping issues)
   var actionInFlight = false;
+  var refreshInFlight = false;
   var SETTINGS_KEYS = [
     "ALLIANCE_TAGS", "TRACKED_ALLIANCES", "CHANNEL_ID", "ADMIN_ROLE_ID",
     "FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ",
@@ -157,7 +169,7 @@
 
   function request(method, url, payload) {
     var opts = { method: method, headers: { Accept: "application/json" } };
-    var token = localStorage.getItem(TOKEN_KEY);
+    var token = tokenStore.get();
     if (token) opts.headers["Authorization"] = "Bearer " + token;
     if (payload !== undefined) {
       opts.headers["Content-Type"] = "application/json";
@@ -217,10 +229,69 @@
   var TOKEN_KEY = "dashboard_token";
   var tokenDialogShown = false;
 
+  // The token lives in sessionStorage (same key as before): it survives a
+  // reload of the same tab but never persists after the browser session
+  // ends. OAuth sessions never touch storage (HttpOnly cookie). Unavailable
+  // or throwing storage degrades to in-memory — a fresh login dialog on the
+  // next load, never a crash.
+  var tokenStore = (function () {
+    var memory = null;
+    var supported = null;
+    function storage() {
+      if (supported === null) {
+        try {
+          var probe = window.sessionStorage;
+          probe.setItem("__travian_probe", "1");
+          probe.removeItem("__travian_probe");
+          supported = probe;
+        } catch (_e) {
+          supported = false;
+        }
+      }
+      return supported;
+    }
+    return {
+      get: function () {
+        var s = storage();
+        if (s) {
+          try {
+            var stored = s.getItem(TOKEN_KEY);
+            if (stored) return stored;
+          } catch (_e) {
+            /* fall through to memory */
+          }
+        }
+        return memory;
+      },
+      set: function (value) {
+        memory = value;
+        var s = storage();
+        if (s) {
+          try {
+            s.setItem(TOKEN_KEY, value);
+          } catch (_e) {
+            /* memory keeps it for this session */
+          }
+        }
+      },
+      remove: function () {
+        memory = null;
+        var s = storage();
+        if (s) {
+          try {
+            s.removeItem(TOKEN_KEY);
+          } catch (_e) {
+            /* nothing to clean */
+          }
+        }
+      },
+    };
+  })();
+
   // OAuth login lands on /?auth=success with the session in an HttpOnly
-  // cookie (never in the URL or localStorage) — just drop the marker.
-  // Token mode keeps the prompt + localStorage. A ?session= query string is
-  // never adopted.
+  // cookie (never in the URL or storage) — just drop the marker.
+  // Token mode keeps the prompt + sessionStorage. A ?session= query string
+  // is never adopted.
   var urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get("auth") || urlParams.get("auth_error")) {
     history.replaceState({}, "", window.location.pathname);
@@ -254,7 +325,7 @@
       request("POST", "/api/auth/logout")
         .catch(function () {}) // 401 on an already-dead session is fine
         .then(function () {
-          localStorage.removeItem(TOKEN_KEY);
+          tokenStore.remove();
           window.location.reload();
         });
     });
@@ -271,7 +342,7 @@
     // same-origin request automatically. Token mode: the stored bearer is
     // sent explicitly (the server resolves oauth sessions from the cookie).
     var headers = { Accept: "application/json" };
-    var token = localStorage.getItem(TOKEN_KEY);
+    var token = tokenStore.get();
     if (token) headers.Authorization = "Bearer " + token;
     return fetch("/api/auth/status", { headers: headers })
       .then(function (res) {
@@ -319,7 +390,7 @@
         return;
       }
       error.textContent = "";
-      localStorage.setItem(TOKEN_KEY, value);
+      tokenStore.set(value);
       window.location.reload(); // static UI is public — the reload then authenticates every API call
     });
     // The token is required to use the dashboard; Esc must not dismiss the dialog.
@@ -338,7 +409,7 @@
     // Same bearer handling as loadAuthStatus — the header only ever
     // refines the response, it never downgrades the dialog choice.
     var headers = { Accept: "application/json" };
-    var token = localStorage.getItem(TOKEN_KEY);
+    var token = tokenStore.get();
     if (token) headers.Authorization = "Bearer " + token;
     fetch("/api/auth/status", { headers: headers })
       .then(function (res) {
@@ -370,6 +441,92 @@
   }
 
   /* --- toasts ---------------------------------------------------------------- */
+
+  /* --- global connection state + manual refresh ---------------------------- */
+  //
+  // One source of truth for online/degraded/offline: a successful /api/status
+  // marks the dashboard online and records last_good_load; a failure keeps
+  // the last good payload on screen, shows the persistent banner with the
+  // last-good time and a Retry path. The dashboard never claims "connected"
+  // without a successful /api/status.
+
+  var connectionState = { online: false, lastGoodLoad: null, error: null };
+
+  function renderConnectionState(state) {
+    if (!els.connectionState) return;
+    els.connectionState.classList.remove(
+      "connection-state--online",
+      "connection-state--degraded",
+      "connection-state--offline"
+    );
+    els.connectionState.classList.add("connection-state--" + state);
+    var text = "Local service";
+    if (state === "online") text = "Connected";
+    else if (state === "degraded") text = "Connection issue";
+    else if (state === "offline") text = "Connection issue";
+    if (els.connectionText) setText(els.connectionText, text);
+  }
+
+  function renderGlobalError(message) {
+    if (!els.globalBanner) return;
+    setText(els.globalBannerText, message);
+    els.globalBanner.hidden = false;
+    els.globalBanner.setAttribute("role", "alert");
+    if (els.retryButton) els.retryButton.hidden = false;
+    // The shared button becomes Retry: same action, honest label.
+    if (els.refreshButton) {
+      var label = els.refreshButton.querySelector(".button-label");
+      if (label) setText(label, "Retry dashboard");
+    }
+  }
+
+  function clearGlobalError() {
+    if (!els.globalBanner) return;
+    els.globalBanner.hidden = true;
+    els.globalBanner.setAttribute("role", "status");
+    if (els.retryButton) els.retryButton.hidden = true;
+    if (els.refreshButton) {
+      var label = els.refreshButton.querySelector(".button-label");
+      if (label) setText(label, "Refresh dashboard");
+    }
+  }
+
+  function markLastGoodLoad() {
+    connectionState.lastGoodLoad = new Date();
+    if (els.lastGoodLoad) setText(els.lastGoodLoad, formatTime(connectionState.lastGoodLoad.toISOString()));
+    if (els.lastGoodLoadWrap) els.lastGoodLoadWrap.hidden = false;
+  }
+
+  function setRefreshBusy(busy) {
+    refreshInFlight = busy;
+    if (!els.refreshButton) return;
+    els.refreshButton.disabled = busy;
+    els.refreshButton.classList.toggle("is-loading", busy);
+    els.refreshButton.setAttribute("aria-busy", String(busy));
+  }
+
+  // The one manual refresh path: status + the admin job log + the active
+  // analysis panel. Never overwrites a dirty settings form (settings reload
+  // happens after Save or on Operations entry).
+  function refreshDashboard() {
+    if (refreshInFlight) return Promise.resolve();
+    setRefreshBusy(true);
+    var jobs = [loadStatus()];
+    if (dashboardState.canManage) jobs.push(loadLogs());
+    if (dashboardState.activeView === "intelligence") {
+      var loader = tabLoaders[activeTabName];
+      if (loader) jobs.push(loader());
+    }
+    return Promise.all(jobs)
+      .catch(function () {}) // failures are rendered by the individual loaders
+      .then(function () {
+        setRefreshBusy(false);
+      });
+  }
+
+  function retryDashboard() {
+    return refreshDashboard();
+  }
 
   function showToast(title, message, variant) {
     var toast = document.createElement("div");
@@ -571,14 +728,22 @@
 
   function renderAllianceFilter() {
     var filter = analysisElements().allianceFilter;
-    if (!filter || filter.dataset.rendered) return; // options are stable per process
-    filter.dataset.rendered = "1";
-    if (allianceTags.length < 2) {
+    if (!filter) return;
+    // Rebuild on EVERY change of alliance_tags: the options are not stable
+    // per process (settings can change them). A vanished selected tag
+    // resets to "combined" and the filtered payloads are marked for reload.
+    filter.textContent = "";
+    var tags = (allianceTags || []).slice();
+    if (tags.length < 2) {
       filter.hidden = true;
       return;
     }
+    if (analysisState.alliance !== "combined" && tags.indexOf(analysisState.alliance) === -1) {
+      analysisState.alliance = "combined";
+      markAllianceDirty();
+    }
     filter.hidden = false;
-    ["combined"].concat(allianceTags).forEach(function (tag) {
+    ["combined"].concat(tags).forEach(function (tag) {
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "segmented__btn";
@@ -586,6 +751,13 @@
       btn.setAttribute("aria-pressed", String(tag === analysisState.alliance));
       btn.textContent = tag === "combined" ? "Combined" : tag;
       filter.appendChild(btn);
+    });
+  }
+
+  // The filtered tabs load with the new filter on their next activation.
+  function markAllianceDirty() {
+    ["regions", "events", "changes", "players"].forEach(function (name) {
+      analysisState.dirtyTabs[name] = true;
     });
   }
 
@@ -601,15 +773,16 @@
       Array.prototype.forEach.call(filter.querySelectorAll(".segmented__btn"), function (b) {
         b.setAttribute("aria-pressed", String(b === btn));
       });
-      // Active tabs refetch with the new filter; inactive ones reset so the
-      // next activation loads with it (their loaders preserve the selection
-      // across refetches — regions keeps the region, events keeps from/to).
-      ["regions", "events", "changes", "players"].forEach(function (name) {
-        if (!activatedTabs[name]) return;
-        var panel = document.getElementById("panel-" + name);
-        if (panel && panel.getAttribute("aria-busy") === "true") return;
-        tabLoaders[name]();
-      });
+      // ONE refetch: only the active tab reloads right now; the other
+      // filtered tabs are marked dirty and load on their next activation.
+      markAllianceDirty();
+      if (activatedTabs[activeTabName] && tabLoaders[activeTabName]) {
+        var panel = document.getElementById("panel-" + activeTabName);
+        if (!panel || panel.getAttribute("aria-busy") !== "true") {
+          analysisState.dirtyTabs[activeTabName] = false;
+          tabLoaders[activeTabName]();
+        }
+      }
     });
   }
 
@@ -627,8 +800,14 @@
     var out = {};
     els.settingsForm.querySelectorAll("[data-setting-key]").forEach(function (el) {
       var key = el.getAttribute("data-setting-key");
+      if (key === "REPORT_EMBED_COLOR") return; // canonical input: the text field below
       out[key] = el.value;
     });
+    // The text input is the canonical color source: a type=color picker only
+    // ever yields a valid #rrggbb, so an invalid typed hex would be silently
+    // "accepted" (and ignored). validateSettings then blocks the PUT.
+    var colorText = document.getElementById("REPORT_EMBED_COLOR_TEXT");
+    out.REPORT_EMBED_COLOR = colorText ? colorText.value : "";
     return out;
   }
 
@@ -859,6 +1038,14 @@
       .then(function (results) {
         renderSettingsForm(results[0]);
         renderStatus(results[1]);
+        // Settings may have changed ALLIANCE_TAGS/TRACKED_ALLIANCES — every
+        // filtered payload is stale until re-entered or manually refreshed.
+        markAllianceDirty();
+        var activeLoader = tabLoaders[activeTabName];
+        if (dashboardState.activeView === "intelligence" && activeLoader && activatedTabs[activeTabName]) {
+          analysisState.dirtyTabs[activeTabName] = false;
+          activeLoader();
+        }
       })
       .catch(function (err) {
         if (saved) {
@@ -916,9 +1103,15 @@
       })
       .then(function () {
         // A fetch may create a snapshot; a report may fail on missing data —
-        // refresh status and logs either way so the console reflects reality.
-        return Promise.all([api.status(), api.logs()]).catch(function () {
-          return [null, null];
+        // refresh status, logs and the active analysis panel so the console
+        // reflects reality (on demand, never a background poller).
+        var jobs = [api.status(), api.logs()];
+        if (dashboardState.activeView === "intelligence") {
+          var loader = tabLoaders[activeTabName];
+          if (loader) jobs.push(loader());
+        }
+        return Promise.all(jobs).catch(function () {
+          return [null, null, null];
         });
       })
       .then(function (results) {
@@ -1066,6 +1259,7 @@
     villageDebounce: null,
     villageHistorySeq: 0, // same guard for history responses
     villageDays: 30,
+    dirtyTabs: {}, // alliance-filtered tabs pending reload on next activation
   };
   var allianceTags = [];
   var activatedTabs = {};
@@ -1160,6 +1354,7 @@
   }
 
   function showPanelEmpty(panel, message, alert) {
+    hidePanelError(panel);
     var state = panel.querySelector(".empty-state");
     if (!state) {
       state = document.createElement("p");
@@ -1181,6 +1376,38 @@
     if (state && !state.hasAttribute("data-events-empty") && !state.hasAttribute("data-wars-empty")) {
       if (state.parentNode) state.parentNode.removeChild(state);
     }
+  }
+
+  // Persistent per-panel error state with an explicit Retry action — tab
+  // switching must never be the only way to recover (ROADMAP.md §4).
+  function showPanelError(panel, message, retry) {
+    hidePanelEmpty(panel);
+    var state = panel.querySelector(".panel-error");
+    if (!state) {
+      state = document.createElement("div");
+      state.className = "panel-error";
+      panel.appendChild(state);
+    }
+    state.textContent = "";
+    var text = document.createElement("span");
+    text.className = "panel-error__text";
+    text.textContent = message;
+    state.appendChild(text);
+    if (retry) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "button button--outline button--small";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", retry);
+      state.appendChild(btn);
+    }
+    panel.classList.add("is-error");
+  }
+
+  function hidePanelError(panel) {
+    panel.classList.remove("is-error");
+    var state = panel.querySelector(".panel-error");
+    if (state && state.parentNode) state.parentNode.removeChild(state);
   }
 
   function showChartUnavailable(card) {
@@ -1309,11 +1536,60 @@
     tbody.appendChild(tr);
   }
 
+  /* Chart data tables — the textual fallback for every Chart.js canvas
+     (ROADMAP.md §4): a <details> holding a semantic table built from the
+     exact chart payload. The canvas describes it via aria-describedby; the
+     table may be visually collapsed but is never replaced by tooltips. */
+
+  function fillChartDataTable(card, id, headers, rows) {
+    var details = card.querySelector(".chart-data-table");
+    if (!details) {
+      details = document.createElement("details");
+      details.className = "chart-data-table";
+      details.id = id;
+      var summary = document.createElement("summary");
+      summary.textContent = "Show data table";
+      details.appendChild(summary);
+      var wrap = document.createElement("div");
+      wrap.className = "data-table__wrap";
+      var table = document.createElement("table");
+      table.className = "data-table";
+      table.appendChild(document.createElement("thead"));
+      table.appendChild(document.createElement("tbody"));
+      wrap.appendChild(table);
+      details.appendChild(wrap);
+      card.appendChild(details);
+    }
+    var head = details.querySelector("thead");
+    head.textContent = "";
+    var headRow = document.createElement("tr");
+    headers.forEach(function (h) {
+      var th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    head.appendChild(headRow);
+    var body = details.querySelector("tbody");
+    body.textContent = "";
+    rows.forEach(function (cells) {
+      var tr = document.createElement("tr");
+      cells.forEach(function (value) {
+        var td = document.createElement("td");
+        td.textContent = value === null || value === undefined ? "\u2014" : String(value);
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    return details;
+  }
+
   /* Regions tab */
 
   function loadRegions() {
     var panel = document.getElementById("panel-regions");
     var els = analysisElements();
+    hidePanelError(panel);
     setPanelBusy("regions", true);
     tableLoading(els.regionsBody, 6);
     return api
@@ -1324,7 +1600,7 @@
       })
       .catch(function (err) {
         setPanelBusy("regions", false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadRegions);
         activatedTabs.regions = false; // next activation retries
       });
   }
@@ -1391,10 +1667,17 @@
     tdRegion.textContent = row.region;
 
     var tdControl = document.createElement("td");
-    var fills = Math.min(6, Math.round(row.share * 6));
+    // Semantic meter: real progressbar semantics with a visible percentage —
+    // never a color-only or glyph-only signal (ROADMAP.md §4 / DESIGN §8).
     var bar = document.createElement("span");
     bar.className = "control-bar";
-    bar.textContent = new Array(fills + 1).join("\u2593") + new Array(6 - fills + 1).join("\u2591");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    bar.setAttribute("aria-valuenow", (row.share * 100).toFixed(1));
+    bar.setAttribute("aria-label", "Control share for " + row.region);
+    bar.style.setProperty("--fill", (row.share * 100).toFixed(1) + "%");
+    bar.textContent = (row.share * 100).toFixed(1) + "%";
     tdControl.appendChild(bar);
 
     var tdShare = document.createElement("td");
@@ -1471,14 +1754,7 @@
   function renderRegionChart(region) {
     var panel = document.getElementById("panel-regions");
     var els = analysisElements();
-    if (!window.Chart) {
-      showChartUnavailable(panel.querySelector(".chart-card"));
-      return;
-    }
     var card = panel.querySelector(".chart-card");
-    card.classList.remove("is-empty");
-    var stale = card.querySelector(".empty-state");
-    if (stale) stale.remove();
     var dates = analysisState.regionsDates;
     var points = analysisState.regionsSeries[region] || [];
     var byDate = {};
@@ -1493,7 +1769,37 @@
       rows.push(p ? { our_pop: p.our_pop, total_pop: p.total_pop } : null);
     });
 
+    // Textual fallback: the exact payload as a semantic table — the canvas
+    // describes it, tooltips are never the only way to read the chart.
+    var tableHeaders = ["Date", "Share", "Our pop", "Total pop"];
+    var tableRows = dates.map(function (d, i) {
+      var p = byDate[d];
+      return [
+        d,
+        p ? (p.share * 100).toFixed(1) + "%" : "—",
+        p ? fmtInt(p.our_pop) : "—",
+        p ? fmtInt(p.total_pop) : "—",
+      ];
+    });
+    var tableDetails = fillChartDataTable(card, "chart-data-regions", tableHeaders, tableRows);
+    var asOf = dates.length ? dates[dates.length - 1] : null;
+    var asOfEl = document.querySelector('[data-as-of="regions"]');
+    if (asOfEl) {
+      asOfEl.hidden = !asOf;
+      if (asOf) setText(asOfEl, "as of " + asOf);
+    }
+
+    if (!window.Chart) {
+      showChartUnavailable(card);
+      tableDetails.open = true;
+      return;
+    }
+    card.classList.remove("is-empty");
+    var stale = card.querySelector(".empty-state");
+    if (stale) stale.remove();
+
     els.regionCanvas.setAttribute("aria-label", "Share of population over time for " + region);
+    els.regionCanvas.setAttribute("aria-describedby", tableDetails.id);
     renderRegionTop(region);
 
     var chart = analysisState.charts.regions;
@@ -1551,12 +1857,16 @@
 
   function loadStandings() {
     var panel = document.getElementById("panel-alliances");
+    hidePanelError(panel);
     var selection = analysisState.standingsSelection;
     if (selection !== null && !selection.length) {
-      // Explicit empty selection (or no resolvable defaults with a live
-      // snapshot): nothing to chart — the picker shows the validation hint.
+      // Explicit empty selection: nothing to chart — keep the picker
+      // visible with its validation hint (an .is-empty state would hide it,
+      // making recovery impossible).
       setPanelBusy("alliances", false);
-      showPanelEmpty(panel, "Select at least one alliance.");
+      hidePanelEmpty(panel);
+      renderStandingsPicker();
+      updateStandingsFeedback();
       return Promise.resolve();
     }
     setPanelBusy("alliances", true);
@@ -1585,7 +1895,23 @@
         if (!dates.length) {
           showPanelEmpty(panel, "No data yet.");
         } else if (!series.length) {
-          showPanelEmpty(panel, "Select at least one alliance.");
+          if ((analysisState.standingsTags || []).length) {
+            // Tags exist but none are selected/defaulted: keep the picker
+            // visible with the hint — the user must be able to choose. The
+            // chart card's loading/empty state must go, or it hides the
+            // picker (ROADMAP.md §4 picker fix).
+            hidePanelEmpty(panel);
+            var chartCard = panel.querySelector(".chart-card");
+            if (chartCard) {
+              chartCard.classList.remove("is-empty");
+              var staleState = chartCard.querySelector(".empty-state");
+              if (staleState && staleState.parentNode) staleState.parentNode.removeChild(staleState);
+            }
+            renderStandingsPicker();
+            updateStandingsFeedback();
+          } else {
+            showPanelEmpty(panel, "No data yet.");
+          }
         } else {
           hidePanelEmpty(panel);
           renderStandingsChart();
@@ -1594,7 +1920,7 @@
       })
       .catch(function (err) {
         setPanelBusy("alliances", false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadStandings);
         activatedTabs.alliances = false;
       });
   }
@@ -1714,20 +2040,46 @@
     var panel = document.getElementById("panel-alliances");
     var els = analysisElements();
     var card = panel.querySelector(".chart-card");
-    card.classList.remove("is-empty");
-    var stale = card.querySelector(".empty-state");
-    if (stale) stale.remove();
-    if (!window.Chart) {
-      showPanelEmpty(panel, "Chart library unavailable.");
-      return;
-    }
     var dates = payload.dates || [];
     var series = payload.series || [];
     var metric = analysisState.metric;
+
+    // Textual fallback with the exact payload: one column per series.
+    var tableHeaders = ["Date"].concat(series.map(function (row) {
+      return row.tag;
+    }));
+    var tableRows = dates.map(function (d) {
+      var cells = [d];
+      series.forEach(function (row) {
+        var byDate = {};
+        (row[metric === "vp" ? "vp_points" : "points"] || []).forEach(function (pair) {
+          byDate[pair[0]] = pair[1];
+        });
+        cells.push(byDate[d] !== undefined ? fmtInt(byDate[d]) : "—");
+      });
+      return cells;
+    });
+    var tableDetails = fillChartDataTable(card, "chart-data-standings", tableHeaders, tableRows);
+    var asOf = dates.length ? dates[dates.length - 1] : null;
+    var asOfEl = document.querySelector('[data-as-of="standings"]');
+    if (asOfEl) {
+      asOfEl.hidden = !asOf;
+      if (asOf) setText(asOfEl, "as of " + asOf);
+    }
+
+    if (!window.Chart) {
+      showPanelEmpty(panel, "Chart library unavailable.");
+      tableDetails.open = true;
+      return;
+    }
+    card.classList.remove("is-empty");
+    var stale = card.querySelector(".empty-state");
+    if (stale) stale.remove();
     els.standingsCanvas.setAttribute(
       "aria-label",
       (metric === "vp" ? "Victory points" : "Population") + " over time for selected alliances"
     );
+    els.standingsCanvas.setAttribute("aria-describedby", tableDetails.id);
 
     var chart = analysisState.charts.alliances;
     if (chart) {
@@ -1755,6 +2107,7 @@
 
   function loadPlayers() {
     var panel = document.getElementById("panel-players");
+    hidePanelError(panel);
     setPanelBusy("players", true);
     return api
       .analysis("players", {})
@@ -1764,7 +2117,7 @@
       })
       .catch(function (err) {
         setPanelBusy("players", false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadPlayers);
         activatedTabs.players = false; // next activation retries
       });
   }
@@ -1833,6 +2186,7 @@
   function loadEvents() {
     var panel = document.getElementById("panel-events");
     var els = analysisElements();
+    hidePanelError(panel);
     setPanelBusy("events", true);
     setEventsBusy(true);
     return api
@@ -1869,7 +2223,7 @@
       .catch(function (err) {
         setPanelBusy("events", false);
         setEventsBusy(false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadEvents);
         activatedTabs.events = false;
       });
   }
@@ -1959,6 +2313,7 @@
   function loadWars() {
     var panel = document.getElementById("panel-wars");
     var els = analysisElements();
+    hidePanelError(panel);
     setPanelBusy("wars", true);
     setWarsBusy(true);
     return api
@@ -1995,7 +2350,7 @@
       .catch(function (err) {
         setPanelBusy("wars", false);
         setWarsBusy(false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadWars);
         activatedTabs.wars = false;
       });
   }
@@ -2151,6 +2506,7 @@
   function loadChanges() {
     var panel = document.getElementById("panel-changes");
     var els = analysisElements();
+    hidePanelError(panel);
     setPanelBusy("changes", true);
     tableLoading(els.changesBody, 9);
     return api
@@ -2173,7 +2529,7 @@
       })
       .catch(function (err) {
         setPanelBusy("changes", false);
-        showPanelEmpty(panel, "Couldn't load analysis data.", true);
+        showPanelError(panel, "Couldn't load analysis data.", loadChanges);
         activatedTabs.changes = false;
       });
   }
@@ -2206,6 +2562,7 @@
   // (and superseded inputs) silently ignored.
   function requestVillages(query) {
     var seq = ++analysisState.villageQuerySeq;
+    hidePanelError(document.getElementById("panel-villages"));
     setPanelBusy("villages", true);
     return api
       .analysis("villages", { q: query, limit: 50 })
@@ -2217,6 +2574,10 @@
       .catch(function (err) {
         if (seq !== analysisState.villageQuerySeq) return;
         setPanelBusy("villages", false);
+        var panel = document.getElementById("panel-villages");
+        if (panel) showPanelError(panel, "Village search failed.", function () {
+          return requestVillages((analysisElements().villagesInput.value || "").trim());
+        });
         showToast("Village search failed", err.message, "error");
       });
   }
@@ -2403,20 +2764,37 @@
   // One gold population line chart per village; updated in place on reopen.
   function renderVillageChart(history, name) {
     var els = analysisElements();
-    if (!window.Chart) {
-      els.villageChartCard.hidden = true;
-      els.villageDetailNote.hidden = false;
-      setText(els.villageDetailNote, "Chart library unavailable.");
-      return;
-    }
-    els.villageChartCard.hidden = false;
     var labels = history.map(function (p) {
       return p.snapshot_date;
     });
     var data = history.map(function (p) {
       return p.population;
     });
+    // Textual fallback from the exact history payload.
+    var tableDetails = fillChartDataTable(
+      els.villageChartCard,
+      "chart-data-village",
+      ["Snapshot", "Population"],
+      history.map(function (p) {
+        return [p.snapshot_date, fmtInt(p.population)];
+      })
+    );
+    var asOf = labels.length ? labels[labels.length - 1] : null;
+    var asOfEl = document.querySelector('[data-as-of="village"]');
+    if (asOfEl) {
+      asOfEl.hidden = !asOf;
+      if (asOf) setText(asOfEl, "as of " + asOf);
+    }
+    if (!window.Chart) {
+      els.villageChartCard.hidden = false;
+      els.villageDetailNote.hidden = false;
+      setText(els.villageDetailNote, "Chart library unavailable.");
+      tableDetails.open = true;
+      return;
+    }
+    els.villageChartCard.hidden = false;
     els.villageCanvas.setAttribute("aria-label", "Population history for " + name);
+    els.villageCanvas.setAttribute("aria-describedby", tableDetails.id);
     var chart = analysisState.charts.village;
     if (chart) {
       chart.data.labels = labels;
@@ -2647,6 +3025,9 @@
     if (!activatedTabs[name]) {
       activatedTabs[name] = true;
       tabLoaders[name]();
+    } else if (analysisState.dirtyTabs[name]) {
+      analysisState.dirtyTabs[name] = false;
+      tabLoaders[name]();
     } else {
       var chart = analysisState.charts[name];
       if (chart) chart.resize();
@@ -2714,7 +3095,11 @@
       if (from >= to) {
         setText(els.eventsError, "From must be earlier than To.");
         els.eventsError.hidden = false;
-        return; // keep the previous lists
+        // The stale list must not contradict the message: hide it.
+        els.eventsGrid.hidden = true;
+        els.eventsEmpty.hidden = true;
+        setExportEnabled("events", false);
+        return;
       }
       els.eventsError.hidden = true;
       analysisState.from = from;
@@ -2749,6 +3134,10 @@
       if (from >= to) {
         setText(els.warsError, "From must be earlier than To.");
         els.warsError.hidden = false;
+        els.warsMatrix.hidden = true;
+        els.warsDetail.hidden = true;
+        els.warsEmpty.hidden = true;
+        setExportEnabled("wars", false);
         return; // keep the previous lists
       }
       els.warsError.hidden = true;
@@ -2857,14 +3246,23 @@
       });
       return;
     }
+    if (name === "overview") {
+      // Refresh on view activation: status + the admin job log (on demand,
+      // never a background poller).
+      loadStatus();
+      if (dashboardState.canManage) loadLogs();
+      return;
+    }
     if (name === "operations" && dashboardState.canManage) {
       // First selection only: manual actions are wired and Settings loaded
-      // for a manageable user; both stay untouched for members.
+      // for a manageable user; both stay untouched for members. The job log
+      // is loaded on demand so the run history is current.
       if (!dashboardState.operationsInitialized) {
         dashboardState.operationsInitialized = true;
         wireActionButtons();
         loadSettings();
       }
+      loadLogs();
     }
   }
 
@@ -2913,8 +3311,20 @@
   /* --- init --------------------------------------------------------------------- */
 
   function loadStatus() {
-    return api.status().then(renderStatus).catch(function (err) {
+    return api.status().then(function (data) {
+      connectionState.online = true;
+      connectionState.error = null;
+      renderConnectionState("online");
+      clearGlobalError();
+      markLastGoodLoad();
+      renderStatus(data);
+    }).catch(function (err) {
       els.metricGrid.setAttribute("aria-busy", "false");
+      connectionState.online = false;
+      connectionState.error = err;
+      renderConnectionState("offline");
+      var last = connectionState.lastGoodLoad ? " Last good load: " + formatTime(connectionState.lastGoodLoad.toISOString()) : "";
+      renderGlobalError("Connection issue — the last status read failed." + last);
       showToast("Status unavailable", err.message, "error");
     });
   }
@@ -2974,31 +3384,46 @@
   // emit its misleading admin-required toast. `canManage` is true for
   // admins, token mode and no-auth mode; a confirmed OAuth member gets the
   // read-only flows (status, analysis) only — logs stay admin-only and are
-  // neither fetched nor polled for members.
+  // never fetched for members.
+  //
+  // Data lifecycle: initial load → refresh on view activation → refresh
+  // after action → manual Refresh. There is no background polling.
   function startDashboardData(canManage) {
     setDashboardAccess(canManage);
-    // Status powers the top bar and Overview; the raw Job log is admin-only
-    // (a member polling it would emit a 403 toast every 15 s).
     loadStatus();
-    if (canManage) {
-      loadLogs();
-      window.setInterval(loadLogs, LOG_REFRESH_MS);
+    // Role-aware landing: an OAuth member starts in Intelligence; admins /
+    // token operators start in Overview. An explicit, valid ?view= URL wins
+    // over the role default (invalid values fall back safely).
+    var view = resolveInitialView(canManage);
+    if (view === "intelligence") {
+      activateDashboardView("intelligence");
+      var tab = resolveInitialTab();
+      if (tab) activateTab(tab);
+    } else {
+      activateDashboardView(view);
     }
-    // Live status refreshes every minute regardless of the active view.
-    window.setInterval(loadStatus, 60000);
-    // The active-analysis refresh runs only while Intelligence is active:
-    // hidden panels have nothing to keep warm, and a hidden-panel update
-    // would size the chart at zero width.
-    window.setInterval(function () {
-      if (dashboardState.activeView !== "intelligence") return;
-      var panel = document.getElementById("panel-" + activeTabName);
-      if (!panel || panel.getAttribute("aria-busy") === "true") return;
-      var loader = tabLoaders[activeTabName];
-      if (loader) loader();
-    }, 60000);
-    // Intelligence is the initial view — analysis wires itself (and issues
-    // its default Regions request) on this first activation, exactly once.
-    activateDashboardView("intelligence");
+    if (els.refreshButton) {
+      els.refreshButton.addEventListener("click", refreshDashboard);
+    }
+    if (els.retryButton) {
+      els.retryButton.addEventListener("click", retryDashboard);
+    }
+  }
+
+  function resolveInitialView(canManage) {
+    var urlView = new URLSearchParams(window.location.search).get("view");
+    if (urlView === "intelligence" || urlView === "overview" || urlView === "operations") {
+      if (urlView === "operations" && !canManage) return "overview";
+      return urlView;
+    }
+    return canManage ? "overview" : "intelligence";
+  }
+
+  function resolveInitialTab() {
+    var tabName = new URLSearchParams(window.location.search).get("tab");
+    if (!tabName || !tabLoaders[tabName]) return null;
+    var tab = document.getElementById("tab-" + tabName);
+    return tab && !tab.hidden ? tab : null;
   }
 
   document.addEventListener("DOMContentLoaded", function () {
@@ -3026,7 +3451,7 @@
       // stored token the admin-only surface stays hidden and no protected
       // request is issued before the user unlocks (the dialog's reload
       // re-enters this bootstrap with the token stored).
-      if (status && status.method === "token" && !localStorage.getItem(TOKEN_KEY)) {
+      if (status && status.method === "token" && !tokenStore.get()) {
         setDashboardAccess(false);
         showTokenDialog();
         return;
