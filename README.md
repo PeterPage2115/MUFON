@@ -57,8 +57,15 @@ Product decisions, priorities and acceptance criteria live in
 ### Dashboard
 
 - **Views**: `Intelligence` (Regions, Alliances, Players, Events, Wars,
-  Changes, Villages — filterable per alliance, with CSV export), `Overview`
-  (Status + Job log), `Operations` (Actions + Settings, admin-only).
+  Changes, Compare, Villages — filterable per alliance and range
+  7/30/60 days, with CSV export; player rows and region rows open
+  per-snapshot history / village drill-downs), `Overview` (command
+  center + Status + Job log), `Operations` (Actions + Settings,
+  admin-only).
+- **Overview command center**: freshness, last successful fetch/report,
+  tracked KPI with day-over-day deltas, top regions, movement and quick
+  links — the same numbers the analysis tabs show, served by
+  `/api/analysis/overview`.
 - **Status / Job log**: snapshot overview, freshness (no-data/current/
   stale/gap), last successful fetch/report, schedule + alliance
   configuration (stored in SQLite, overrides env), and the job log with

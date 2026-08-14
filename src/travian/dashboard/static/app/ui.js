@@ -46,6 +46,7 @@ export const state = {
     charts: {},
     metric: "population",
     alliance: "combined",
+    days: 30,
     region: null,
     from: null,
     to: null,
@@ -62,6 +63,12 @@ export const state = {
     villageDebounce: null,
     villageHistorySeq: 0, // same guard for history responses
     villageDays: 30,
+    playerHistorySeq: 0, // same guard for player-history responses
+    playerHistoryDays: 60,
+    regionVillagesSeq: 0, // same guard for region-villages responses
+    comparePayload: null,
+    playersPayload: null,
+    playersSnapshot: null,
     dirtyTabs: {}, // alliance-filtered tabs pending reload on next activation
   },
   allianceTags: [],

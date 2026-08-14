@@ -40,7 +40,7 @@ Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następ
 - **Dashboard — Operations**: Actions (Fetch now / Send report now, rate limit), Settings (walidacja, sekrety nigdy w DB).
 - **Auth**: token mode (Bearer, constant-time, domyślny), Discord OAuth opt-in (HttpOnly cookie, RBAC member/admin, rate limit akcji), `none` tylko loopback; public pozostają `/`, `/static/*`, `/healthz`, `/readyz`, `/api/meta`, `/api/auth/*`.
 - **Operacyjne**: `/healthz` (liveness) vs `/readyz` (readiness), `/api/meta` z `build_sha`, CI quality → build-push GHCR → smoke → secret-scan, deploy/rollback po `IMAGE_TAG=<sha>`.
-- **Wydajność**: profil na kopii 60k wiosek × 7 dni: Regions 7d p95 ≈ 0,63 s — poniżej progu 1,0 s p95 dla agregatów.
+- **Wydajność**: dashboard aggregates są SQL-owe (GROUP BY region/player, id-set movement), a payload Regions jest cache'owany per tożsamość snapshotu; pomiar na kopii 60k wiosek × 7 dni: Regions 7d p95 ≈ 4 ms (cache ciepły), Overview p95 ≈ 480 ms — poniżej progu 1,0 s p95.
 
 ### Potwierdzone luki (kolejność naprawy w §4–§7)
 

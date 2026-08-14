@@ -86,6 +86,12 @@
               </div>
               <div class="analysis-header-side">
                 <span class="card-caption" data-analysis-range hidden>Last 30 days</span>
+                <label class="overline" for="analysis-days">Range</label>
+                <select id="analysis-days" class="analysis-select" aria-label="Analysis range in days">
+                  <option value="7">7 days</option>
+                  <option value="30" selected>30 days</option>
+                  <option value="60">60 days</option>
+                </select>
                 <div class="segmented" id="analysis-alliance-filter" role="group" aria-label="Alliance filter" hidden></div>
               </div>
             </header>
@@ -97,6 +103,7 @@
               <button class="tab-bar__tab" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
               <button class="tab-bar__tab" role="tab" id="tab-wars" aria-controls="panel-wars" aria-selected="false" tabindex="-1">Wars</button>
               <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
+              <button class="tab-bar__tab" role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false" tabindex="-1">Compare</button>
               <button class="tab-bar__tab" role="tab" id="tab-villages" aria-controls="panel-villages" aria-selected="false" tabindex="-1">Villages</button>
             </div>
 
@@ -137,6 +144,32 @@
                   </div>
                 </div>
               </div>
+              <article class="region-detail" id="region-detail" hidden aria-label="Region villages">
+                <header class="region-detail__head">
+                  <div>
+                    <p class="overline">Villages of the region</p>
+                    <h3 id="region-detail-title">—</h3>
+                  </div>
+                  <span class="card-caption" data-region-detail-date></span>
+                </header>
+                <div class="data-table__wrap">
+                  <table class="data-table" aria-label="Villages of the selected region">
+                    <thead>
+                      <tr>
+                        <th class="th--left" scope="col">Village</th>
+                        <th class="th--num" scope="col">Coordinates</th>
+                        <th class="th--num" scope="col">Population</th>
+                        <th class="th--left" scope="col">Player</th>
+                        <th class="th--left" scope="col">Alliance</th>
+                        <th class="th--left" scope="col">Side</th>
+                      </tr>
+                    </thead>
+                    <tbody data-region-villages-body></tbody>
+                  </table>
+                </div>
+                <p class="region-detail__note" data-region-detail-note hidden></p>
+                <p class="region-detail__error" data-region-detail-error role="alert" hidden></p>
+              </article>
             </section>
 
             <section class="analysis-panel" id="panel-alliances" role="tabpanel" aria-labelledby="tab-alliances" hidden>
@@ -144,6 +177,7 @@
                 <div class="chart-card__head">
                   <p class="overline">Tracked alliances</p>
                   <span class="card-caption" data-as-of="standings" hidden></span>
+                  <button class="button button--outline button--small" type="button" data-export="standings" disabled>Export CSV</button>
                   <div class="segmented" role="group" aria-label="Chart metric">
                     <button class="segmented__btn" type="button" aria-pressed="true" data-metric="population">Population</button>
                     <button class="segmented__btn" type="button" aria-pressed="false" data-metric="vp">VP</button>
@@ -170,6 +204,10 @@
             </section>
 
             <section class="analysis-panel" id="panel-players" role="tabpanel" aria-labelledby="tab-players" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Latest snapshot vs previous</p>
+                <button class="button button--outline button--small" type="button" data-export="players" disabled>Export CSV</button>
+              </div>
               <div class="players-grid">
                 <div class="data-table__wrap">
                   <table class="data-table" aria-label="Top players by population">
@@ -220,6 +258,41 @@
                   </table>
                 </div>
               </div>
+              <article class="player-detail" id="player-detail" hidden aria-label="Player history">
+                <header class="player-detail__head">
+                  <div>
+                    <p class="overline">Stored observations</p>
+                    <h3 id="player-detail-name">—</h3>
+                  </div>
+                  <span class="player-detail__absent" data-player-absent hidden>No longer present in latest snapshot.</span>
+                </header>
+                <div class="chart-card" data-player-chart hidden>
+                  <div class="chart-card__head">
+                    <p class="overline">Population history</p>
+                    <span class="card-caption" data-as-of="player" hidden></span>
+                  </div>
+                  <div class="chart-card__canvas">
+                    <canvas id="analysis-chart-player" role="img" aria-label="Player population over time"></canvas>
+                  </div>
+                </div>
+                <div class="data-table__wrap" data-player-history-table hidden>
+                  <table class="data-table" aria-label="Player history">
+                    <thead>
+                      <tr>
+                        <th class="th--left" scope="col">Snapshot</th>
+                        <th class="th--left" scope="col">Name</th>
+                        <th class="th--left" scope="col">Alliance</th>
+                        <th class="th--num" scope="col">Villages</th>
+                        <th class="th--num" scope="col">Population</th>
+                        <th class="th--num" scope="col">VP</th>
+                      </tr>
+                    </thead>
+                    <tbody data-player-history-body></tbody>
+                  </table>
+                </div>
+                <p class="player-detail__note" data-player-detail-note hidden></p>
+                <p class="player-detail__error" data-player-detail-error role="alert" hidden></p>
+              </article>
             </section>
 
             <section class="analysis-panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
@@ -335,6 +408,65 @@
               </div>
             </section>
 
+            <section class="analysis-panel" id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Period comparison between two snapshots</p>
+                <button class="button button--outline button--small" type="button" data-export="compare" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls">
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-compare-from">From</label>
+                  <select id="analysis-compare-from" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-compare-to">To</label>
+                  <select id="analysis-compare-to" class="analysis-select"></select>
+                </div>
+                <p class="analysis-controls__error" id="analysis-compare-error" role="alert" hidden></p>
+              </div>
+              <div class="compare-grid" data-compare-summary hidden>
+                <div class="metric-tile">
+                  <span class="metric-label">Villages</span>
+                  <strong class="metric-value" data-compare-villages>—</strong>
+                  <span class="metric-note" data-compare-villages-delta></span>
+                </div>
+                <div class="metric-tile">
+                  <span class="metric-label">Population</span>
+                  <strong class="metric-value" data-compare-population>—</strong>
+                  <span class="metric-note" data-compare-population-delta></span>
+                </div>
+                <div class="metric-tile">
+                  <span class="metric-label">Players</span>
+                  <strong class="metric-value" data-compare-players>—</strong>
+                  <span class="metric-note" data-compare-players-delta></span>
+                </div>
+                <div class="metric-tile">
+                  <span class="metric-label">VP</span>
+                  <strong class="metric-value" data-compare-vp>—</strong>
+                  <span class="metric-note" data-compare-vp-delta></span>
+                </div>
+              </div>
+              <p class="field-help" data-compare-range-note hidden></p>
+              <div class="data-table__wrap" data-compare-table hidden>
+                <table class="data-table" aria-label="Region comparison between the selected dates">
+                  <thead>
+                    <tr>
+                      <th class="th--left" scope="col">Region</th>
+                      <th class="th--num" scope="col">Share from</th>
+                      <th class="th--num" scope="col">Share to</th>
+                      <th class="th--num" scope="col">Δ share</th>
+                      <th class="th--num" scope="col">Pop from</th>
+                      <th class="th--num" scope="col">Pop to</th>
+                      <th class="th--num" scope="col">Δ pop</th>
+                    </tr>
+                  </thead>
+                  <tbody data-compare-body></tbody>
+                </table>
+              </div>
+              <p class="field-help" data-compare-movement hidden></p>
+              <p class="empty-state" data-compare-empty hidden></p>
+            </section>
+
             <section class="analysis-panel" id="panel-villages" role="tabpanel" aria-labelledby="tab-villages" hidden>
               <div class="village-search">
                 <label class="overline" for="village-search-input">Search by village, player or coordinates</label>
@@ -413,6 +545,67 @@
 
       <section class="dashboard-panel" id="dashboard-panel-overview" role="tabpanel" aria-labelledby="dashboard-tab-overview" hidden>
         <div class="dashboard-grid">
+          <article class="card card--overview" aria-labelledby="overview-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Command center</p>
+                <h2 id="overview-title">Intelligence overview</h2>
+              </div>
+              <span class="card-caption" data-overview-asof></span>
+            </header>
+            <div class="overview-grid" data-overview-grid hidden>
+              <div class="overview-block">
+                <p class="overline">Data freshness</p>
+                <strong class="overview-value" data-overview-freshness>—</strong>
+                <span class="metric-note" data-overview-freshness-note></span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Last successful fetch</p>
+                <strong class="overview-value overview-value--mono" data-overview-last-fetch>—</strong>
+                <span class="metric-note">UTC</span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Last successful report</p>
+                <strong class="overview-value overview-value--mono" data-overview-last-report>—</strong>
+                <span class="metric-note">UTC</span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Tracked villages</p>
+                <strong class="overview-value" data-overview-villages>—</strong>
+                <span class="metric-note" data-overview-villages-delta></span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Tracked population</p>
+                <strong class="overview-value" data-overview-population>—</strong>
+                <span class="metric-note" data-overview-population-delta></span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Tracked players</p>
+                <strong class="overview-value" data-overview-players>—</strong>
+                <span class="metric-note" data-overview-players-delta></span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Victory points</p>
+                <strong class="overview-value" data-overview-vp>—</strong>
+                <span class="metric-note" data-overview-vp-delta></span>
+              </div>
+              <div class="overview-block">
+                <p class="overline">Movement</p>
+                <strong class="overview-value" data-overview-movement>—</strong>
+                <span class="metric-note" data-overview-movement-note></span>
+              </div>
+              <div class="overview-block overview-block--wide">
+                <p class="overline">Top regions by share</p>
+                <ol class="overview-regions" data-overview-regions></ol>
+              </div>
+              <div class="overview-block overview-block--wide">
+                <p class="overline">Quick links</p>
+                <div class="overview-links" data-overview-links></div>
+              </div>
+            </div>
+            <p class="empty-state" data-overview-empty hidden></p>
+          </article>
+
           <article class="card card--status" aria-labelledby="status-title">
             <header class="card__header">
               <div>

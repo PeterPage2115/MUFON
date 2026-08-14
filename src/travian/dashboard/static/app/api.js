@@ -126,6 +126,12 @@ export var api = {
       "/api/analysis/villages/" + encodeURIComponent(villageId) + "/history?days=" + encodeURIComponent(days)
     );
   },
+  playerHistory: function (playerId, days) {
+    return request(
+      "GET",
+      "/api/analysis/players/" + encodeURIComponent(playerId) + "/history?days=" + encodeURIComponent(days)
+    );
+  },
 };
 
 // Kinds that honor the alliance filter (standings is a cross-alliance

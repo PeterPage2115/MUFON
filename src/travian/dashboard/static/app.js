@@ -6,8 +6,8 @@
 import { state, setText, formatTime } from "./app/ui.js";
 import { api, setTokenGetter, setUnauthorizedHandler } from "./app/api.js";
 import { tokenStore, loadAuthStatus, showTokenDialog, canManageFromAuth } from "./app/auth.js";
-import { loadStatus, setRefreshBusy } from "./app/status.js";
-import { wireAnalysis, activateTab, tabLoaders, refreshActiveAnalysis } from "./app/analysis.js";
+import { loadStatus, loadOverview, setRefreshBusy } from "./app/status.js";
+import { wireAnalysis, activateTab, tabLoaders, refreshActiveAnalysis, applyInitialContext } from "./app/analysis.js";
 import { wireActionButtons, loadSettings, loadLogs, wireForm } from "./app/operations.js";
 
 var els = state.els;
@@ -83,8 +83,9 @@ function onDashboardViewActivated(name) {
     return;
   }
   if (name === "overview") {
-    // Refresh on view activation: status + the admin job log (on demand,
-    // never a background poller).
+    // Refresh on view activation: the command center + status + the admin
+    // job log (on demand, never a background poller).
+    loadOverview();
     loadStatus();
     if (dashboardState.canManage) loadLogs();
     return;
@@ -159,6 +160,8 @@ function refreshDashboard() {
   if (dashboardState.canManage) jobs.push(loadLogs());
   if (dashboardState.activeView === "intelligence") {
     jobs.push(refreshActiveAnalysis());
+  } else if (dashboardState.activeView === "overview") {
+    jobs.push(loadOverview());
   }
   return Promise.all(jobs)
     .catch(function () {}) // failures are rendered by the individual loaders
@@ -200,15 +203,18 @@ function resolveInitialTab() {
 // after action → manual Refresh. There is no background polling.
 function startDashboardData(canManage) {
   setDashboardAccess(canManage);
+  applyInitialContext(); // URL + stored preference for days/alliance
   loadStatus();
   // Role-aware landing: an OAuth member starts in Intelligence; admins /
   // token operators start in Overview. An explicit, valid ?view= URL wins
   // over the role default (invalid values fall back safely).
   var view = resolveInitialView(canManage);
+  // Resolve the initial analysis tab BEFORE any URL rewrite (the first
+  // syncAnalysisUrl would otherwise drop the ?tab= parameter).
+  var initialTab = view === "intelligence" ? resolveInitialTab() : null;
   if (view === "intelligence") {
     activateDashboardView("intelligence");
-    var tab = resolveInitialTab();
-    if (tab) activateTab(tab);
+    if (initialTab) activateTab(initialTab);
   } else {
     activateDashboardView(view);
   }

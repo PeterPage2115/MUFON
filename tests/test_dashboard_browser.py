@@ -1279,3 +1279,204 @@ def test_no_background_polling_after_initial_load(browser_app: tuple[str, Browse
     assert _count(page, "/api/status") == status0 + 1
     assert _count(page, "/api/analysis") == analysis0 + 2
     page.close()
+
+
+# --- Faza 3: Intelligence drill-down + Overview command center -----------------
+
+
+def test_overview_command_center_renders(browser_app: tuple[str, Browser]) -> None:
+    """Admin landing shows the command center: freshness, tracked KPIs with
+    honest deltas, movement, top regions and quick links."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-overview-villages]'); return el && el.textContent.trim() !== '—'; }"
+    )
+    # Tracked KPIs from the seeded pair (villages 442: 2 base + 440 gained).
+    assert page.text_content("[data-overview-villages]").strip() == "442"
+    assert page.text_content("[data-overview-villages-delta]").strip() == "+440"
+    # Freshness + last successful runs come from the safe status surface.
+    assert "Stale" in page.text_content("[data-overview-freshness]")
+    assert page.text_content("[data-overview-last-fetch]").strip() == "Never"
+    # Movement + top regions.
+    assert "440 gained" in page.text_content("[data-overview-movement]")
+    assert "Testland" in page.text_content("[data-overview-regions]")
+    # Quick links: analysis views + Operations (admin).
+    links = page.text_content("[data-overview-links]")
+    assert "Regions" in links and "Compare periods" in links and "Operations" in links
+    page.close()
+
+
+def test_overview_command_center_empty_db(browser_app_empty: tuple[str, Browser]) -> None:
+    """Empty DB: the command center shows dashes and the no-data message."""
+    url, browser = browser_app_empty
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-overview-grid]'); return el && el.hidden === false; }"
+    )
+    assert page.text_content("[data-overview-freshness]").strip() == "No data"
+    assert page.text_content("[data-overview-villages]").strip() == "—"
+    assert "No regions yet." in page.text_content("[data-overview-regions]")
+    page.close()
+
+
+def test_url_state_days_tab_and_alliance(browser_app: tuple[str, Browser]) -> None:
+    """URL state drives the Intelligence context: ?tab=players&days=7 activates
+    the tab and the range; invalid values fall back to safe defaults."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence&tab=players&days=7", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-players').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.get_attribute("#tab-players", "aria-selected") == "true"
+    assert page.input_value("#analysis-days") == "7"
+    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
+    # The range caption reflects the chosen window.
+    assert "Last 7 days" in page.text_content("[data-analysis-range]")
+
+    # Changing the range reloads the active tab and updates the URL.
+    page.select_option("#analysis-days", "60")
+    page.wait_for_function(
+        "() => document.getElementById('panel-players').getAttribute('aria-busy') === 'false'"
+    )
+    assert "days=60" in page.url
+    page.close()
+
+
+def test_url_state_invalid_days_falls_back(browser_app: tuple[str, Browser]) -> None:
+    """An invalid days value is rejected to the 30-day default (no request loop)."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence&days=99", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.input_value("#analysis-days") == "30"
+    page.close()
+
+
+def test_compare_tab_pair_and_validation(browser_app: tuple[str, Browser]) -> None:
+    """Compare: the pair renders summary + region deltas + movement; from>=to
+    hides the stale table."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-compare")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-compare-summary]'); return el && !el.hidden; }"
+    )
+    # Seeded pair 08-07 → 08-08: 442 villages at 08-08.
+    assert "442" in page.text_content("[data-compare-villages]")
+    assert "440 gained" in page.text_content("[data-compare-movement]")
+    assert "Comparing 2026-08-07" in page.text_content("[data-compare-range-note]")
+    # Region table with share deltas.
+    body = page.text_content("[data-compare-body]")
+    assert "Testland" in body and "%" in body
+
+    # from >= to hides the stale table with the controls error.
+    page.select_option("#analysis-compare-to", "2026-08-07")
+    assert page.evaluate("() => document.getElementById('analysis-compare-error').hidden === false")
+    assert page.evaluate("() => document.querySelector('[data-compare-table]').hidden === true")
+    page.close()
+
+
+def test_player_history_drilldown(browser_app: tuple[str, Browser]) -> None:
+    """Players: clicking a name opens the per-snapshot history; a history-only
+    player gets the absent badge."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence&tab=players", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-players-population] tr'); return el; }"
+    )
+    # ENEMY-P219 tops the population ranking (gained village, pop 1219).
+    # It exists only in the 08-08 snapshot → one observation, no trend chart.
+    page.click('[aria-label="Open history for ENEMY-P219"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-player-history-table]'); return el && !el.hidden; }"
+    )
+    history = page.text_content("[data-player-history-body]")
+    assert "2026-08-08" in history and history.count("2026-08-0") == 1
+    assert page.evaluate("() => document.querySelector('[data-player-absent]').hidden === true")
+    # Single observation: the textual note replaces the trend chart.
+    assert "Only one stored observation" in page.text_content("[data-player-detail-note]")
+    page.close()
+
+
+def test_region_villages_drilldown(browser_app: tuple[str, Browser]) -> None:
+    """Regions: clicking a region opens its villages with tracked/other side."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-regions-body] tr'); return el; }"
+    )
+    page.click('[aria-label="Open villages of Testland"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-region-villages-body] tr'); return el; }"
+    )
+    body = page.text_content("[data-region-villages-body]")
+    # Both seeded alliances are tracked in the combined universe — every row
+    # carries the explicit side label (never color-only). The 200-row window
+    # fills with the ENEMY gained villages (population DESC).
+    assert "tracked" in body
+    assert "Village 20219" in body
+    assert "· 200 villages" in page.text_content("#region-detail-title")
+    # The row opens the village explorer history from the detail.
+    page.click('[aria-label="Open history for Village 20219"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-village-history-table]'); return el && !el.hidden; }"
+    )
+    page.close()
+
+
+def test_players_standings_and_compare_exports(browser_app: tuple[str, Browser]) -> None:
+    """The new CSV exports follow the payload: players-<date>, standings-<date>,
+    deltas-<from>-<to>; empty payloads disable the buttons."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    # Players export enabled once the payload exists.
+    page.click("#tab-players")
+    page.wait_for_function(
+        "() => !document.querySelector('[data-export=\"players\"]').disabled"
+    )
+    with page.expect_download() as download_info:
+        page.click('[data-export="players"]')
+    assert "players-latest.csv" in download_info.value.suggested_filename
+
+    # Standings export.
+    page.click("#tab-alliances")
+    page.wait_for_function(
+        "() => !document.querySelector('[data-export=\"standings\"]').disabled"
+    )
+    with page.expect_download() as download_info:
+        page.click('[data-export="standings"]')
+    assert "standings-2026-08-08.csv" in download_info.value.suggested_filename
+
+    # Compare export names the range.
+    page.click("#tab-compare")
+    page.wait_for_function(
+        "() => !document.querySelector('[data-export=\"compare\"]').disabled"
+    )
+    with page.expect_download() as download_info:
+        page.click('[data-export="compare"]')
+    assert "deltas-2026-08-07-2026-08-08.csv" in download_info.value.suggested_filename
+    page.close()

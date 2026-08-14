@@ -33,7 +33,6 @@ var activatedTabs = state.activatedTabs;
 var activeTabName = state.activeTabName;
 var analysisEls = state.analysisEls;
 
-var ANALYSIS_DAYS = 30;
 var SERIES_COLORS = ["#1abc9c", "#e67e22", "#3498db", "#f1c40f"];
 function analysisElements() {
   if (!analysisEls) {
@@ -103,6 +102,37 @@ function analysisElements() {
       villageHistoryBody: document.querySelector("[data-village-history-body]"),
       villageDetailNote: document.querySelector("[data-village-detail-note]"),
       villageDetailError: document.querySelector("[data-village-detail-error]"),
+      compareFrom: document.getElementById("analysis-compare-from"),
+      compareTo: document.getElementById("analysis-compare-to"),
+      compareError: document.getElementById("analysis-compare-error"),
+      compareSummary: document.querySelector("[data-compare-summary]"),
+      compareVillages: document.querySelector("[data-compare-villages]"),
+      compareVillagesDelta: document.querySelector("[data-compare-villages-delta]"),
+      comparePopulation: document.querySelector("[data-compare-population]"),
+      comparePopulationDelta: document.querySelector("[data-compare-population-delta]"),
+      comparePlayers: document.querySelector("[data-compare-players]"),
+      comparePlayersDelta: document.querySelector("[data-compare-players-delta]"),
+      compareVp: document.querySelector("[data-compare-vp]"),
+      compareVpDelta: document.querySelector("[data-compare-vp-delta]"),
+      compareTable: document.querySelector("[data-compare-table]"),
+      compareBody: document.querySelector("[data-compare-body]"),
+      compareRangeNote: document.querySelector("[data-compare-range-note]"),
+      compareMovement: document.querySelector("[data-compare-movement]"),
+      compareEmpty: document.querySelector("[data-compare-empty]"),
+      playerDetail: document.getElementById("player-detail"),
+      playerDetailName: document.getElementById("player-detail-name"),
+      playerAbsent: document.querySelector("[data-player-absent]"),
+      playerDetailNote: document.querySelector("[data-player-detail-note]"),
+      playerDetailError: document.querySelector("[data-player-detail-error]"),
+      playerHistoryTable: document.querySelector("[data-player-history-table]"),
+      playerHistoryBody: document.querySelector("[data-player-history-body]"),
+      playerChartCard: document.querySelector("[data-player-chart]"),
+      playerCanvas: document.getElementById("analysis-chart-player"),
+      regionDetailTitle: document.getElementById("region-detail-title"),
+      regionDetailDate: document.querySelector("[data-region-detail-date]"),
+      regionDetailNote: document.querySelector("[data-region-detail-note]"),
+      regionDetailError: document.querySelector("[data-region-detail-error]"),
+      regionVillagesBody: document.querySelector("[data-region-villages-body]"),
     };
   }
   return analysisEls;
@@ -173,7 +203,7 @@ function loadRegions() {
   setPanelBusy("regions", true);
   tableLoading(els.regionsBody, 6);
   return api
-    .analysis("regions", { days: ANALYSIS_DAYS })
+    .analysis("regions", { days: analysisState.days })
     .then(function (payload) {
       renderRegions(payload);
       setPanelBusy("regions", false);
@@ -244,7 +274,15 @@ function regionRow(row) {
 
   var tdRegion = document.createElement("td");
   tdRegion.className = "region-name";
-  tdRegion.textContent = row.region;
+  var regionButton = document.createElement("button");
+  regionButton.type = "button";
+  regionButton.className = "event-line__name";
+  regionButton.textContent = row.region;
+  regionButton.setAttribute("aria-label", "Open villages of " + row.region);
+  regionButton.addEventListener("click", function () {
+    openRegionVillages(row.region);
+  });
+  tdRegion.appendChild(regionButton);
 
   var tdControl = document.createElement("td");
   // Semantic meter: real progressbar semantics with a visible percentage —
@@ -454,7 +492,7 @@ function loadStandings() {
     showChartLoading(panel.querySelector(".chart-card"));
   }
   return api
-    .standings(selection, ANALYSIS_DAYS)
+    .standings(selection, analysisState.days)
     .then(function (payload) {
       var dates = payload.dates || [];
       var series = payload.series || [];
@@ -471,6 +509,7 @@ function loadStandings() {
         });
       }
       analysisState.standingsPayload = { dates: dates, series: series };
+      setExportEnabled("standings", series.length > 0);
       renderStandingsPicker();
       if (!dates.length) {
         showPanelEmpty(panel, "No data yet.");
@@ -702,35 +741,11 @@ function loadPlayers() {
     });
 }
 
-function playersSection(tbody, rows, valueCell) {
-  tbody.textContent = "";
-  if (!rows.length) {
-    var tr = document.createElement("tr");
-    var td = document.createElement("td");
-    td.colSpan = 3;
-    td.className = "faint";
-    td.textContent = "No data yet.";
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    return;
-  }
-  rows.forEach(function (stat, index) {
-    var tr = document.createElement("tr");
-    var tdRank = document.createElement("td");
-    tdRank.className = "num faint";
-    tdRank.textContent = String(index + 1);
-    var tdName = document.createElement("td");
-    tdName.className = "player-name";
-    tdName.textContent = stat.player_name || "unknown";
-    tr.appendChild(tdRank);
-    tr.appendChild(tdName);
-    tr.appendChild(valueCell(stat));
-    tbody.appendChild(tr);
-  });
-}
-
 function renderPlayers(payload) {
   var els = analysisElements();
+  analysisState.playersPayload = payload;
+  analysisState.playersSnapshot = payload.snapshot_date || "latest";
+  setExportEnabled("players", (payload.population || []).length > 0);
   playersSection(els.playersPopulation, payload.population || [], function (s) {
     return numCell(fmtInt(s.population));
   });
@@ -744,8 +759,6 @@ function renderPlayers(payload) {
     return numCell(fmtInt(s.vp));
   });
 }
-
-/* Events tab */
 
 function fillDateSelect(select, dates) {
   select.textContent = "";
@@ -1090,7 +1103,7 @@ function loadChanges() {
   setPanelBusy("changes", true);
   tableLoading(els.changesBody, 9);
   return api
-    .analysis("deltas", { days: ANALYSIS_DAYS })
+    .analysis("deltas", { days: analysisState.days })
     .then(function (payload) {
       var rows = payload.rows || [];
       analysisState.changesPayload = payload;
@@ -1561,6 +1574,81 @@ function wireExportButtons() {
       });
       exportCsv("wars-" + analysisState.warsFrom + "-" + analysisState.warsTo + ".csv", headers, rows);
     },
+    players: function () {
+      var payload = analysisState.playersPayload;
+      if (!payload || !payload.population.length) return;
+      var snapshot = analysisState.playersSnapshot || "latest";
+      var headers = ["Rank", "Player", "Villages", "Population", "Growth", "VP", "New villages"];
+      var byName = {};
+      (payload.population || []).forEach(function (s, i) {
+        byName[s.player_id] = { rank: i + 1, player_id: s.player_id, player_name: s.player_name, villages: s.villages, population: s.population };
+      });
+      (payload.growth || []).forEach(function (s) {
+        if (byName[s.player_id]) byName[s.player_id].growth = s.growth;
+      });
+      (payload.new_villages || []).forEach(function (s) {
+        if (byName[s.player_id]) byName[s.player_id].gains = s.gains;
+      });
+      (payload.vp || []).forEach(function (s) {
+        if (byName[s.player_id]) byName[s.player_id].vp = s.vp;
+      });
+      var rows = Object.keys(byName).map(function (pid) {
+        var s = byName[pid];
+        return [s.rank, s.player_name, s.villages, s.population, s.growth === null || s.growth === undefined ? "" : s.growth, s.vp === undefined ? "" : s.vp, s.gains === undefined ? "" : s.gains];
+      });
+      exportCsv("players-" + snapshot + ".csv", headers, rows);
+    },
+    standings: function () {
+      var payload = analysisState.standingsPayload;
+      if (!payload || !payload.series.length) return;
+      var snapshot = (payload.dates && payload.dates.length) ? payload.dates[payload.dates.length - 1] : "latest";
+      var headers = ["Date"].concat(payload.series.map(function (s) { return s.tag; }));
+      var byTag = {};
+      payload.series.forEach(function (s) {
+        byTag[s.tag] = s;
+      });
+      var rows = (payload.dates || []).map(function (d) {
+        var cells = [d];
+        payload.series.forEach(function (s) {
+          var byDate = {};
+          (s.points || []).forEach(function (pair) { byDate[pair[0]] = pair[1]; });
+          cells.push(byDate[d] !== undefined ? byDate[d] : "");
+        });
+        return cells;
+      });
+      exportCsv("standings-" + snapshot + ".csv", headers, rows);
+    },
+    deltas: function () {
+      var payload = analysisState.changesPayload;
+      var rows = payload && payload.rows ? payload.rows : [];
+      if (!rows.length) return;
+      var snapshot = rows[rows.length - 1].date;
+      var headers = ["Date", "Previous snapshot", "Days elapsed", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
+      exportCsv(
+        "deltas-" + snapshot + ".csv",
+        headers,
+        rows.map(function (r) {
+          return [r.date, r.previous_date, r.elapsed_days, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
+        })
+      );
+    },
+    compare: function () {
+      var payload = analysisState.comparePayload;
+      if (!payload || !payload.regions.length) return;
+      var headers = ["Region", "Share from", "Share to", "Δ share", "Pop from", "Pop to", "Δ pop"];
+      var rows = payload.regions.map(function (r) {
+        return [
+          r.region,
+          r.from_share === null || r.from_share === undefined ? "" : (r.from_share * 100).toFixed(1) + "%",
+          (r.to_share * 100).toFixed(1) + "%",
+          r.share_delta === null || r.share_delta === undefined ? "" : (r.share_delta * 100).toFixed(1) + "%",
+          r.from_pop === null || r.from_pop === undefined ? "" : r.from_pop,
+          r.to_pop,
+          r.pop_delta === null || r.pop_delta === undefined ? "" : r.pop_delta,
+        ];
+      });
+      exportCsv("deltas-" + payload.from + "-" + payload.to + ".csv", headers, rows);
+    },
   };
   document.querySelectorAll("[data-export]").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -1572,6 +1660,496 @@ function wireExportButtons() {
 
 /* Tab bar + wiring */
 
+/* --- context bar + URL state (Faza 3) -------------------------------------- */
+//
+// The Intelligence context: range (7|30|60 days), alliance, and the current
+// from/to pair live in the URL query (?view=&tab=&alliance=&days=&from=&to=)
+// and the local preference key — never near the token. Invalid values are
+// rejected to safe defaults and never cause a request loop.
+
+export function syncAnalysisUrl() {
+  var params = new URLSearchParams(window.location.search);
+  var view = state.dashboardState.activeView;
+  if (view !== "intelligence") {
+    params.set("view", view);
+  } else {
+    params.delete("view");
+  }
+  if (activeTabName && activeTabName !== "regions") {
+    params.set("tab", activeTabName);
+  } else {
+    params.delete("tab");
+  }
+  if (analysisState.alliance !== "combined") {
+    params.set("alliance", analysisState.alliance);
+  } else {
+    params.delete("alliance");
+  }
+  if (analysisState.days !== 30) {
+    params.set("days", String(analysisState.days));
+  } else {
+    params.delete("days");
+  }
+  if (analysisState.from && analysisState.to) {
+    params.set("from", analysisState.from);
+    params.set("to", analysisState.to);
+  } else {
+    params.delete("from");
+    params.delete("to");
+  }
+  var qs = params.toString();
+  var target = window.location.pathname + (qs ? "?" + qs : "");
+  history.replaceState(null, "", target);
+  try {
+    window.localStorage.setItem(
+      "mufon.dashboard.view.v1",
+      JSON.stringify({ days: analysisState.days, alliance: analysisState.alliance })
+    );
+  } catch (_e) {
+    /* preference is best-effort; the URL is the source of truth */
+  }
+}
+
+export function setDays(days) {
+  var valid = days === 7 || days === 30 || days === 60;
+  analysisState.days = valid ? days : 30;
+  var select = document.getElementById("analysis-days");
+  if (select && select.value !== String(analysisState.days)) select.value = String(analysisState.days);
+  var range = analysisElements().range;
+  if (range) {
+    range.hidden = false;
+    setText(range, "Last " + analysisState.days + " days");
+  }
+  // The range shapes every filtered tab: reload the active one now, mark
+  // the rest dirty for their next activation.
+  markAllianceDirty();
+  if (activatedTabs[activeTabName] && tabLoaders[activeTabName]) {
+    analysisState.dirtyTabs[activeTabName] = false;
+    tabLoaders[activeTabName]();
+  }
+  syncAnalysisUrl();
+}
+
+function wireDaysSelect() {
+  var select = document.getElementById("analysis-days");
+  if (!select) return;
+  select.value = String(analysisState.days);
+  var range = analysisElements().range;
+  if (range) {
+    range.hidden = false;
+    setText(range, "Last " + analysisState.days + " days");
+  }
+  select.addEventListener("change", function () {
+    setDays(Number(select.value));
+  });
+}
+
+//: Bootstrap entry: apply URL + stored preference context before the first
+//: analysis load. Invalid days fall back to the stored/30 default; an
+//: invalid alliance is reset by renderAllianceFilter once tags resolve.
+export function applyInitialContext() {
+  var params = new URLSearchParams(window.location.search);
+  var daysRaw = params.get("days");
+  var allianceRaw = params.get("alliance");
+  var stored = null;
+  try {
+    stored = JSON.parse(window.localStorage.getItem("mufon.dashboard.view.v1") || "null");
+  } catch (_e) {
+    stored = null;
+  }
+  var days = daysRaw !== null ? Number(daysRaw) : stored && stored.days ? stored.days : 30;
+  analysisState.days = days === 7 || days === 30 || days === 60 ? days : 30;
+  if (allianceRaw !== null) {
+    analysisState.alliance = allianceRaw === "combined" ? "combined" : allianceRaw;
+  } else if (stored && stored.alliance) {
+    analysisState.alliance = stored.alliance;
+  }
+  var fromRaw = params.get("from");
+  var toRaw = params.get("to");
+  if (fromRaw && toRaw) {
+    analysisState.from = fromRaw;
+    analysisState.to = toRaw;
+  }
+}
+
+/* --- Compare tab ------------------------------------------------------------- */
+
+function loadCompare() {
+  var panel = document.getElementById("panel-compare");
+  var els = analysisElements();
+  hidePanelError(panel);
+  setPanelBusy("compare", true);
+  return api
+    .analysis("dates")
+    .then(function (payload) {
+      var dates = payload.dates || [];
+      if (dates.length < 2) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("compare", false);
+        return;
+      }
+      hidePanelEmpty(panel);
+      fillDateSelect(els.compareFrom, dates);
+      fillDateSelect(els.compareTo, dates);
+      if (analysisState.from && dates.indexOf(analysisState.from) !== -1) {
+        els.compareFrom.value = analysisState.from;
+      } else {
+        els.compareFrom.value = dates[0];
+      }
+      if (analysisState.to && dates.indexOf(analysisState.to) !== -1) {
+        els.compareTo.value = analysisState.to;
+      } else {
+        els.compareTo.value = dates[dates.length - 1];
+      }
+      analysisState.from = els.compareFrom.value;
+      analysisState.to = els.compareTo.value;
+      syncAnalysisUrl();
+      return fetchCompare(analysisState.from, analysisState.to);
+    })
+    .then(function () {
+      setPanelBusy("compare", false);
+    })
+    .catch(function () {
+      setPanelBusy("compare", false);
+      showPanelError(panel, "Couldn't load analysis data.", loadCompare);
+      activatedTabs.compare = false;
+    });
+}
+
+function fetchCompare(from, to) {
+  return api
+    .analysis("compare", { from: from, to: to })
+    .then(function (payload) {
+      renderCompare(payload);
+    });
+}
+
+function deltaCellText(d) {
+  if (d === null || d === undefined) return "\u2014";
+  if (d > 0) return "+" + fmtInt(d);
+  if (d < 0) return "\u2212" + fmtInt(Math.abs(d));
+  return "\u00b10";
+}
+
+function renderCompare(payload) {
+  var els = analysisElements();
+  analysisState.comparePayload = payload;
+  var regions = payload.regions || [];
+  setExportEnabled("compare", regions.length > 0);
+  var summary = payload.summary || {};
+  var to = summary.to || {};
+  var delta = summary.delta || {};
+  var from = summary.from || {};
+
+  if (!regions.length) {
+    els.compareSummary.hidden = true;
+    els.compareTable.hidden = true;
+    els.compareRangeNote.hidden = true;
+    els.compareMovement.hidden = true;
+    els.compareEmpty.hidden = false;
+    setText(els.compareEmpty, "No regions to compare between " + payload.from + " and " + payload.to + ".");
+    return;
+  }
+  els.compareEmpty.hidden = true;
+  els.compareSummary.hidden = false;
+  els.compareTable.hidden = false;
+  els.compareRangeNote.hidden = false;
+  setText(
+    els.compareRangeNote,
+    "Comparing " + payload.from + " \u2192 " + payload.to + " (" + payload.elapsed_days + " day" + (payload.elapsed_days === 1 ? "" : "s") + ")."
+  );
+
+  setText(els.compareVillages, fmtInt(to.villages));
+  setText(els.compareVillagesDelta, deltaCellText(delta.villages));
+  setText(els.comparePopulation, fmtInt(to.population));
+  setText(els.comparePopulationDelta, deltaCellText(delta.population));
+  setText(els.comparePlayers, fmtInt(to.players));
+  setText(els.comparePlayersDelta, deltaCellText(delta.players));
+  setText(els.compareVp, fmtInt(to.vp));
+  setText(els.compareVpDelta, deltaCellText(delta.vp));
+
+  els.compareBody.textContent = "";
+  regions.forEach(function (r) {
+    var tr = document.createElement("tr");
+    var tdRegion = document.createElement("td");
+    tdRegion.className = "region-name";
+    tdRegion.textContent = r.region;
+    tr.appendChild(tdRegion);
+    tr.appendChild(numCell(r.from_share === null || r.from_share === undefined ? "\u2014" : (r.from_share * 100).toFixed(1) + "%"));
+    tr.appendChild(numCell((r.to_share * 100).toFixed(1) + "%"));
+    var tdShare = numCell("");
+    var sd = r.share_delta;
+    if (sd !== null && sd !== undefined) {
+      if (Math.abs(sd) < 0.0005) {
+        tdShare.textContent = "\u00b10.0%";
+        tdShare.classList.add("faint");
+      } else if (sd > 0) {
+        tdShare.textContent = "+" + (sd * 100).toFixed(1) + "%";
+        tdShare.classList.add("is-positive");
+      } else {
+        tdShare.textContent = "\u2212" + Math.abs(sd * 100).toFixed(1) + "%";
+        tdShare.classList.add("is-negative");
+      }
+    }
+    tr.appendChild(tdShare);
+    tr.appendChild(numCell(r.from_pop === null || r.from_pop === undefined ? "\u2014" : fmtInt(r.from_pop)));
+    tr.appendChild(numCell(fmtInt(r.to_pop)));
+    tr.appendChild(deltaCell(r.pop_delta, null, null));
+    els.compareBody.appendChild(tr);
+  });
+
+  els.compareMovement.hidden = false;
+  setText(
+    els.compareMovement,
+    "Movement between the pair: " + (payload.movement.gained_total || 0) + " gained \u00b7 " + (payload.movement.lost_total || 0) + " lost."
+  );
+}
+
+function wireCompareControls() {
+  var els = analysisElements();
+  function onChange() {
+    var from = els.compareFrom.value;
+    var to = els.compareTo.value;
+    if (!from || !to) return;
+    if (from >= to) {
+      setText(els.compareError, "From must be earlier than To.");
+      els.compareError.hidden = false;
+      els.compareSummary.hidden = true;
+      els.compareTable.hidden = true;
+      setExportEnabled("compare", false);
+      return;
+    }
+    els.compareError.hidden = true;
+    analysisState.from = from;
+    analysisState.to = to;
+    syncAnalysisUrl();
+    setPanelBusy("compare", true);
+    fetchCompare(from, to)
+      .catch(function (err) {
+        showToast("Compare refresh failed", err.message, "error");
+      })
+      .then(function () {
+        setPanelBusy("compare", false);
+      });
+  }
+  els.compareFrom.addEventListener("change", onChange);
+  els.compareTo.addEventListener("change", onChange);
+}
+
+/* --- drill-downs: player history + region villages --------------------------- */
+
+// Players rankings: every name opens the player's per-snapshot history.
+function playersSection(tbody, rows, valueCell) {
+  tbody.textContent = "";
+  if (!rows.length) {
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "empty-cell";
+    td.textContent = "No players.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach(function (stat, index) {
+    var tr = document.createElement("tr");
+    var tdRank = document.createElement("td");
+    tdRank.className = "num";
+    tdRank.textContent = String(index + 1);
+    tr.appendChild(tdRank);
+    var tdName = document.createElement("td");
+    var name = document.createElement("button");
+    name.type = "button";
+    name.className = "event-line__name";
+    name.textContent = stat.player_name;
+    name.setAttribute("aria-label", "Open history for " + stat.player_name);
+    name.addEventListener("click", function () {
+      openPlayerHistory(stat.player_id, stat.player_name);
+    });
+    tdName.appendChild(name);
+    tr.appendChild(tdName);
+    tr.appendChild(valueCell(stat));
+    tbody.appendChild(tr);
+  });
+}
+
+function openPlayerHistory(playerId, playerName) {
+  var els = analysisElements();
+  var seq = ++analysisState.playerHistorySeq;
+  els.playerDetail.hidden = false;
+  els.playerDetailError.hidden = true;
+  els.playerDetailNote.hidden = true;
+  els.playerAbsent.hidden = true;
+  els.playerHistoryTable.hidden = true;
+  els.playerChartCard.hidden = true;
+  setText(els.playerDetailName, playerName + " \u00b7 #" + playerId);
+  setPanelBusy("players", true);
+  return api
+    .playerHistory(playerId, analysisState.playerHistoryDays)
+    .then(function (payload) {
+      if (seq !== analysisState.playerHistorySeq) return;
+      renderPlayerHistory(payload);
+      setPanelBusy("players", false);
+    })
+    .catch(function (err) {
+      if (seq !== analysisState.playerHistorySeq) return;
+      setPanelBusy("players", false);
+      els.playerDetailError.hidden = false;
+      setText(els.playerDetailError, err.message || "Couldn't load player history.");
+    });
+}
+
+function renderPlayerHistory(payload) {
+  var els = analysisElements();
+  var history = payload.history || [];
+  els.playerAbsent.hidden = payload.present_in_latest;
+  setText(els.playerDetailName, (history.length ? history[history.length - 1].player_name : "Player") + " \u00b7 #" + payload.player_id);
+  els.playerHistoryTable.hidden = false;
+  els.playerHistoryBody.textContent = "";
+  history.forEach(function (point) {
+    var tr = document.createElement("tr");
+    var tdDate = document.createElement("td");
+    tdDate.className = "date-cell";
+    tdDate.textContent = point.snapshot_date;
+    tr.appendChild(tdDate);
+    tr.appendChild(numCell(point.player_name));
+    tr.appendChild(numCell(point.alliance_tag || "\u2014"));
+    tr.appendChild(numCell(fmtInt(point.villages)));
+    tr.appendChild(numCell(fmtInt(point.population)));
+    tr.appendChild(numCell(fmtInt(point.vp)));
+    els.playerHistoryBody.appendChild(tr);
+  });
+  if (history.length < 2) {
+    els.playerDetailNote.hidden = false;
+    setText(els.playerDetailNote, "Only one stored observation — no trend chart.");
+    return;
+  }
+  renderPlayerChart(history);
+}
+
+function renderPlayerChart(history) {
+  var els = analysisElements();
+  var labels = history.map(function (p) { return p.snapshot_date; });
+  var data = history.map(function (p) { return p.population; });
+  var tableDetails = fillChartDataTable(
+    els.playerChartCard,
+    "chart-data-player",
+    ["Snapshot", "Villages", "Population", "VP"],
+    history.map(function (p) { return [p.snapshot_date, fmtInt(p.villages), fmtInt(p.population), fmtInt(p.vp)]; })
+  );
+  var asOfEl = document.querySelector('[data-as-of="player"]');
+  if (asOfEl) {
+    asOfEl.hidden = false;
+    setText(asOfEl, "as of " + labels[labels.length - 1]);
+  }
+  if (!window.Chart) {
+    els.playerChartCard.hidden = false;
+    els.playerDetailNote.hidden = false;
+    setText(els.playerDetailNote, "Chart library unavailable.");
+    tableDetails.open = true;
+    return;
+  }
+  els.playerChartCard.hidden = false;
+  els.playerCanvas.setAttribute("aria-label", "Population history for " + els.playerDetailName.textContent);
+  els.playerCanvas.setAttribute("aria-describedby", tableDetails.id);
+  var chart = analysisState.charts.player;
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update();
+    chart.resize();
+    return;
+  }
+  chart = new Chart(els.playerCanvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: "Population",
+          data: data,
+          borderColor: cssVar("--accent-gold", "#d1a84a"),
+          backgroundColor: "rgba(209,168,74,0.12)",
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.3,
+          spanGaps: false,
+        },
+      ],
+    },
+    options: baseChartOpts(),
+  });
+  chart.options.plugins.legend.display = false;
+  analysisState.charts.player = chart;
+}
+
+// Regions: every row opens the region's villages for the latest pair date.
+function openRegionVillages(region) {
+  var els = analysisElements();
+  var seq = ++analysisState.regionVillagesSeq;
+  var detail = document.getElementById("region-detail");
+  detail.hidden = false;
+  els.regionDetailError.hidden = true;
+  els.regionDetailNote.hidden = true;
+  setText(els.regionDetailTitle, region);
+  setPanelBusy("regions", true);
+  return api
+    .analysis("regions/" + encodeURIComponent(region) + "/villages", {})
+    .then(function (payload) {
+      if (seq !== analysisState.regionVillagesSeq) return;
+      renderRegionVillages(payload);
+      setPanelBusy("regions", false);
+    })
+    .catch(function (err) {
+      if (seq !== analysisState.regionVillagesSeq) return;
+      setPanelBusy("regions", false);
+      els.regionDetailError.hidden = false;
+      setText(els.regionDetailError, err.message || "Couldn't load region villages.");
+    });
+}
+
+function renderRegionVillages(payload) {
+  var els = analysisElements();
+  var results = payload.results || [];
+  setText(els.regionDetailDate, payload.snapshot_date || "—");
+  setText(els.regionDetailTitle, payload.region + " \u00b7 " + results.length + " villages");
+  els.regionVillagesBody.textContent = "";
+  if (!results.length) {
+    els.regionDetailNote.hidden = false;
+    setText(els.regionDetailNote, "No villages in this region" + (payload.snapshot_date ? " on " + payload.snapshot_date : "") + ".");
+    return;
+  }
+  els.regionDetailNote.hidden = true;
+  results.forEach(function (v) {
+    var tr = document.createElement("tr");
+    var tdName = document.createElement("td");
+    var open = document.createElement("button");
+    open.type = "button";
+    open.className = "event-line__name";
+    open.textContent = v.name;
+    open.setAttribute("aria-label", "Open history for " + v.name);
+    open.addEventListener("click", function () {
+      openVillageHistory(v.village_id, v.name);
+    });
+    tdName.appendChild(open);
+    tr.appendChild(tdName);
+    var tdCoords = document.createElement("td");
+    tdCoords.className = "num";
+    tdCoords.textContent = "(" + v.x + "|" + v.y + ")";
+    tr.appendChild(tdCoords);
+    tr.appendChild(numCell(fmtInt(v.population)));
+    tr.appendChild(numCell(v.player_name));
+    tr.appendChild(numCell(v.alliance_tag || "\u2014"));
+    var tdSide = document.createElement("td");
+    tdSide.textContent = v.side === "tracked" ? "tracked" : "other";
+    tdSide.classList.add(v.side === "tracked" ? "is-positive" : "faint");
+    tr.appendChild(tdSide);
+    els.regionVillagesBody.appendChild(tr);
+  });
+}
+
 var tabLoaders = {
   regions: loadRegions,
   alliances: loadStandings,
@@ -1579,6 +2157,7 @@ var tabLoaders = {
   events: loadEvents,
   wars: loadWars,
   changes: loadChanges,
+  compare: loadCompare,
   villages: loadVillages,
 };
 
@@ -1594,6 +2173,7 @@ function activateTab(tab) {
   });
   var name = tab.id.replace("tab-", "");
   activeTabName = name;
+  syncAnalysisUrl();
   // Six tabs can overflow on narrow screens — keep the chosen one visible.
   tab.scrollIntoView({ block: "nearest", inline: "nearest" });
   // The global alliance filter scopes regions/events/changes/players; the
@@ -1684,6 +2264,7 @@ function wireEventsControls() {
     els.eventsError.hidden = true;
     analysisState.from = from;
     analysisState.to = to;
+    syncAnalysisUrl();
     setPanelBusy("events", true);
     setEventsBusy(true);
     fetchEvents(from, to)
@@ -1723,6 +2304,7 @@ function wireWarsControls() {
     els.warsError.hidden = true;
     analysisState.warsFrom = from;
     analysisState.warsTo = to;
+    syncAnalysisUrl();
     setPanelBusy("wars", true);
     setWarsBusy(true);
     fetchWars(from, to)
@@ -1749,6 +2331,8 @@ function wireAnalysis() {
   wireAllianceSwitch();
   wireVillagesSearch();
   wireExportButtons();
+  wireDaysSelect();
+  wireCompareControls();
   // Regions is the default tab — its payload is fetched at init.
   activateTab(document.getElementById("tab-regions"));
 }
@@ -1802,6 +2386,7 @@ function wireAllianceSwitch() {
     Array.prototype.forEach.call(filter.querySelectorAll(".segmented__btn"), function (b) {
       b.setAttribute("aria-pressed", String(b === btn));
     });
+    syncAnalysisUrl();
     // ONE refetch: only the active tab reloads right now; the other
     // filtered tabs are marked dirty and load on their next activation.
     markAllianceDirty();
@@ -1828,6 +2413,7 @@ export function setAllianceTags(tags) {
 //: refresh); resolves immediately when Intelligence is not active or the tab
 //: was never activated.
 export function refreshActiveAnalysis() {
+  console.log("RAA-DEBUG", state.dashboardState.activeView, activeTabName, Boolean(tabLoaders[activeTabName]), Boolean(activatedTabs[activeTabName]));
   if (state.dashboardState.activeView !== "intelligence") {
     return Promise.resolve();
   }

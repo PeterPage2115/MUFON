@@ -245,3 +245,142 @@ export function loadStatus() {
     showToast("Status unavailable", err.message, "error");
   });
 }
+
+/* --- Overview command center (Faza 3) ---------------------------------------- */
+//
+// Role-aware landing content: freshness + last successful runs + tracked KPI
+// with honest deltas + top regions + movement + quick links. The payload
+// comes from /api/analysis/overview; last-success timestamps from the
+// status payload (job_health/last_successful_* — safe for members).
+
+function overviewEl(selector) {
+  return document.querySelector(selector);
+}
+
+function setDeltaNote(el, delta, unit) {
+  if (!el) return;
+  if (delta === null || delta === undefined) {
+    el.textContent = "";
+    return;
+  }
+  var text = delta > 0 ? "+" : delta < 0 ? "\u2212" : "\u00b1";
+  text += Number(Math.abs(delta)).toLocaleString("en-US") + (unit ? " " + unit : "");
+  el.textContent = text;
+  el.classList.remove("is-positive", "is-negative", "faint");
+  if (delta > 0) el.classList.add("is-positive");
+  else if (delta < 0) el.classList.add("is-negative");
+  else el.classList.add("faint");
+}
+
+function renderOverview(payload, status) {
+  var grid = overviewEl("[data-overview-grid]");
+  var empty = overviewEl("[data-overview-empty]");
+  if (!grid) return;
+
+  var summary = payload.summary || {};
+  var current = summary.current || null;
+  var freshness = payload.freshness || {};
+  var movement = payload.movement || {};
+
+  setText(overviewEl("[data-overview-freshness]"), freshnessLabel(freshness));
+  var note = overviewEl("[data-overview-freshness-note]");
+  if (note) {
+    var noteText = "from snapshots";
+    if (freshness.state === "no_data") noteText = "no snapshots stored";
+    else if (freshness.snapshot_date) noteText = "as of " + freshness.snapshot_date;
+    setText(note, noteText);
+  }
+
+  setText(overviewEl("[data-overview-last-fetch]"), formatTimestamp(status.last_successful_fetch));
+  setText(overviewEl("[data-overview-last-report]"), formatTimestamp(status.last_successful_report));
+
+  var kpis = [
+    ["villages", "villages"],
+    ["population", "population"],
+    ["players", "players"],
+    ["vp", "vp"],
+  ];
+  kpis.forEach(function (pair) {
+    var valueEl = overviewEl('[data-overview-' + pair[0] + ']');
+    var deltaEl = overviewEl('[data-overview-' + pair[0] + '-delta]');
+    if (current) {
+      setText(valueEl, Number(current[pair[1]]).toLocaleString("en-US"));
+      var delta = summary.delta ? summary.delta[pair[1]] : null;
+      setDeltaNote(deltaEl, delta === null || delta === undefined ? null : delta, "");
+    } else {
+      setText(valueEl, "\u2014");
+      setDeltaNote(deltaEl, null, "");
+    }
+  });
+
+  setText(
+    overviewEl("[data-overview-movement]"),
+    movement.gained_total === null || movement.gained_total === undefined
+      ? "\u2014"
+      : String(movement.gained_total) + " gained \u00b7 " + String(movement.lost_total) + " lost"
+  );
+  setText(
+    overviewEl("[data-overview-movement-note]"),
+    movement.from && movement.to ? movement.from + " \u2192 " + movement.to : ""
+  );
+
+  var regionsList = overviewEl("[data-overview-regions]");
+  regionsList.textContent = "";
+  (payload.regions && payload.regions.top || []).forEach(function (r) {
+    var li = document.createElement("li");
+    var name = document.createElement("span");
+    name.className = "region-top__tag";
+    name.textContent = r.region;
+    var share = document.createElement("span");
+    share.className = "region-top__pop";
+    share.textContent = (r.share * 100).toFixed(1) + "%";
+    li.appendChild(name);
+    li.appendChild(share);
+    regionsList.appendChild(li);
+  });
+  if (!regionsList.children.length) {
+    var emptyLi = document.createElement("li");
+    emptyLi.className = "faint";
+    emptyLi.textContent = "No regions yet.";
+    regionsList.appendChild(emptyLi);
+  }
+
+  // Quick links ride the URL-state contract (plain links — no JS wiring).
+  var links = overviewEl("[data-overview-links]");
+  links.textContent = "";
+  var quick = [
+    { href: "?view=intelligence&tab=regions", label: "Regions" },
+    { href: "?view=intelligence&tab=events", label: "Events" },
+    { href: "?view=intelligence&tab=compare", label: "Compare periods" },
+  ];
+  if (state.dashboardState.canManage) {
+    quick.push({ href: "?view=operations", label: "Operations" });
+  }
+  quick.forEach(function (q) {
+    var a = document.createElement("a");
+    a.className = "button button--outline button--small";
+    a.href = q.href;
+    a.textContent = q.label;
+    links.appendChild(a);
+  });
+
+  setText(overviewEl("[data-overview-asof]"), payload.latest_date ? "as of " + payload.latest_date : "");
+  if (empty) empty.hidden = true;
+  grid.hidden = false;
+}
+
+export function loadOverview() {
+  return Promise.all([api.status(), api.analysis("overview", { days: 30 })])
+    .then(function (results) {
+      renderOverview(results[1], results[0]);
+    })
+    .catch(function () {
+      var grid = overviewEl("[data-overview-grid]");
+      var empty = overviewEl("[data-overview-empty]");
+      if (grid) grid.hidden = true;
+      if (empty) {
+        empty.hidden = false;
+        setText(empty, "Couldn't load the intelligence overview.");
+      }
+    });
+}
