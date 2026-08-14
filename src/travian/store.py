@@ -411,24 +411,62 @@ def append_log(conn: sqlite3.Connection, job: str, level: str, message: str) -> 
         )
 
 
-def recent_logs(conn: sqlite3.Connection, n: int = 50) -> list[dict[str, str]]:
-    """The ``n`` most recent job_log rows, newest first, as ts/job/level/message dicts."""
+def recent_logs(
+    conn: sqlite3.Connection,
+    n: int = 50,
+    *,
+    job: str | None = None,
+    level: str | None = None,
+) -> list[dict[str, str]]:
+    """The ``n`` most recent job_log rows, newest first, as ts/job/level/message dicts.
+
+    ``job``/``level`` filter by exact match IN SQL (never a Python-side scan
+    of a 500-row window); both are validated by the API layer before they
+    reach this helper.
+    """
+    where: list[str] = []
+    params: list[object] = []
+    if job is not None:
+        where.append("job = ?")
+        params.append(job)
+    if level is not None:
+        where.append("level = ?")
+        params.append(level)
+    sql = "SELECT ts, job, level, message FROM job_log"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(n)
     rows = cast(
         list[Mapping[str, str]],
-        conn.execute(
-            "SELECT ts, job, level, message FROM job_log ORDER BY id DESC LIMIT ?",
-            (n,),
-        ).fetchall(),
+        conn.execute(sql, params).fetchall(),
     )
     return [dict(row) for row in rows]
 
 
 #: Success-message prefixes the bot jobs write (main.py) and the dashboard
 #: status reads back (app.py) — part of the status contract: only rows
-#: starting with these count as successful fetches/reports. Keep writer and
-#: reader in sync in the same change.
+#: starting with these count as successful fetches/reports. Writers go
+#: through ``record_fetch_success``/``record_report_success`` (below), so
+#: the prefix literal lives in exactly ONE place per job.
 FETCH_SUCCESS_PREFIX: Final = "snapshot saved for "
 REPORT_SUCCESS_PREFIX: Final = "report sent to channel "
+
+
+def record_fetch_success(conn: sqlite3.Connection, snapshot_date: str, village_count: int) -> None:
+    """Log one successful fetch — the ONLY writer of ``FETCH_SUCCESS_PREFIX`` rows.
+
+    The message shape is the reader's contract
+    (``latest_log_timestamp(job='fetch', level='info',
+    message_prefix=FETCH_SUCCESS_PREFIX)``); keep writer and reader in sync
+    through this helper instead of repeating the prefix literal.
+    """
+    append_log(conn, "fetch", "info", f"{FETCH_SUCCESS_PREFIX}{snapshot_date} ({village_count} villages)")
+
+
+def record_report_success(conn: sqlite3.Connection, channel_id: int, snapshot_date: str) -> None:
+    """Log one successful report — the ONLY writer of ``REPORT_SUCCESS_PREFIX`` rows."""
+    append_log(conn, "report", "info", f"{REPORT_SUCCESS_PREFIX}{channel_id} (snapshot {snapshot_date})")
 
 
 def latest_log_timestamp(
@@ -439,7 +477,8 @@ def latest_log_timestamp(
 
     Ordered by the autoincrement ``id`` (insertion order), so two entries
     written in the same second still resolve to the newest one; the prefix is
-    matched literally (LIKE-wildcards escaped).
+    matched literally (LIKE-wildcards escaped). Used for the admin
+    ``last_successful_fetch``/``last_successful_report`` status fields.
     """
     row = cast(
         Mapping[str, str] | None,
@@ -447,6 +486,24 @@ def latest_log_timestamp(
             "SELECT ts FROM job_log WHERE job = ? AND level = ? AND message LIKE ? ESCAPE '\\'"
             + " ORDER BY id DESC LIMIT 1",
             (job, level, _escape_like(message_prefix) + "%"),
+        ).fetchone(),
+    )
+    return row["ts"] if row is not None else None
+
+
+def latest_job_log_timestamp(conn: sqlite3.Connection, *, job: str, level: str) -> str | None:
+    """The ``ts`` of the newest ``job_log`` row for ``(job, level)`` — any
+    message — or None when no row matches.
+
+    Ordered by the autoincrement ``id`` (insertion order), so two entries
+    written in the same second still resolve to the newest one. Used for the
+    safe ``job_health`` status signal (timestamps only, never raw messages).
+    """
+    row = cast(
+        Mapping[str, str] | None,
+        conn.execute(
+            "SELECT ts FROM job_log WHERE job = ? AND level = ? ORDER BY id DESC LIMIT 1",
+            (job, level),
         ).fetchone(),
     )
     return row["ts"] if row is not None else None

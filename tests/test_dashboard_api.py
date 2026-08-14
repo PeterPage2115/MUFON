@@ -24,6 +24,7 @@ from typing import ClassVar, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -393,6 +394,47 @@ class TestStatus:
         assert body["alliance_tags"] == ["NOVA"]
         assert body["last_successful_fetch"] is None
         assert body["last_successful_report"] is None
+
+    def test_status_caps_errors_at_5(self, tmp_path: Path) -> None:
+        """The status error list is capped at the newest 5 — never the whole
+        error history (7 errors → exactly 5, newest first)."""
+        db = tmp_path / "s.db"
+        _seed_db(db)
+        conn = store.connect(db)
+        try:
+            for i in range(7):
+                store.append_log(conn, "fetch", "error", f"boom{i}")
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/status").json()
+        assert [e["message"] for e in body["errors"]] == [f"boom{i}" for i in range(6, 1, -1)]
+
+    def test_record_success_helpers_drive_last_success_fields(self, tmp_path: Path) -> None:
+        """The exact success helpers (record_fetch_success /
+        record_report_success) are the writers the status reader picks up —
+        last_successful_fetch/report and job_health agree on one timestamp."""
+        db = tmp_path / "s.db"
+        _seed_db(db)
+        conn = store.connect(db)
+        try:
+            store.record_fetch_success(conn, "2026-08-13", 42)
+            store.record_report_success(conn, 987654, "2026-08-13")
+            fetch_ts = store.latest_log_timestamp(
+                conn, job="fetch", level="info", message_prefix=store.FETCH_SUCCESS_PREFIX
+            )
+            report_ts = store.latest_log_timestamp(
+                conn, job="report", level="info", message_prefix=store.REPORT_SUCCESS_PREFIX
+            )
+            assert fetch_ts is not None and report_ts is not None
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/status").json()
+        assert body["last_successful_fetch"] == fetch_ts
+        assert body["last_successful_report"] == report_ts
+        assert body["job_health"]["fetch"]["last_success"] == fetch_ts
+        assert body["job_health"]["report"]["last_success"] == report_ts
 
 
 # --- GET /api/settings ---------------------------------------------------------
@@ -784,6 +826,45 @@ class TestLogs:
         with TestClient(_app(db, _env())) as client:
             assert client.get("/api/logs", params={"n": 0}).status_code == 422
             assert client.get("/api/logs", params={"n": -1}).status_code == 422
+
+    def test_job_and_level_filters(self, tmp_path: Path) -> None:
+        """Filters match exactly in SQL: job=, level=, and both combined."""
+        db = tmp_path / "l.db"
+        _seed_db(db, snapshot=False)
+        conn = store.connect(db)
+        try:
+            store.append_log(conn, "fetch", "info", "fetch a")
+            store.append_log(conn, "fetch", "error", "fetch b")
+            store.append_log(conn, "report", "error", "report a")
+            store.append_log(conn, "config", "warning", "config a")
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            by_job = client.get("/api/logs", params={"job": "fetch"}).json()
+            assert [(row["job"], row["message"]) for row in by_job] == [
+                ("fetch", "fetch b"),
+                ("fetch", "fetch a"),
+            ]
+            by_level = client.get("/api/logs", params={"level": "error"}).json()
+            assert [(row["job"], row["message"]) for row in by_level] == [
+                ("report", "report a"),
+                ("fetch", "fetch b"),
+            ]
+            both = client.get("/api/logs", params={"job": "fetch", "level": "error"}).json()
+            assert [(row["job"], row["message"]) for row in both] == [("fetch", "fetch b")]
+            # Filters compose with n (SQL LIMIT, not a JS-side trim).
+            limited = client.get("/api/logs", params={"job": "fetch", "level": "error", "n": 1}).json()
+            assert [(row["job"], row["message"]) for row in limited] == [("fetch", "fetch b")]
+            # Valid job with no rows → empty list, never 422.
+            assert client.get("/api/logs", params={"job": "alert"}).json() == []
+
+    def test_unknown_job_or_level_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "l.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/logs", params={"job": "bogus"}).status_code == 422
+            assert client.get("/api/logs", params={"level": "fatal"}).status_code == 422
+            assert client.get("/api/logs", params={"job": "fetch", "level": "bogus"}).status_code == 422
 
 
 # --- auth middleware -----------------------------------------------------------
@@ -1623,10 +1704,21 @@ class TestAnalysisVillageHistory:
 
 
 class TestAuthModes:
-    def test_explicit_none_overrides_non_loopback_bind(self, tmp_path: Path) -> None:
+    def test_explicit_none_on_non_loopback_fails_closed(self, tmp_path: Path) -> None:
+        """Fail-closed contract: explicit DASHBOARD_AUTH_MODE=none on a
+        non-loopback bind must NEVER open the API unauthenticated — the app
+        factory raises a safe config error."""
         db = tmp_path / "am.db"
         _seed_db(db)
         env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_AUTH_MODE="none")
+        with pytest.raises(ValueError, match="DASHBOARD_AUTH_MODE=none requires a loopback DASHBOARD_BIND"):
+            _app(db, env)
+
+    def test_explicit_none_on_loopback_still_opens(self, tmp_path: Path) -> None:
+        """Explicit ``none`` stays legal on a loopback bind (default bind)."""
+        db = tmp_path / "am.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_AUTH_MODE="none")
         with TestClient(_app(db, env)) as client:
             assert client.get("/api/status").status_code == 200
 
@@ -1847,6 +1939,18 @@ class TestOAuthFlow:
             assert body["freshness"]["snapshot_date"] == SNAPSHOT_DATE
             assert body["freshness"]["state"] in {"current", "stale", "gap"}
 
+            # Safe job health: timestamps only — never raw messages, channel
+            # ids or exceptions. _seed_logs wrote fetch error/warning/info
+            # rows; the info row is NOT a success (wrong prefix).
+            assert body["job_health"]["fetch"]["last_error"] is not None
+            assert body["job_health"]["fetch"]["last_warning"] is not None
+            assert body["job_health"]["fetch"]["last_success"] is None
+            assert body["job_health"]["report"] == {
+                "last_success": None,
+                "last_error": None,
+                "last_warning": None,
+            }
+
             # Intelligence and the village explorer stay open for members.
             assert client.get("/api/analysis/players").status_code == 200
             assert client.get("/api/analysis/villages", params={"q": "Village 1"}).status_code == 200
@@ -1865,6 +1969,13 @@ class TestOAuthFlow:
             assert len(client.get("/api/logs").json()) == 5
             status = client.get("/api/status").json()
             assert [e["message"] for e in status["errors"]] == ["err4", "err3", "err0"]
+            # Admins keep the same safe job_health signal alongside raw errors.
+            assert status["job_health"]["fetch"]["last_error"] is not None
+            assert status["job_health"]["report"] == {
+                "last_success": None,
+                "last_error": None,
+                "last_warning": None,
+            }
 
     def test_token_mode_bearer_keeps_admin_access(self, tmp_path: Path) -> None:
         db = tmp_path / "tok.db"
@@ -1932,6 +2043,8 @@ class TestOAuthFlow:
             assert client.get("/api/settings").status_code == 403
             assert client.get("/api/settings").json() == {"error": "admin required"}
             assert client.post("/api/actions/fetch").status_code == 403
+            assert client.post("/api/actions/report").status_code == 403
+            assert client.put("/api/settings", json={"FETCH_HOUR": 6}).status_code == 403
 
             # Logout kills the session (deletion cookie + in-memory removal).
             assert client.post("/api/auth/logout").status_code == 204
@@ -2089,6 +2202,21 @@ class TestRateLimit:
         assert limited.status_code == 429
         assert limited.json() == {"error": "rate limited"}
         assert int(limited.headers["Retry-After"]) > 0
+
+    def test_settings_put_limited_per_window(self, tmp_path: Path) -> None:
+        """PUT /api/settings shares the action limiter: 6 per window, then 429."""
+        db = tmp_path / "rl.db"
+        _seed_db(db)
+        env = _env(DASHBOARD_BIND="0.0.0.0", DASHBOARD_TOKEN="sekret")
+        with TestClient(_app(db, env)) as client:
+            headers = {"Authorization": "Bearer sekret"}
+            statuses = [
+                client.put("/api/settings", json={"FETCH_HOUR": 6}, headers=headers).status_code
+                for _ in range(7)
+            ]
+        assert statuses[:6] == [200] * 6  # no loop → schedule_sync "pending", still 200
+        assert statuses[6] == 429
+        assert client.put("/api/settings", json={"FETCH_HOUR": 7}, headers=headers).status_code == 429
 
 
 class TestAuthStatus:

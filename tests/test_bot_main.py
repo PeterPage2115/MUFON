@@ -228,6 +228,22 @@ class TestValidateConfig:
             _cfg(fetch_hour=0, fetch_minute=59, report_hour=23, report_minute=0)
         )  # must not raise
 
+    def test_explicit_none_on_non_loopback_exits(self, caplog: pytest.LogCaptureFixture) -> None:
+        env = {"DASHBOARD_AUTH_MODE": "none", "DASHBOARD_BIND": "0.0.0.0"}
+        with pytest.raises(SystemExit) as exc:
+            bot_main.validate_config(_cfg(), env)
+        assert exc.value.code == 1
+        assert "DASHBOARD_AUTH_MODE=none requires a loopback DASHBOARD_BIND" in caplog.text
+
+    def test_explicit_none_on_loopback_passes(self) -> None:
+        bot_main.validate_config(
+            _cfg(), {"DASHBOARD_AUTH_MODE": "none", "DASHBOARD_BIND": "127.0.0.1"}
+        )  # must not raise
+
+    def test_auth_guard_skipped_without_env(self) -> None:
+        # Tests call validate_config without env — the existing checks only.
+        bot_main.validate_config(_cfg())  # must not raise
+
 
 # --- settings merge ------------------------------------------------------------
 

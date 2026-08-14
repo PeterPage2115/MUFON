@@ -274,14 +274,18 @@ def load_merged_config(conn: sqlite3.Connection, env: Mapping[str, str]) -> Merg
     )
 
 
-def validate_config(cfg: MergedConfig) -> None:
+def validate_config(cfg: MergedConfig, env: Mapping[str, str] | None = None) -> None:
     """Startup validation of the merged config; logs a readable error and
     raises ``SystemExit(1)`` on the first problem.
 
     Checks: token present (env-only), channel present, both timezones
-    constructible via ``ZoneInfo``, hours 0-23, minutes 0-59. ``ALLIANCE_TAGS``
-    is deliberately NOT required (empty/unresolvable → runtime warning + daily
-    skip in ``run_report``).
+    constructible via ``ZoneInfo``, hours 0-23, minutes 0-59. With ``env``
+    (the real startup path passes ``os.environ``) it also fails closed for an
+    explicit ``DASHBOARD_AUTH_MODE=none`` on a non-loopback
+    ``DASHBOARD_BIND`` — the dashboard boundary (``dashboard.app._auth_method``)
+    raises the same safe config error for directly built apps.
+    ``ALLIANCE_TAGS`` is deliberately NOT required (empty/unresolvable →
+    runtime warning + daily skip in ``run_report``).
     """
     if not cfg.discord_token:
         logger.error("DISCORD_TOKEN not set (env only)")
@@ -289,6 +293,11 @@ def validate_config(cfg: MergedConfig) -> None:
     if cfg.channel_id is None:
         logger.error("CHANNEL_ID not set (env or settings)")
         raise SystemExit(1)
+    if env is not None and env.get("DASHBOARD_AUTH_MODE", "").strip().lower() == "none":
+        bind = env.get("DASHBOARD_BIND", "127.0.0.1")
+        if bind not in ("127.0.0.1", "localhost", "::1"):
+            logger.error("DASHBOARD_AUTH_MODE=none requires a loopback DASHBOARD_BIND")
+            raise SystemExit(1)
     for key, tz_name in (("FETCH_TZ", cfg.fetch_tz), ("REPORT_TZ", cfg.report_tz)):
         try:
             _ = ZoneInfo(tz_name)
@@ -472,6 +481,24 @@ def _record_failure_blocking(job: str, exc: Exception) -> None:
             conn.close()
 
 
+def _record_report_success_blocking(channel_id: int, snapshot_date: str) -> None:
+    """Log a successful report from a worker thread (own connection).
+
+    The single writer of ``REPORT_SUCCESS_PREFIX`` rows — message shape lives
+    in ``store.record_report_success``, never a manually repeated prefix
+    literal.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        store.record_report_success(conn, channel_id, snapshot_date)
+    except sqlite3.Error:
+        logger.exception("could not append job_log entry for successful report")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 # --- shared run functions (jobs, dashboard, /raport) ------------------------------
 
 #: Fixed reason for the empty-parse failure — the same text in the job_log
@@ -529,7 +556,7 @@ def _fetch_snapshot_phase(text: str) -> RunFetchStatus:
             return FETCH_STATUS_EMPTY_PARSE
         snapshot_date = datetime.now(ZoneInfo(cfg.fetch_tz)).date().isoformat()
         store.save_snapshot(conn, snapshot_date, rows)
-        store.append_log(conn, "fetch", "info", f"{store.FETCH_SUCCESS_PREFIX}{snapshot_date} ({len(rows)} villages)")
+        store.record_fetch_success(conn, snapshot_date, len(rows))
         return FETCH_STATUS_COMPLETED
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         _record_failure("fetch", exc, conn)
@@ -627,6 +654,8 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
         return REPORT_STATUS_SKIPPED
     try:
         phase = await asyncio.to_thread(_report_phase, require_today)
+        snapshot_date: str | None = None
+        message = ""
         match phase.action:
             case "stale":
                 return REPORT_STATUS_NO_SNAPSHOT_TODAY
@@ -636,7 +665,7 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
                 await _maybe_send_failure_alert("report", phase.failure_reason or "report failed")
                 return REPORT_STATUS_FAILED
             case "send":
-                message = f"{store.REPORT_SUCCESS_PREFIX}{channel_id} (snapshot {phase.snapshot_date})"
+                snapshot_date = phase.snapshot_date
             case "no_data":
                 message = f"no snapshots yet, sent no-data embed to channel {channel_id}"
         channel = await _get_channel_on_loop(channel_id)
@@ -646,7 +675,11 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
         embeds = phase.embeds
         assert embeds  # send/no_data always carry the embeds (see _ReportPhase)
         _ = await channel.send(embeds=embeds)
-        await asyncio.to_thread(_log_entry, "report", "info", message)
+        if phase.action == "send":
+            assert snapshot_date is not None
+            await asyncio.to_thread(_record_report_success_blocking, channel_id, snapshot_date)
+        else:
+            await asyncio.to_thread(_log_entry, "report", "info", message)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "report", exc)
         return REPORT_STATUS_FAILED
@@ -1107,7 +1140,7 @@ def main() -> None:
             raise SystemExit(1) from exc
     finally:
         conn.close()
-    validate_config(cfg)
+    validate_config(cfg, os.environ)
 
     global current_bot
     bot = TravianBot(cfg)

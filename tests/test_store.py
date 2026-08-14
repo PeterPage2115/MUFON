@@ -32,11 +32,14 @@ from travian.store import (
     get_settings,
     has_log_marker,
     init_schema,
+    latest_job_log_timestamp,
     latest_log_timestamp,
     list_dates,
     load_latest,
     load_villages,
     recent_logs,
+    record_fetch_success,
+    record_report_success,
     region_days,
     save_snapshot,
     search_villages,
@@ -547,6 +550,71 @@ def test_latest_log_timestamp_prefix_matched_literally(conn: sqlite3.Connection)
         latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for")
         is not None
     )
+
+
+def test_record_fetch_success_writes_reader_contract(conn: sqlite3.Connection) -> None:
+    # Given: the exact success helper (the ONLY writer of the prefix rows)
+    record_fetch_success(conn, "2026-08-13", 42)
+
+    # When: the status reader looks up the newest matching row
+    ts = latest_log_timestamp(conn, job="fetch", level="info", message_prefix="snapshot saved for ")
+
+    # Then: the helper's row IS the reader's success row, message shape intact
+    rows = recent_logs(conn)
+    assert rows[0]["job"] == "fetch"
+    assert rows[0]["message"] == "snapshot saved for 2026-08-13 (42 villages)"
+    assert ts == rows[0]["ts"]
+
+
+def test_record_report_success_writes_reader_contract(conn: sqlite3.Connection) -> None:
+    record_report_success(conn, 987654, "2026-08-13")
+
+    ts = latest_log_timestamp(conn, job="report", level="info", message_prefix="report sent to channel ")
+
+    rows = recent_logs(conn)
+    assert rows[0]["message"] == "report sent to channel 987654 (snapshot 2026-08-13)"
+    assert ts == rows[0]["ts"]
+
+
+def test_latest_job_log_timestamp_any_message_newest_wins(conn: sqlite3.Connection) -> None:
+    # Given: error/info rows interleaved, other jobs and levels present
+    append_log(conn, "fetch", "error", "first error")
+    append_log(conn, "fetch", "info", "snapshot saved for 2026-08-07 (10 villages)")
+    append_log(conn, "report", "error", "report error")
+
+    # When: the newest (job, level) timestamp is read, any message
+    fetch_err = latest_job_log_timestamp(conn, job="fetch", level="error")
+    fetch_warn = latest_job_log_timestamp(conn, job="fetch", level="warning")
+    report_err = latest_job_log_timestamp(conn, job="report", level="error")
+
+    # Then: newest per (job, level) wins; a missing level is None; the info
+    # success row never counts as an error.
+    rows = recent_logs(conn)
+    assert fetch_err == rows[2]["ts"]  # "first error" is the only fetch/error
+    assert fetch_warn is None
+    assert report_err == rows[0]["ts"]  # "report error" is the newest overall
+
+
+def test_latest_job_log_timestamp_newest_of_same_level(conn: sqlite3.Connection) -> None:
+    append_log(conn, "fetch", "error", "old error")
+    append_log(conn, "fetch", "warning", "warning row")
+    append_log(conn, "fetch", "error", "new error")
+
+    assert latest_job_log_timestamp(conn, job="fetch", level="error") == recent_logs(conn)[0]["ts"]
+    assert latest_job_log_timestamp(conn, job="fetch", level="warning") == recent_logs(conn)[1]["ts"]
+
+
+def test_recent_logs_filters_job_and_level_in_sql(conn: sqlite3.Connection) -> None:
+    append_log(conn, "fetch", "info", "fetch a")
+    append_log(conn, "fetch", "error", "fetch b")
+    append_log(conn, "report", "error", "report a")
+    append_log(conn, "config", "warning", "config a")
+
+    assert [e["message"] for e in recent_logs(conn, job="fetch")] == ["fetch b", "fetch a"]
+    assert [e["message"] for e in recent_logs(conn, level="error")] == ["report a", "fetch b"]
+    assert [e["message"] for e in recent_logs(conn, job="fetch", level="error")] == ["fetch b"]
+    assert [e["message"] for e in recent_logs(conn, job="alert")] == []
+    assert [e["message"] for e in recent_logs(conn, n=1, job="fetch")] == ["fetch b"]
 
 
 def test_has_log_marker_exact_message_match(conn: sqlite3.Connection) -> None:

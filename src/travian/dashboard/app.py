@@ -14,7 +14,10 @@ Endpoints:
 - ``GET /api/status`` — latest snapshot (date/source), village / player /
   alliance counts and total population aggregated from the latest snapshot's
   villages, the next fetch/report occurrences (``FETCH_*``/``REPORT_*`` merged
-  settings), the newest 5 ``job_log`` ERROR entries, merged ``ALLIANCE_TAGS``.
+  settings), the newest 5 ``job_log`` ERROR entries, merged ``ALLIANCE_TAGS``
+  and a safe ``job_health`` signal (fetch/report ``last_success``/
+  ``last_error``/``last_warning`` ISO timestamps — never raw messages or
+  exceptions; members receive it while ``errors`` stays sanitized to []).
 - ``GET /api/settings`` / ``PUT /api/settings`` — the merged settings. PUT
   validates EVERY key before writing (one atomic ``store.set_settings`` call,
   so a bad key never leaves a partial write) and rejects unknown keys — any
@@ -30,7 +33,9 @@ Endpoints:
   ``CHANNEL_ID`` (missing → 409) and ``require_today=False`` like ``/raport``.
   ``wait_for`` uses ``asyncio.shield`` so a timeout (504) never cancels the
   running job — the lock keeps a concurrent action skipping.
-- ``GET /api/logs?n=50`` — newest-first ``job_log`` rows (n clamped 1..500).
+- ``GET /api/logs?n=50[&job=fetch|report|config|alert][&level=info|warning|error]``
+  — newest-first ``job_log`` rows (n clamped 1..500; unknown filter values →
+  422; filters applied in SQL).
 - ``GET /api/analysis/regions?days=30`` — region share series over the
   window plus the latest-pair control table (``current`` rows carry the
   server-computed ``active``/``controlled``/``to50_needed`` fields).
@@ -199,6 +204,22 @@ class FreshnessData(TypedDict):
     gap_days: int | None
 
 
+class JobHealthEntry(TypedDict):
+    """Safe health signal for one job — ISO timestamps only, never raw
+    messages, channel ids or exceptions."""
+
+    last_success: str | None
+    last_error: str | None
+    last_warning: str | None
+
+
+class JobHealth(TypedDict):
+    """``GET /api/status`` job health per job (``fetch``/``report``)."""
+
+    fetch: JobHealthEntry
+    report: JobHealthEntry
+
+
 class StatusData(TypedDict):
     """The ``GET /api/status`` payload (see module docstring)."""
 
@@ -219,6 +240,7 @@ class StatusData(TypedDict):
     last_successful_fetch: str | None
     last_successful_report: str | None
     errors: list[dict[str, str]]
+    job_health: JobHealth
     alliance_tags: list[str]
     freshness: FreshnessData
 
@@ -383,7 +405,12 @@ def compute_freshness(dates: list[str], now: datetime, fetch_tz: str) -> Freshne
     )
 
 
-def _is_loopback(bind: str) -> bool:
+def is_loopback_bind(bind: str) -> bool:
+    """True for the loopback bind addresses that may run unauthenticated.
+
+    ``None`` mode (and the legacy no-auth heuristic) are only reachable on
+    these; anything else requires auth or fails closed.
+    """
     return bind in ("127.0.0.1", "localhost", "::1")
 
 
@@ -395,13 +422,17 @@ def _auth_required(env: Mapping[str, str]) -> bool:
     the host publishes loopback-only). Computed once at app creation — env is
     static for the process.
     """
-    return not _is_loopback(env.get("DASHBOARD_BIND", "127.0.0.1")) and env.get("DASHBOARD_LOOPBACK_ONLY") != "true"
+    return not is_loopback_bind(env.get("DASHBOARD_BIND", "127.0.0.1")) and env.get("DASHBOARD_LOOPBACK_ONLY") != "true"
 
 
 def _auth_method(env: Mapping[str, str]) -> str:
     """Resolve the dashboard auth mode from env, once at app creation.
 
-    - ``DASHBOARD_AUTH_MODE=none`` → "none".
+    - ``DASHBOARD_AUTH_MODE=none`` → "none" ONLY on a loopback bind; an
+      explicit ``none`` with a non-loopback bind raises a safe config error
+      (fail closed: a directly built app can never open protected routes
+      unauthenticated; the process path is guarded earlier by
+      ``bot.main.validate_config``).
     - ``oauth`` complete (all ``OAUTH_*`` set) → "oauth"; a missing key →
       warning + fallback to "token" (safe default, never silent openness).
     - anything else (unset or ``token``) → the legacy heuristic: "token"
@@ -409,6 +440,9 @@ def _auth_method(env: Mapping[str, str]) -> str:
     """
     mode = env.get("DASHBOARD_AUTH_MODE", "").strip().lower()
     if mode == "none":
+        bind = env.get("DASHBOARD_BIND", "127.0.0.1")
+        if not is_loopback_bind(bind):
+            raise ValueError("DASHBOARD_AUTH_MODE=none requires a loopback DASHBOARD_BIND")
         return "none"
     if mode == "oauth":
         if (
@@ -598,6 +632,19 @@ def _settings_payload(cfg: ConfigProtocol) -> SettingsPayload:
     )
 
 
+def _job_health(conn: sqlite3.Connection, job: str, success_prefix: str) -> JobHealthEntry:
+    """Safe per-job health: newest success/error/warning timestamps.
+
+    Timestamps only — no raw message, channel id or exception is exposed;
+    this is the member-visible health signal that replaces raw ``errors``.
+    """
+    return JobHealthEntry(
+        last_success=store.latest_log_timestamp(conn, job=job, level="info", message_prefix=success_prefix),
+        last_error=store.latest_job_log_timestamp(conn, job=job, level="error"),
+        last_warning=store.latest_job_log_timestamp(conn, job=job, level="warning"),
+    )
+
+
 def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[], StatusData]:
     """Build the real ``/api/status`` payload builder for ``db_path``.
 
@@ -643,6 +690,10 @@ def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[],
                     conn, job="report", level="info", message_prefix=store.REPORT_SUCCESS_PREFIX
                 ),
                 errors=_recent_errors(conn),
+                job_health={
+                    "fetch": _job_health(conn, "fetch", store.FETCH_SUCCESS_PREFIX),
+                    "report": _job_health(conn, "report", store.REPORT_SUCCESS_PREFIX),
+                },
                 alliance_tags=cfg.alliance_tags,
                 freshness=compute_freshness(store.list_dates(conn), datetime.now(UTC), cfg.fetch_tz),
             )
@@ -1088,7 +1139,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         return JSONResponse({"status": "ok", "message": result})
 
     async def logs(
-        request: Request, n: Annotated[int, Query(ge=1, le=_MAX_LOG_WINDOW)] = 50
+        request: Request,
+        n: Annotated[int, Query(ge=1, le=_MAX_LOG_WINDOW)] = 50,
+        job: Annotated[str | None, Query(pattern="^(fetch|report|config|alert)$")] = None,
+        level: Annotated[str | None, Query(pattern="^(info|warning|error)$")] = None,
     ) -> Response:
         if not _admin_ok(request):
             return JSONResponse({"error": "admin required"}, status_code=403)
@@ -1096,7 +1150,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         def read() -> list[dict[str, str]]:
             conn = store.connect(db_path)
             try:
-                return store.recent_logs(conn, n)
+                return store.recent_logs(conn, n, job=job, level=level)
             finally:
                 conn.close()
 
