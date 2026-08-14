@@ -304,8 +304,66 @@ function submitSettings(event) {
 
 /* --- actions ---------------------------------------------------------------- */
 
+//: Run polling is allowed ONLY while an explicitly launched action is
+//: settling: it stops at the first terminal status (ROADMAP.md §6) and never
+//: refreshes daily KPIs in the background.
+var RUN_POLL_MS = 1500;
+var RUN_POLL_MAX = 80; // ~2 minutes of settling time
+var TERMINAL_RUN_STATUSES = ["succeeded", "skipped", "failed", "timed_out"];
+
+function runStatusWord(status) {
+  return status === "timed_out" ? "timed out" : status;
+}
+
+function pollRun(runId, onUpdate) {
+  var attempts = 0;
+  var timer = window.setInterval(function () {
+    attempts += 1;
+    api
+      .run(runId)
+      .then(function (run) {
+        if (!run) return;
+        if (onUpdate) onUpdate(run);
+        if (TERMINAL_RUN_STATUSES.indexOf(run.status) !== -1 || attempts >= RUN_POLL_MAX) {
+          window.clearInterval(timer);
+          loadRuns();
+        }
+      })
+      .catch(function () {
+        if (attempts >= RUN_POLL_MAX) window.clearInterval(timer);
+      });
+  }, RUN_POLL_MS);
+}
+
+function hideActionConfirm() {
+  var box = document.getElementById("action-confirm");
+  if (box) box.hidden = true;
+}
+
+function requestReportConfirmation() {
+  var snapshot = state.lastStatus ? state.lastStatus.snapshot_date : null;
+  var channel = currentSettings ? currentSettings.CHANNEL_ID : null;
+  var copy = document.querySelector("[data-action-confirm-copy]");
+  if (copy) {
+    if (snapshot) {
+      setText(
+        copy,
+        "Send the daily report to channel " + (channel === null || channel === undefined ? "?" : channel) +
+          " for snapshot " + snapshot + "?"
+      );
+    } else {
+      setText(copy, "No snapshot stored yet — the report will send the no-data placeholder. Send anyway?");
+    }
+  }
+  var box = document.getElementById("action-confirm");
+  if (box) box.hidden = false;
+  var yes = document.getElementById("action-confirm-yes");
+  if (yes) yes.focus();
+}
+
 function runAction(kind) {
   if (actionInFlight) return;
+  hideActionConfirm();
   actionInFlight = true;
 
   var button = kind === "fetch" ? els.fetchButton : els.reportButton;
@@ -320,8 +378,18 @@ function runAction(kind) {
       var message = body && body.message ? body.message : "Done";
       var title = kind === "fetch" ? "Fetch completed" : "Report action completed";
       showToast(title, message, "success");
-      setText($("#action-feedback span:last-child"), "Result: " + message);
+      var runTag = body && body.run_id ? " · run " + body.run_id.slice(0, 8) : "";
+      setText($("#action-feedback span:last-child"), "Result: " + message + runTag);
       els.actionFeedback.classList.add("is-success");
+      if (body && body.run_id) {
+        pollRun(body.run_id, function (run) {
+          setText(
+            $("#action-feedback span:last-child"),
+            "Run " + run.run_id.slice(0, 8) + ": " + runStatusWord(run.status) +
+              (run.result ? " · " + run.result : "")
+          );
+        });
+      }
     })
     .catch(function (err) {
       var message = err.status === 409 || err.status === 504 ? err.message : "Action failed: " + err.message;
@@ -329,14 +397,25 @@ function runAction(kind) {
       showToast(title, message, "error");
       setText($("#action-feedback span:last-child"), message);
       els.actionFeedback.classList.add("is-error");
+      // A timed-out action still settles later (asyncio.shield): follow its
+      // run row to the terminal state.
+      if (err.status === 504 && err.body && err.body.run_id) {
+        pollRun(err.body.run_id, function (run) {
+          setText(
+            $("#action-feedback span:last-child"),
+            "Run " + run.run_id.slice(0, 8) + ": " + runStatusWord(run.status) +
+              (run.result ? " · " + run.result : "")
+          );
+        });
+      }
     })
     .then(function () {
       // A fetch may create a snapshot; a report may fail on missing data —
       // refresh status, logs and the active analysis panel so the console
       // reflects reality (on demand, never a background poller).
-      var jobs = [api.status(), api.logs(), refreshActiveAnalysis()];
+      var jobs = [api.status(), api.logs(), refreshActiveAnalysis(), loadRuns()];
       return Promise.all(jobs).catch(function () {
-        return [null, null, null];
+        return [null, null, null, null];
       });
     })
     .then(function (results) {
@@ -501,13 +580,101 @@ export function loadSettings() {
     });
 }
 
+function cell(text) {
+  var td = document.createElement("td");
+  td.className = "num";
+  td.textContent = text === null || text === undefined ? "\u2014" : String(text);
+  return td;
+}
+
+function runsFilters() {
+  return {
+    job: document.getElementById("runs-job") ? document.getElementById("runs-job").value : "",
+    status: document.getElementById("runs-status") ? document.getElementById("runs-status").value : "",
+  };
+}
+
+export function loadRuns() {
+  var filters = runsFilters();
+  return api
+    .runs({ job: filters.job, status: filters.status, limit: 50 })
+    .then(renderRuns)
+    .catch(function () {});
+}
+
+function renderRuns(runs) {
+  var tbody = document.querySelector("[data-runs-body]");
+  if (!tbody) return;
+  tbody.textContent = "";
+  if (!runs || !runs.length) {
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = 6;
+    td.className = "empty-cell";
+    td.textContent = "No runs yet.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  runs.forEach(function (run) {
+    var tr = document.createElement("tr");
+    var tdStarted = document.createElement("td");
+    tdStarted.className = "date-cell";
+    tdStarted.textContent = formatTime(run.started_at);
+    tr.appendChild(tdStarted);
+    tr.appendChild(cell(run.job));
+    tr.appendChild(cell(run.source));
+    var tdStatus = document.createElement("td");
+    tdStatus.className = "run-status run-status--" + run.status;
+    tdStatus.textContent = runStatusWord(run.status);
+    tr.appendChild(tdStatus);
+    tr.appendChild(cell(run.result || "—"));
+    tr.appendChild(cell(run.snapshot_date || "—"));
+    tbody.appendChild(tr);
+  });
+}
+
+export function renderDbStats() {
+  var caption = document.querySelector("[data-db-stats]");
+  var stats = state.lastStatus ? state.lastStatus.database_stats : null;
+  if (!caption) return;
+  if (!stats || !stats.snapshot_count) {
+    setText(caption, "");
+    return;
+  }
+  var size = stats.db_size_bytes >= 1048576
+    ? (stats.db_size_bytes / 1048576).toFixed(1) + " MB"
+    : Math.max(1, Math.round(stats.db_size_bytes / 1024)) + " KB";
+  setText(
+    caption,
+    stats.snapshot_count + " snapshot" + (stats.snapshot_count === 1 ? "" : "s") +
+      " · " + size + " · " + (stats.oldest_snapshot_date || "—") + " → " + (stats.latest_snapshot_date || "—")
+  );
+}
+
+function wireRunsFilters() {
+  var job = document.getElementById("runs-job");
+  var status = document.getElementById("runs-status");
+  if (job) job.addEventListener("change", loadRuns);
+  if (status) status.addEventListener("change", loadRuns);
+}
+
 export function wireActionButtons() {
   els.fetchButton.addEventListener("click", function () {
     runAction("fetch");
   });
   els.reportButton.addEventListener("click", function () {
+    // Conscious confirmation: channel + snapshot date before any Discord
+    // message leaves the process (ROADMAP.md §6).
+    requestReportConfirmation();
+  });
+  var yes = document.getElementById("action-confirm-yes");
+  var no = document.getElementById("action-confirm-no");
+  if (yes) yes.addEventListener("click", function () {
     runAction("report");
   });
+  if (no) no.addEventListener("click", hideActionConfirm);
+  wireRunsFilters();
 }
 
 // loadLogs is defined in the job-log section above; exported for the

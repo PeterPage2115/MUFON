@@ -713,10 +713,61 @@
                 <span class="button-spinner" aria-hidden="true"></span>
               </button>
             </div>
+            <div class="action-confirm" id="action-confirm" hidden>
+              <p class="action-confirm__copy" data-action-confirm-copy></p>
+              <div class="action-confirm__buttons">
+                <button class="button button--primary button--small" type="button" id="action-confirm-yes">Confirm</button>
+                <button class="button button--outline button--small" type="button" id="action-confirm-no">Cancel</button>
+              </div>
+            </div>
             <div class="action-feedback" id="action-feedback" role="status" aria-live="polite">
               <span class="feedback-marker" aria-hidden="true"></span>
               <span>Ready when you are.</span>
             </div>
+          </article>
+
+          <article class="card card--runs" aria-labelledby="runs-title">
+            <header class="card__header">
+              <div>
+                <p class="overline">Identifiable runs</p>
+                <h2 id="runs-title">Run history</h2>
+              </div>
+              <span class="card-caption" data-db-stats></span>
+            </header>
+            <div class="runs-filters">
+              <label class="overline" for="runs-job">Job</label>
+              <select id="runs-job" class="analysis-select" aria-label="Filter runs by job">
+                <option value="">All jobs</option>
+                <option value="fetch">fetch</option>
+                <option value="report">report</option>
+              </select>
+              <label class="overline" for="runs-status">Status</label>
+              <select id="runs-status" class="analysis-select" aria-label="Filter runs by status">
+                <option value="">All statuses</option>
+                <option value="pending">pending</option>
+                <option value="running">running</option>
+                <option value="succeeded">succeeded</option>
+                <option value="skipped">skipped</option>
+                <option value="failed">failed</option>
+                <option value="timed_out">timed out</option>
+              </select>
+            </div>
+            <div class="data-table__wrap">
+              <table class="data-table" aria-label="Run history">
+                <thead>
+                  <tr>
+                    <th class="th--left" scope="col">Started</th>
+                    <th class="th--left" scope="col">Job</th>
+                    <th class="th--left" scope="col">Source</th>
+                    <th class="th--left" scope="col">Status</th>
+                    <th class="th--left" scope="col">Result</th>
+                    <th class="th--left" scope="col">Snapshot</th>
+                  </tr>
+                </thead>
+                <tbody data-runs-body></tbody>
+              </table>
+            </div>
+            <p class="field-help" data-runs-note>Runs settle after the action completes; Retry re-runs the same action with a new run ID.</p>
           </article>
 
           <article class="card card--settings" aria-labelledby="settings-title">

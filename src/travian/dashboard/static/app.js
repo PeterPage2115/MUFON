@@ -8,7 +8,7 @@ import { api, setTokenGetter, setUnauthorizedHandler } from "./app/api.js";
 import { tokenStore, loadAuthStatus, showTokenDialog, canManageFromAuth } from "./app/auth.js";
 import { loadStatus, loadOverview, setRefreshBusy } from "./app/status.js";
 import { wireAnalysis, activateTab, tabLoaders, refreshActiveAnalysis, applyInitialContext } from "./app/analysis.js";
-import { wireActionButtons, loadSettings, loadLogs, wireForm } from "./app/operations.js";
+import { wireActionButtons, loadSettings, loadLogs, loadRuns, renderDbStats, wireForm } from "./app/operations.js";
 
 var els = state.els;
 var dashboardState = state.dashboardState;
@@ -100,6 +100,8 @@ function onDashboardViewActivated(name) {
       loadSettings();
     }
     loadLogs();
+    loadRuns();
+    renderDbStats();
   }
 }
 

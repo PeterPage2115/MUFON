@@ -1436,7 +1436,7 @@ class TestJobReport:
     def _spy_run_report(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, bool]]:
         calls: list[tuple[int, bool]] = []
 
-        async def spy(channel_id: int, require_today: bool = True) -> None:
+        async def spy(channel_id: int, require_today: bool = True, run_id: str | None = None) -> None:
             calls.append((channel_id, require_today))
 
         monkeypatch.setattr(bot_main, "run_report", spy)
@@ -1500,3 +1500,153 @@ class TestJobReport:
         calls = self._spy_run_report(monkeypatch)
         asyncio.run(bot_main.job_report())
         assert calls == [(CHANNEL_ID, True)]
+
+
+# --- Faza 4: identifiable runs (job_runs lifecycle) -----------------------------
+
+
+class TestRunRows:
+    def test_run_fetch_with_run_id_tracks_status(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        db = _db_path(tmp_path)
+        store.init_schema(store.connect(db))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: FIXTURE_PATH.read_text())
+
+        conn = store.connect(db)
+        store.create_run(conn, run_id="run-fetch-1", job="fetch", source="test")
+        conn.close()
+        asyncio.run(bot_main.run_fetch(run_id="run-fetch-1"))
+        conn = store.connect(db)
+        try:
+            row = store.get_run(conn, "run-fetch-1")
+        finally:
+            conn.close()
+        assert row is not None
+        assert row["status"] == "succeeded"
+        assert row["job"] == "fetch"
+        assert row["result"] == "completed"
+        assert row["snapshot_date"] == _fetch_date()
+
+    def test_run_fetch_failed_maps_to_failed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        store.init_schema(store.connect(_db_path(tmp_path)))
+
+        def fail(url: str) -> str:
+            raise MapSqlFetchError("fetch failed after 4 attempts")
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", fail)
+        conn = store.connect(_db_path(tmp_path))
+        store.create_run(conn, run_id="run-fetch-2", job="fetch", source="test")
+        conn.close()
+        asyncio.run(bot_main.run_fetch(run_id="run-fetch-2"))
+        conn = store.connect(_db_path(tmp_path))
+        try:
+            row = store.get_run(conn, "run-fetch-2")
+        finally:
+            conn.close()
+        assert row["status"] == "failed"
+        assert row["result"] == "failed"
+
+    def test_run_fetch_skipped_when_lock_held(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path)
+        db = _db_path(tmp_path)
+        store.init_schema(store.connect(db))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: FIXTURE_PATH.read_text())
+
+        conn = store.connect(db)
+        store.create_run(conn, run_id="run-fetch-3", job="fetch", source="test")
+        conn.close()
+
+        async def scenario() -> None:
+            lock = bot_main._get_run_lock()
+            await lock.acquire()
+            try:
+                result = await bot_main.run_fetch(run_id="run-fetch-3")
+                assert result == bot_main.FETCH_STATUS_SKIPPED
+            finally:
+                lock.release()
+
+        asyncio.run(scenario())
+        conn = store.connect(db)
+        try:
+            row = store.get_run(conn, "run-fetch-3")
+        finally:
+            conn.close()
+        assert row["status"] == "skipped"
+
+    def test_run_report_with_run_id_sent_maps_succeeded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        db = _db_path(tmp_path)
+        conn = store.connect(db)
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1, population=100), _row(2, population=100)])
+        conn.close()
+        conn = store.connect(db)
+        store.create_run(conn, run_id="run-report-1", job="report", source="test")
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=False, run_id="run-report-1"))
+        assert len(channel.sent) == 1
+        conn = store.connect(db)
+        try:
+            row = store.get_run(conn, "run-report-1")
+        finally:
+            conn.close()
+        assert row["status"] == "succeeded"
+        assert row["result"] == "sent"
+        assert row["snapshot_date"] == _fetch_date()
+
+    def test_scheduler_and_discord_sources(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """job_fetch creates a scheduler run; /raport creates a discord run."""
+        _set_bot_env(monkeypatch, tmp_path)
+        db = _db_path(tmp_path)
+        store.init_schema(store.connect(db))
+        monkeypatch.setattr(bot_main, "fetch_map_sql", lambda url: FIXTURE_PATH.read_text())
+
+        asyncio.run(bot_main.job_fetch())
+        conn = store.connect(db)
+        try:
+            rows = store.list_runs(conn, job="fetch")
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["source"] == "scheduler"
+        assert rows[0]["status"] == "succeeded"
+
+        # /raport surface: discord source, succeeded — a NOVA snapshot makes
+        # the report build (the fixture map has no NOVA villages).
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        conn = store.connect(db)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1, population=100)])
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main._discord_run_report(CHANNEL_ID, require_today=False))
+        assert len(channel.sent) == 1
+        conn = store.connect(db)
+        try:
+            rows = store.list_runs(conn, job="report")
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["source"] == "discord"
+        assert rows[0]["status"] == "succeeded"
+
+    def test_job_report_scheduler_source(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA")
+        db = _db_path(tmp_path)
+        conn = store.connect(db)
+        store.init_schema(conn)
+        _seed(conn, date.fromisoformat(_fetch_date()), [_row(1, population=100)])
+        conn.close()
+        _install_bot({CHANNEL_ID: FakeChannel()})
+
+        asyncio.run(bot_main.job_report())
+        conn = store.connect(db)
+        try:
+            rows = store.list_runs(conn, job="report")
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["source"] == "scheduler"
+        assert rows[0]["status"] == "succeeded"

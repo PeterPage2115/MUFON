@@ -49,8 +49,8 @@ class FakeRunFetch:
         self.calls: list[object] = []
         self.result = bot_main.FETCH_STATUS_COMPLETED
 
-    async def __call__(self) -> str:
-        self.calls.append(1)
+    async def __call__(self, run_id: str | None = None) -> str:
+        self.calls.append(run_id)
         return self.result
 
 
@@ -61,8 +61,8 @@ class FakeRunReport:
         self.calls: list[tuple[int, bool]] = []
         self.result = bot_main.REPORT_STATUS_SENT
 
-    async def __call__(self, channel_id: int, require_today: bool = True) -> str:
-        self.calls.append((channel_id, require_today))
+    async def __call__(self, channel_id: int, require_today: bool = True, run_id: str | None = None) -> str:
+        self.calls.append((channel_id, require_today, run_id))
         return self.result
 
 
@@ -740,8 +740,11 @@ class TestActions:
         finally:
             loop_thread.stop()
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "message": bot_main.FETCH_STATUS_COMPLETED}
-        assert run_fetch.calls == [1]
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["message"] == bot_main.FETCH_STATUS_COMPLETED
+        assert body["run_id"] and len(body["run_id"]) == 32  # hex uuid
+        assert run_fetch.calls == [body["run_id"]]
 
     def test_fetch_status_string_passthrough(self, tmp_path: Path) -> None:
         db = tmp_path / "a.db"
@@ -755,7 +758,10 @@ class TestActions:
         finally:
             loop_thread.stop()
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "message": bot_main.FETCH_STATUS_SKIPPED}
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["message"] == bot_main.FETCH_STATUS_SKIPPED
+        assert len(body["run_id"]) == 32
 
     def test_report_without_channel_409(self, tmp_path: Path) -> None:
         db = tmp_path / "a.db"
@@ -782,8 +788,11 @@ class TestActions:
         finally:
             loop_thread.stop()
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "message": bot_main.REPORT_STATUS_SENT}
-        assert run_report.calls == [(CHANNEL_ID, False)]  # require_today=False like /raport
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["message"] == bot_main.REPORT_STATUS_SENT
+        assert len(body["run_id"]) == 32
+        assert run_report.calls == [(CHANNEL_ID, False, body["run_id"])]  # require_today=False like /raport
 
     def test_report_channel_from_db_settings(self, tmp_path: Path) -> None:
         db = tmp_path / "a.db"
@@ -801,7 +810,9 @@ class TestActions:
         finally:
             loop_thread.stop()
         assert resp.status_code == 200
-        assert run_report.calls == [(999, False)]
+        body = resp.json()
+        assert len(body["run_id"]) == 32
+        assert run_report.calls == [(999, False, body["run_id"])]
 
 
 # --- GET /api/logs -------------------------------------------------------------
@@ -2070,7 +2081,10 @@ class TestOAuthFlow:
                 # fetch dispatches to the fake run function on the bot loop.
                 res = client.post("/api/actions/fetch")
                 assert res.status_code == 200
-                assert res.json() == {"status": "ok", "message": "completed"}
+                body = res.json()
+                assert body["status"] == "ok"
+                assert body["message"] == "completed"
+                assert len(body["run_id"]) == 32
         finally:
             loop.stop()
 
@@ -2561,3 +2575,138 @@ class TestRegionVillages:
             body = client.get("/api/analysis/regions/Testland/villages").json()
         assert body["snapshot_date"] is None
         assert body["results"] == []
+
+
+# --- Faza 4: identifiable runs (job_runs, 504 + run_id, run history) -----------
+
+
+class SlowRunFetch(FakeRunFetch):
+    """A fetch that outlives ``_ACTION_TIMEOUT`` and then completes."""
+
+    def __init__(self, delay: float = 0.4) -> None:
+        super().__init__()
+        self.delay = delay
+        self.done = threading.Event()
+
+    async def __call__(self, run_id: str | None = None) -> str:
+        self.calls.append(run_id)
+        await asyncio.sleep(self.delay)
+        self.result = bot_main.FETCH_STATUS_COMPLETED
+        self.done.set()
+        return self.result
+
+
+class TestRuns:
+    def test_timeout_returns_run_id_and_later_status(self, tmp_path: Path, monkeypatch) -> None:
+        """A slow action 504s WITH its run id; the shielded coroutine keeps
+        running and the run row settles to its real status afterwards."""
+        db = tmp_path / "runs.db"
+        _seed_db(db)
+        monkeypatch.setenv("SQLITE_PATH", str(db))
+        loop_thread = LoopThread()
+        monkeypatch.setattr(dashboard_app, "_ACTION_TIMEOUT", 0.05)
+
+        def slow_fetch(_url: str) -> str:
+            time.sleep(0.4)
+            return (
+                "INSERT INTO `x_world` VALUES (1,0,0,1,1,'Village 1',1,'Player 1',7,'NOVA',100,'',TRUE,FALSE,FALSE,10);\n"
+            )
+
+        monkeypatch.setattr(bot_main, "fetch_map_sql", slow_fetch)
+        try:
+            with TestClient(_app(db, _env(), run_fetch=bot_main.run_fetch, loop=loop_thread.loop)) as client:
+                resp = client.post("/api/actions/fetch")
+            assert resp.status_code == 504
+            body = resp.json()
+            assert body["status"] == "timed_out"
+            run_id = body["run_id"]
+            assert len(run_id) == 32
+
+            # The run finishes later (shield): its row ends succeeded. The
+            # loop must stay alive until the coroutine completes.
+            deadline = time.monotonic() + 5
+            row = None
+            while time.monotonic() < deadline:
+                conn = store.connect(db)
+                try:
+                    row = store.get_run(conn, run_id)
+                finally:
+                    conn.close()
+                if row is not None and row["status"] in ("succeeded", "skipped", "failed", "timed_out"):
+                    break
+                time.sleep(0.05)
+        finally:
+            loop_thread.stop()
+        conn = store.connect(db)
+        try:
+            row = store.get_run(conn, run_id)
+        finally:
+            conn.close()
+        assert row is not None
+        assert row["status"] == "succeeded"
+        assert row["source"] == "dashboard"
+        assert row["result"] == "completed"
+
+    def test_runs_endpoint_history_and_filters(self, tmp_path: Path) -> None:
+        db = tmp_path / "runs.db"
+        _seed_db(db)
+        conn = store.connect(db)
+        try:
+            store.create_run(conn, run_id="a1" * 16, job="fetch", source="scheduler")
+            store.finish_run(conn, run_id="a1" * 16, status="succeeded", result="completed")
+            store.create_run(conn, run_id="b2" * 16, job="report", source="discord")
+            store.finish_run(conn, run_id="b2" * 16, status="failed", result="failed")
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            history = client.get("/api/operations/runs").json()
+        assert [r["run_id"] for r in history] == ["b2" * 16, "a1" * 16]
+        assert client.get("/api/operations/runs", params={"job": "fetch"}).json()[0]["run_id"] == "a1" * 16
+        assert client.get("/api/operations/runs", params={"status": "failed"}).json()[0]["run_id"] == "b2" * 16
+        # Unknown filters → 422; limit bounds enforced.
+        assert client.get("/api/operations/runs", params={"job": "bogus"}).status_code == 422
+        assert client.get("/api/operations/runs", params={"status": "nope"}).status_code == 422
+        assert client.get("/api/operations/runs", params={"limit": 0}).status_code == 422
+        assert client.get("/api/operations/runs", params={"limit": 201}).status_code == 422
+        # Detail: known run 200, unknown 404.
+        assert client.get("/api/operations/runs/" + "a1" * 16).json()["status"] == "succeeded"
+        assert client.get("/api/operations/runs/nope").status_code == 404
+
+    def test_runs_admin_only(self, tmp_path: Path, monkeypatch) -> None:
+        """OAuth members never see the run history."""
+        from travian.dashboard import auth as dashboard_auth_mod
+
+        db = tmp_path / "oa-runs.db"
+        _seed_db(db)
+        env = {
+            "DASHBOARD_AUTH_MODE": "oauth",
+            "OAUTH_CLIENT_ID": "cid",
+            "OAUTH_CLIENT_SECRET": "csec",
+            "OAUTH_GUILD_ID": "100",
+            "OAUTH_PUBLIC_ORIGIN": "http://testserver",
+            "SQLITE_PATH": str(db),
+        }
+        monkeypatch.setattr(dashboard_auth_mod, "exchange_code", lambda *a, **k: {"access_token": "at"})
+        monkeypatch.setattr(dashboard_auth_mod, "fetch_user", lambda token: {"id": "u1", "username": "T"})
+        monkeypatch.setattr(dashboard_auth_mod, "fetch_guild_member", lambda token, guild_id: {"roles": []})
+        monkeypatch.setattr(dashboard_auth_mod, "fetch_guilds", lambda token: [])
+        # Seed a valid OAuth state through the app's module store (the same
+        # mechanism the browser fixture uses), then drive the real callback.
+        from datetime import UTC as utc
+        from datetime import datetime as dt
+        from datetime import timedelta as td
+
+        dashboard_app._store_oauth_state("member-state-1", dt.now(utc) + td(minutes=5))
+        with TestClient(_app(db, env)) as client:
+            client.get("/api/auth/callback?code=x&state=member-state-1")
+            assert client.get("/api/operations/runs").status_code == 403
+            assert client.get("/api/operations/runs/abc").status_code == 403
+
+    def test_status_includes_database_stats(self, tmp_path: Path) -> None:
+        db = tmp_path / "stats.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/status").json()
+        assert body["database_stats"]["snapshot_count"] == 1
+        assert body["database_stats"]["latest_snapshot_date"] == SNAPSHOT_DATE
+        assert body["database_stats"]["db_size_bytes"] > 0

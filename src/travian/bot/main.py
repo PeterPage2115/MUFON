@@ -122,6 +122,7 @@ import logging
 import os
 import sqlite3
 import threading
+import uuid
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
@@ -196,6 +197,25 @@ REPORT_STATUS_NO_DATA: Final[RunReportStatus] = "no data yet"
 REPORT_STATUS_NO_ALLIANCE: Final[RunReportStatus] = "no alliance"
 REPORT_STATUS_CHANNEL_NOT_FOUND: Final[RunReportStatus] = "channel not found"
 REPORT_STATUS_FAILED: Final[RunReportStatus] = "failed"
+
+#: Outcome → job_runs status mapping (Faza 4): the run table stores exactly
+#: pending|running|succeeded|skipped|failed|timed_out; the short outcome
+#: strings the run functions return map onto them per ROADMAP.md §6.
+def _run_status_for_fetch(result: RunFetchStatus) -> str:
+    if result == FETCH_STATUS_COMPLETED:
+        return "succeeded"
+    if result == FETCH_STATUS_SKIPPED:
+        return "skipped"
+    return "failed"  # empty parse / failed
+
+
+def _run_status_for_report(result: RunReportStatus) -> str:
+    if result in (REPORT_STATUS_SENT, REPORT_STATUS_NO_DATA):
+        return "succeeded"
+    if result in (REPORT_STATUS_SKIPPED, REPORT_STATUS_NO_SNAPSHOT_TODAY, REPORT_STATUS_NO_ALLIANCE):
+        return "skipped"
+    return "failed"  # channel not found / failed
+
 
 #: Dashboard settings→scheduler sync outcomes (iteration 2):
 #: - ``applied`` — at least one trigger was rescheduled from the saved config;
@@ -481,6 +501,69 @@ def _record_failure_blocking(job: str, exc: Exception) -> None:
             conn.close()
 
 
+def _start_run(job: str, source: str, requested_by: str | None = None) -> str | None:
+    """Create a ``job_runs`` row (own connection); None when the write fails.
+
+    The dashboard actions create their rows through the same store helper
+    with ``source="dashboard"``; the row is marked running when the bot
+    loop picks the run up.
+    """
+    run_id = uuid.uuid4().hex
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        store.create_run(conn, run_id=run_id, job=job, source=source, requested_by=requested_by)
+    except sqlite3.Error:
+        logger.exception("could not create job_runs entry for %s", job)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    return run_id
+
+
+def _mark_run_running_blocking(run_id: str) -> None:
+    """pending → running (own connection, best-effort)."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        with conn:
+            _ = conn.execute("UPDATE job_runs SET status = 'running' WHERE run_id = ?", (run_id,))
+    except sqlite3.Error:
+        logger.exception("could not mark job_runs entry running for %s", run_id)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _finish_run(
+    run_id: str,
+    status: str,
+    result: str | None = None,
+    snapshot_date: str | None = None,
+) -> None:
+    """Write the terminal run state (own connection, best-effort)."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = store.connect(_sqlite_path(os.environ))
+        store.finish_run(conn, run_id=run_id, status=status, result=result, snapshot_date=snapshot_date)
+    except (sqlite3.Error, ValueError):
+        logger.exception("could not finish job_runs entry %s", run_id)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _latest_snapshot_date() -> str | None:
+    """The latest stored snapshot date (for run rows), own connection."""
+    conn = store.connect(_sqlite_path(os.environ))
+    try:
+        latest = store.load_latest(conn)
+        return latest.snapshot_date if latest is not None else None
+    finally:
+        conn.close()
+
+
 def _record_report_success_blocking(channel_id: int, snapshot_date: str) -> None:
     """Log a successful report from a worker thread (own connection).
 
@@ -506,7 +589,7 @@ def _record_report_success_blocking(channel_id: int, snapshot_date: str) -> None
 _EMPTY_PARSE_REASON: Final = "empty parse (0 villages) from map.sql, snapshot not saved"
 
 
-async def run_fetch() -> RunFetchStatus:
+async def run_fetch(run_id: str | None = None) -> RunFetchStatus:
     """Fetch → parse → save today's map.sql snapshot (in ``FETCH_TZ``).
 
     All blocking work runs off the bot loop: ``fetch_map_sql`` (sync httpx,
@@ -516,10 +599,21 @@ async def run_fetch() -> RunFetchStatus:
     error and does NOT save a snapshot. Any failure is logged via
     ``append_log('fetch', 'error', ...)`` and never crashes the loop.
 
+    With ``run_id`` (a ``job_runs`` row created by the caller) the run's
+    status is tracked: pending → running → succeeded/skipped/failed
+    (ROADMAP.md §6). The shared lock still skips a concurrent run — the
+    skipped run is recorded as ``skipped``, never queued.
+
     Returns a short status string (task 12, decision (a)): ``completed``,
     ``skipped (already running)``, ``empty parse`` or ``failed``.
     """
+    if run_id is not None:
+        await asyncio.to_thread(_mark_run_running_blocking, run_id)
     if not await _acquire("fetch"):
+        if run_id is not None:
+            await asyncio.to_thread(
+                _finish_run, run_id, "skipped", result=FETCH_STATUS_SKIPPED
+            )
         return FETCH_STATUS_SKIPPED
     try:
         text = await asyncio.to_thread(fetch_map_sql, MAP_SQL_URL)
@@ -532,9 +626,16 @@ async def run_fetch() -> RunFetchStatus:
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "fetch", exc)
         await _maybe_send_failure_alert("fetch", str(exc))
-        return FETCH_STATUS_FAILED
+        result = FETCH_STATUS_FAILED
     finally:
         _release()
+    if run_id is not None:
+        snapshot_date = None
+        if result == FETCH_STATUS_COMPLETED:
+            snapshot_date = await asyncio.to_thread(_latest_snapshot_date)
+        await asyncio.to_thread(
+            _finish_run, run_id, _run_status_for_fetch(result), result=result, snapshot_date=snapshot_date
+        )
     return result
 
 
@@ -631,7 +732,11 @@ def _report_phase(require_today: bool) -> _ReportPhase:
             conn.close()
 
 
-async def run_report(channel_id: int, require_today: bool = True) -> RunReportStatus:
+async def run_report(
+    channel_id: int,
+    require_today: bool = True,
+    run_id: str | None = None,
+) -> RunReportStatus:
     """Send the daily report (up to 5 embeds in one message) to ``channel_id``.
 
     Order of checks: (1) ``load_latest``; (2) no snapshot at all → "no data
@@ -645,25 +750,36 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
     are logged via ``append_log('report', 'error', ...)`` and never crash the
     loop.
 
+    With ``run_id`` (a ``job_runs`` row created by the caller) the run's
+    status is tracked: pending → running → succeeded/skipped/failed
+    (ROADMAP.md §6); the outcome mapping lives in
+    ``_run_status_for_report``.
+
     Returns a short status string (task 12, decision (a)): ``sent``,
     ``skipped (already running)``, ``no snapshot for today``, ``no data yet``
     (the no-data placeholder embed WAS sent), ``no alliance``,
     ``channel not found`` or ``failed``.
     """
+    if run_id is not None:
+        await asyncio.to_thread(_mark_run_running_blocking, run_id)
     if not await _acquire("report"):
+        if run_id is not None:
+            await asyncio.to_thread(
+                _finish_run, run_id, "skipped", result=REPORT_STATUS_SKIPPED
+            )
         return REPORT_STATUS_SKIPPED
+    snapshot_date: str | None = None
     try:
         phase = await asyncio.to_thread(_report_phase, require_today)
-        snapshot_date: str | None = None
         message = ""
         match phase.action:
             case "stale":
-                return REPORT_STATUS_NO_SNAPSHOT_TODAY
+                return await _report_done(run_id, REPORT_STATUS_NO_SNAPSHOT_TODAY)
             case "no_alliance":
-                return REPORT_STATUS_NO_ALLIANCE
+                return await _report_done(run_id, REPORT_STATUS_NO_ALLIANCE)
             case "failed":
                 await _maybe_send_failure_alert("report", phase.failure_reason or "report failed")
-                return REPORT_STATUS_FAILED
+                return await _report_done(run_id, REPORT_STATUS_FAILED)
             case "send":
                 snapshot_date = phase.snapshot_date
             case "no_data":
@@ -671,7 +787,7 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
         channel = await _get_channel_on_loop(channel_id)
         if channel is None:
             await _maybe_send_failure_alert("report", f"channel {channel_id} not found")
-            return REPORT_STATUS_CHANNEL_NOT_FOUND
+            return await _report_done(run_id, REPORT_STATUS_CHANNEL_NOT_FOUND)
         embeds = phase.embeds
         assert embeds  # send/no_data always carry the embeds (see _ReportPhase)
         _ = await channel.send(embeds=embeds)
@@ -682,10 +798,33 @@ async def run_report(channel_id: int, require_today: bool = True) -> RunReportSt
             await asyncio.to_thread(_log_entry, "report", "info", message)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
         await asyncio.to_thread(_record_failure_blocking, "report", exc)
-        return REPORT_STATUS_FAILED
+        return await _report_done(run_id, REPORT_STATUS_FAILED)
     finally:
         _release()
-    return REPORT_STATUS_SENT if phase.action == "send" else REPORT_STATUS_NO_DATA
+    result = REPORT_STATUS_SENT if phase.action == "send" else REPORT_STATUS_NO_DATA
+    return await _report_done(
+        run_id, result, snapshot_date if result == REPORT_STATUS_SENT else None
+    )
+
+
+async def _report_done(
+    run_id: str | None,
+    result: RunReportStatus,
+    snapshot_date: str | None = None,
+) -> RunReportStatus:
+    """Record the terminal run state (if any) and hand the outcome back.
+
+    Every ``run_report`` return path goes through this helper exactly once.
+    """
+    if run_id is not None:
+        await asyncio.to_thread(
+            _finish_run,
+            run_id,
+            _run_status_for_report(result),
+            result=result,
+            snapshot_date=snapshot_date,
+        )
+    return result
 
 
 async def _get_channel_on_loop(channel_id: int) -> Messageable | None:
@@ -852,8 +991,13 @@ def _build_report_data(
 
 
 async def job_fetch() -> None:
-    """APScheduler job: daily snapshot fetch (thin wrapper over ``run_fetch``)."""
-    _ = await run_fetch()
+    """APScheduler job: daily snapshot fetch (thin wrapper over ``run_fetch``).
+
+    Creates the scheduler-sourced run row so every fetch is identifiable
+    (ROADMAP.md §6).
+    """
+    run_id = await asyncio.to_thread(_start_run, "fetch", "scheduler")
+    _ = await run_fetch(run_id)
 
 
 async def job_report() -> None:
@@ -874,7 +1018,8 @@ async def job_report() -> None:
         return
     if not await asyncio.to_thread(_job_report_precheck, cfg):
         return
-    _ = await run_report(cfg.channel_id, require_today=True)
+    run_id = await asyncio.to_thread(_start_run, "report", "scheduler")
+    _ = await run_report(cfg.channel_id, require_today=True, run_id=run_id)
 
 
 def _job_report_precheck(cfg: MergedConfig) -> bool:
@@ -941,6 +1086,15 @@ def _report_trigger(cfg: MergedConfig) -> CronTrigger:
     return CronTrigger(hour=cfg.report_hour, minute=cfg.report_minute, timezone=ZoneInfo(cfg.report_tz))
 
 
+async def _discord_run_report(channel_id: int, require_today: bool = True) -> RunReportStatus:
+    """The ``/raport`` report surface: run row with source ``discord``.
+
+    Matches the ``ReportRunner`` protocol commands.py expects.
+    """
+    run_id = await asyncio.to_thread(_start_run, "report", "discord", requested_by="discord")
+    return await run_report(channel_id, require_today=require_today, run_id=run_id)
+
+
 class TravianBot(discord.Client):
     """The discord client: owns the command tree and the job scheduler."""
 
@@ -949,11 +1103,12 @@ class TravianBot(discord.Client):
         self.cfg: MergedConfig = cfg
         self.tree: app_commands.CommandTree[TravianBot] = app_commands.CommandTree(self)
         self.scheduler: _Scheduler | None = None
-        # Command registration (T11 + report trim): /raport closes over
-        # run_report, /wioski + /regiony over the section runners; config is
-        # re-read per invocation, so dashboard changes apply immediately.
-        # on_ready's tree.sync() picks the commands up.
-        register_commands(self.tree, run_report, _current_config, run_villages, run_regions)
+        # Command registration (T11 + report trim): /raport closes over the
+        # discord-sourced run wrapper (identifiable runs, ROADMAP.md §6),
+        # /wioski + /regiony over the section runners; config is re-read per
+        # invocation, so dashboard changes apply immediately. on_ready's
+        # tree.sync() picks the commands up.
+        register_commands(self.tree, _discord_run_report, _current_config, run_villages, run_regions)
 
     async def on_ready(self) -> None:
         global bot_loop

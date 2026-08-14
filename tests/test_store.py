@@ -27,6 +27,10 @@ from travian.store import (
     alliance_ids_by_tag,
     append_log,
     connect,
+    create_run,
+    database_stats,
+    finish_run,
+    get_run,
     get_setting,
     get_settings,
     has_log_marker,
@@ -34,6 +38,7 @@ from travian.store import (
     latest_job_log_timestamp,
     latest_log_timestamp,
     list_dates,
+    list_runs,
     load_latest,
     load_villages,
     recent_logs,
@@ -748,3 +753,88 @@ class TestVillageHistory:
         save_snapshot(conn, "2026-08-09", [make_row(1)])
 
         assert village_history(conn, 999, 30) == []
+
+
+# --- job_runs + database stats (Faza 4) --------------------------------------
+
+
+def test_create_and_finish_run_roundtrip(conn: sqlite3.Connection) -> None:
+    create_run(conn, run_id="r1", job="fetch", source="dashboard")
+    row = get_run(conn, "r1")
+    assert row["run_id"] == "r1"
+    assert row["job"] == "fetch"
+    assert row["source"] == "dashboard"
+    assert row["requested_by"] is None
+    assert row["status"] == "pending"
+    assert row["finished_at"] is None
+    assert row["result"] is None
+    assert row["snapshot_date"] is None
+
+    finish_run(conn, run_id="r1", status="succeeded", result="completed", snapshot_date="2026-08-13")
+    row = get_run(conn, "r1")
+    assert row["status"] == "succeeded"
+    assert row["result"] == "completed"
+    assert row["snapshot_date"] == "2026-08-13"
+    assert row["finished_at"]  # ISO timestamp
+
+
+def test_finish_run_rejects_unknown_status(conn: sqlite3.Connection) -> None:
+    create_run(conn, run_id="r2", job="fetch", source="scheduler")
+    with pytest.raises(ValueError):
+        finish_run(conn, run_id="r2", status="banana")
+
+
+def test_list_runs_newest_first_with_filters(conn: sqlite3.Connection) -> None:
+    for i, (job, source, status) in enumerate(
+        [("fetch", "scheduler", "succeeded"), ("report", "dashboard", "failed"), ("fetch", "discord", "skipped")]
+    ):
+        run_id = f"run{i}"
+        create_run(conn, run_id=run_id, job=job, source=source)
+        finish_run(conn, run_id=run_id, status=status)
+
+    runs = list_runs(conn)
+    assert [r["run_id"] for r in runs] == ["run2", "run1", "run0"]  # newest first
+    assert [r["status"] for r in list_runs(conn, job="fetch")] == ["skipped", "succeeded"]
+    assert [r["run_id"] for r in list_runs(conn, status="failed")] == ["run1"]
+    assert list_runs(conn, job="report", status="succeeded") == []
+    assert len(list_runs(conn, n=2)) == 2
+    assert get_run(conn, "nope") is None
+
+
+def test_run_rows_survive_reopen(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    first = connect(db)
+    init_schema(first)
+    create_run(first, run_id="persisted", job="fetch", source="scheduler")
+    finish_run(first, run_id="persisted", status="succeeded")
+    first.close()
+
+    second = connect(db)
+    try:
+        row = get_run(second, "persisted")
+        assert row is not None
+        assert row["status"] == "succeeded"
+    finally:
+        second.close()
+
+
+def test_database_stats_telemetry(tmp_path: Path) -> None:
+    db = tmp_path / "stats.db"
+    conn = connect(db)
+    init_schema(conn)
+    save_snapshot(conn, "2026-08-07", [make_row(1)])
+    save_snapshot(conn, "2026-08-08", [make_row(2)])
+    stats = database_stats(conn)
+    conn.close()
+    assert stats["snapshot_count"] == 2
+    assert stats["oldest_snapshot_date"] == "2026-08-07"
+    assert stats["latest_snapshot_date"] == "2026-08-08"
+    assert stats["db_size_bytes"] > 0
+
+    empty = tmp_path / "empty.db"
+    conn = connect(empty)
+    init_schema(conn)
+    stats = database_stats(conn)
+    conn.close()
+    assert stats["snapshot_count"] == 0
+    assert stats["oldest_snapshot_date"] is None

@@ -42,6 +42,7 @@ export const state = {
   actionInFlight: false,
   refreshInFlight: false,
   connectionState: { online: false, lastGoodLoad: null, error: null },
+  lastStatus: null,
   analysisState: {
     charts: {},
     metric: "population",

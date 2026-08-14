@@ -127,6 +127,7 @@ import logging
 import secrets
 import sqlite3
 import threading
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -243,6 +244,7 @@ class StatusData(TypedDict):
     job_health: JobHealth
     alliance_tags: list[str]
     freshness: FreshnessData
+    database_stats: dict[str, object]
 
 
 class SettingsPayload(TypedDict):
@@ -262,15 +264,18 @@ class SettingsPayload(TypedDict):
 
 
 class RunFetchFn(Protocol):
-    """The ``run_fetch`` surface — injected by main.py, returns a status string."""
+    """The ``run_fetch`` surface — injected by main.py, returns a status string.
 
-    async def __call__(self) -> str: ...
+    ``run_id`` (a ``job_runs`` row the caller created) makes the run
+    identifiable in the run history (ROADMAP.md §6)."""
+
+    async def __call__(self, run_id: str | None = None) -> str: ...
 
 
 class RunReportFn(Protocol):
     """The ``run_report`` surface — injected by main.py, returns a status string."""
 
-    async def __call__(self, channel_id: int, require_today: bool = True) -> str: ...
+    async def __call__(self, channel_id: int, require_today: bool = True, run_id: str | None = None) -> str: ...
 
 
 class ConfigProtocol(Protocol):
@@ -799,6 +804,7 @@ def make_status_provider(db_path: str, get_config: ConfigGetter) -> Callable[[],
                     conn, job="report", level="info", message_prefix=store.REPORT_SUCCESS_PREFIX
                 ),
                 errors=_recent_errors(conn),
+                database_stats=store.database_stats(conn),
                 job_health={
                     "fetch": _job_health(conn, "fetch", store.FETCH_SUCCESS_PREFIX),
                     "report": _job_health(conn, "report", store.REPORT_SUCCESS_PREFIX),
@@ -1217,18 +1223,39 @@ def create_app(deps: DashboardDeps) -> FastAPI:
             log_failure(f"{type(exc).__name__}: {exc}")
             return "failed"
 
+    def _create_dashboard_run(job: str) -> str:
+        """A dashboard-sourced run row (own connection) — the action's ID.
+
+        Best-effort: a failed row write still lets the action run; the
+        response then carries no run_id (nothing was recorded).
+        """
+        run_id = uuid.uuid4().hex
+        try:
+            conn = store.connect(db_path)
+            try:
+                store.create_run(conn, run_id=run_id, job=job, source="dashboard")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            logger.exception("could not create job_runs entry for %s action", job)
+            return ""
+        return run_id
+
     async def fetch_now(request: Request) -> Response:
         if not _admin_ok(request):
             return JSONResponse({"error": "admin required"}, status_code=403)
         loop = deps.bot_loop_getter()
         if loop is None:
             return JSONResponse({"error": "bot not ready"}, status_code=409)
-        future = asyncio.run_coroutine_threadsafe(deps.run_fetch_fn(), loop)
+        run_id = _create_dashboard_run("fetch")
+        future = asyncio.run_coroutine_threadsafe(deps.run_fetch_fn(run_id or None), loop)
         try:
             result = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=_ACTION_TIMEOUT)
         except TimeoutError:
-            return JSONResponse({"error": "fetch timed out"}, status_code=504)
-        return JSONResponse({"status": "ok", "message": result})
+            return JSONResponse(
+                {"status": "timed_out", "run_id": run_id or None, "error": "fetch timed out"}, status_code=504
+            )
+        return JSONResponse({"status": "ok", "run_id": run_id or None, "message": result})
 
     async def report_now(request: Request) -> Response:
         if not _admin_ok(request):
@@ -1240,12 +1267,55 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         channel_id = cfg.channel_id
         if channel_id is None:
             return JSONResponse({"error": "CHANNEL_ID not configured"}, status_code=409)
-        future = asyncio.run_coroutine_threadsafe(deps.run_report_fn(channel_id, require_today=False), loop)
+        run_id = _create_dashboard_run("report")
+        future = asyncio.run_coroutine_threadsafe(
+            deps.run_report_fn(channel_id, require_today=False, run_id=run_id or None), loop
+        )
         try:
             result = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=_ACTION_TIMEOUT)
         except TimeoutError:
-            return JSONResponse({"error": "report timed out"}, status_code=504)
-        return JSONResponse({"status": "ok", "message": result})
+            return JSONResponse(
+                {"status": "timed_out", "run_id": run_id or None, "error": "report timed out"}, status_code=504
+            )
+        return JSONResponse({"status": "ok", "run_id": run_id or None, "message": result})
+
+    async def operations_runs(
+        request: Request,
+        job: Annotated[str | None, Query(pattern="^(fetch|report)$")] = None,
+        status: Annotated[
+            str | None, Query(pattern="^(pending|running|succeeded|skipped|failed|timed_out)$")
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> Response:
+        """Admin-only run history, newest first (SQL-side filters)."""
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
+
+        def read() -> list[dict[str, object]]:
+            conn = store.connect(db_path)
+            try:
+                return store.list_runs(conn, limit, job=job, status=status)
+            finally:
+                conn.close()
+
+        return JSONResponse(await asyncio.to_thread(read))
+
+    async def operations_run_detail(run_id: str, request: Request) -> Response:
+        """Admin-only single run; unknown run → 404."""
+        if not _admin_ok(request):
+            return JSONResponse({"error": "admin required"}, status_code=403)
+
+        def read() -> dict[str, object] | None:
+            conn = store.connect(db_path)
+            try:
+                return store.get_run(conn, run_id)
+            finally:
+                conn.close()
+
+        row = await asyncio.to_thread(read)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"unknown run {run_id!r}")
+        return JSONResponse(row)
 
     async def logs(
         request: Request,
@@ -1928,6 +1998,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.post("/api/actions/fetch")(fetch_now)
     _ = app.post("/api/actions/report")(report_now)
     _ = app.get("/api/logs")(logs)
+    _ = app.get("/api/operations/runs")(operations_runs)
+    _ = app.get("/api/operations/runs/{run_id}")(operations_run_detail)
     _ = app.get("/api/analysis/regions")(analysis_regions)
     _ = app.get("/api/analysis/standings")(analysis_standings)
     _ = app.get("/api/analysis/dates")(analysis_dates)

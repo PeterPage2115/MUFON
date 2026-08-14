@@ -116,6 +116,23 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         ON villages (player_id, snapshot_date)
     """,
     """
+    CREATE TABLE IF NOT EXISTS job_runs (
+        run_id TEXT PRIMARY KEY,
+        job TEXT NOT NULL,
+        source TEXT NOT NULL,
+        requested_by TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        result TEXT,
+        snapshot_date TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_job_runs_started_job
+        ON job_runs (started_at, job)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -984,3 +1001,118 @@ def _load_json(text: str) -> JsonValue:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# --- job runs (Faza 4: identifiable runs) ----------------------------------------
+#
+# One row per fetch/report invocation, created before the run and finished
+# after it; the dashboard reads them back as the run history. Additive table
+# (CREATE TABLE IF NOT EXISTS) — existing databases upgrade in place.
+
+#: Run statuses — the ONLY legal values (validated by the store helpers).
+RUN_STATUSES: Final = frozenset({"pending", "running", "succeeded", "skipped", "failed", "timed_out"})
+
+
+def create_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    job: str,
+    source: str,
+    requested_by: str | None = None,
+) -> None:
+    """Insert a run in ``pending`` state (commits its own transaction)."""
+    with conn:
+        _ = conn.execute(
+            "INSERT INTO job_runs (run_id, job, source, requested_by, status, started_at)"
+            + " VALUES (?, ?, ?, ?, 'pending', ?)",
+            (run_id, job, source, requested_by, _utc_now()),
+        )
+
+
+def finish_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    status: str,
+    result: str | None = None,
+    snapshot_date: str | None = None,
+) -> None:
+    """Mark a run finished (commits its own transaction).
+
+    ``status`` must be one of the documented run statuses; an unknown value
+    raises ``ValueError`` (a typo must never write a phantom state).
+    """
+    if status not in RUN_STATUSES:
+        raise ValueError(f"unknown run status {status!r} — valid: {', '.join(sorted(RUN_STATUSES))}")
+    with conn:
+        _ = conn.execute(
+            "UPDATE job_runs SET status = ?, finished_at = ?, result = ?, snapshot_date = ?"
+            + " WHERE run_id = ?",
+            (status, _utc_now(), result, snapshot_date, run_id),
+        )
+
+
+def get_run(conn: sqlite3.Connection, run_id: str) -> dict[str, object] | None:
+    """One run row as a dict (ts/job/status/...), or None when unknown."""
+    row = cast(
+        Mapping[str, object] | None,
+        conn.execute(
+            "SELECT run_id, job, source, requested_by, status, started_at, finished_at, result, snapshot_date"
+            + " FROM job_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone(),
+    )
+    return dict(row) if row is not None else None
+
+
+def list_runs(
+    conn: sqlite3.Connection,
+    n: int = 50,
+    *,
+    job: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, object]]:
+    """The ``n`` most recent runs, newest first (SQL-side filters)."""
+    where: list[str] = []
+    params: list[object] = []
+    if job is not None:
+        where.append("job = ?")
+        params.append(job)
+    if status is not None:
+        where.append("status = ?")
+        params.append(status)
+    sql = (
+        "SELECT run_id, job, source, requested_by, status, started_at, finished_at, result, snapshot_date"
+        + " FROM job_runs"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY started_at DESC, run_id DESC LIMIT ?"
+    params.append(n)
+    rows = cast(list[Mapping[str, object]], conn.execute(sql, params).fetchall())
+    return [dict(row) for row in rows]
+
+
+def database_stats(conn: sqlite3.Connection) -> dict[str, object]:
+    """Storage telemetry without any deletion: size, snapshot count and the
+    oldest/latest snapshot dates (informational — no auto-prune exists)."""
+    pragma = cast(Mapping[str, object] | None, conn.execute("PRAGMA database_list").fetchone())
+    assert pragma is not None
+    size = Path(cast(str, pragma["file"])).stat().st_size
+    row = cast(
+        Mapping[str, object] | None,
+        conn.execute(
+            "SELECT COUNT(*) AS snapshot_count, MIN(snapshot_date) AS oldest, MAX(snapshot_date) AS latest"
+            + " FROM snapshots"
+        ).fetchone(),
+    )
+    count = _agg_int(row, "snapshot_count") if row is not None else 0
+    oldest = _agg_str(row, "oldest") if row is not None and row["oldest"] is not None else None
+    latest = _agg_str(row, "latest") if row is not None and row["latest"] is not None else None
+    return {
+        "db_size_bytes": size,
+        "snapshot_count": count,
+        "oldest_snapshot_date": oldest,
+        "latest_snapshot_date": latest,
+    }

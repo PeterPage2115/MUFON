@@ -82,6 +82,7 @@ function freshnessLabel(freshness) {
 }
 
 export function renderStatus(data) {
+  state.lastStatus = data;  // consumed by Operations (db stats, report confirm)
   setText(els.headerSnapshot, data.snapshot_date || "No snapshot yet");
   setText(els.headerSource, data.snapshot_source || "—");
 

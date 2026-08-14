@@ -577,6 +577,65 @@ code,
   margin-inline: var(--space-6);
 }
 
+.card--runs {
+  grid-column: span 12;
+}
+
+.runs-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) var(--space-6) var(--space-3);
+}
+
+.runs-filters .analysis-select {
+  width: auto;
+  min-width: 120px;
+}
+
+.action-confirm {
+  margin: 0 var(--space-6) var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--accent-gold-deep);
+  background: color-mix(in srgb, var(--accent-gold) 8%, var(--surface-secondary));
+}
+
+.action-confirm__copy {
+  margin: 0 0 var(--space-3);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.action-confirm__buttons {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.run-status {
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.75rem;
+}
+
+.run-status--succeeded {
+  color: var(--status-success);
+}
+
+.run-status--failed,
+.run-status--timed_out {
+  color: var(--status-error);
+}
+
+.run-status--skipped,
+.run-status--pending {
+  color: var(--status-warning);
+}
+
+.run-status--running {
+  color: var(--accent-gold-soft);
+}
+
 .card--logs .log-list {
   margin: var(--space-4) var(--space-6) var(--space-3);
 }

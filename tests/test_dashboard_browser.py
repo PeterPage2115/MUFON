@@ -313,10 +313,24 @@ def _browser_app_with_auth(
         )
     get_config = _config_getter(db, env)
 
-    async def no_fetch() -> str:
+    async def no_fetch(run_id: str | None = None) -> str:
+        # Simulate the bot-side run lifecycle so the Operations run history
+        # settles (the real bot writes these rows inside run_fetch).
+        if run_id:
+            conn = store.connect(db)
+            try:
+                store.finish_run(conn, run_id=run_id, status="succeeded", result="completed")
+            finally:
+                conn.close()
         return "completed"
 
-    async def no_report(channel_id: int, require_today: bool = True) -> str:
+    async def no_report(channel_id: int, require_today: bool = True, run_id: str | None = None) -> str:
+        if run_id:
+            conn = store.connect(db)
+            try:
+                store.finish_run(conn, run_id=run_id, status="succeeded", result="sent")
+            finally:
+                conn.close()
         return "sent"
 
     app = create_app(
@@ -1479,4 +1493,126 @@ def test_players_standings_and_compare_exports(browser_app: tuple[str, Browser])
     with page.expect_download() as download_info:
         page.click('[data-export="compare"]')
     assert "deltas-2026-08-07-2026-08-08.csv" in download_info.value.suggested_filename
+    page.close()
+
+
+# --- Faza 4: identifiable runs in the Operations UI ----------------------------
+
+
+def test_report_action_requires_confirmation(browser_app_token: tuple[str, Browser]) -> None:
+    """Send report now asks for confirmation (channel + snapshot) before any
+    Discord message; Cancel closes it; Confirm dispatches the action."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    page.click("#dashboard-tab-operations")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('ALLIANCE_TAGS'); return el && el.value.includes('NOVA'); }"
+    )
+
+    # The report button opens the confirmation with channel + snapshot date.
+    page.click("#report-action")
+    assert page.evaluate("() => document.getElementById('action-confirm').hidden === false")
+    copy = page.text_content("[data-action-confirm-copy]")
+    assert "channel 111111111111111111" in copy
+    assert "2026-08-08" in copy
+
+    # Cancel closes it without dispatching anything.
+    page.click("#action-confirm-no")
+    assert page.evaluate("() => document.getElementById('action-confirm').hidden === true")
+
+    # Confirm runs the action and the feedback names the run id.
+    page.click("#report-action")
+    page.click("#action-confirm-yes")
+    page.wait_for_function(
+        "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: sent'); }"
+    )
+    feedback = page.text_content("#action-feedback span:last-child")
+    assert "run " in feedback
+    page.close()
+
+
+def test_run_history_renders_and_filters(browser_app_token: tuple[str, Browser]) -> None:
+    """The run history table lists runs with filters; the db-stats caption
+    shows the storage telemetry."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    page.click("#dashboard-tab-operations")
+    # Run a fetch so a run row exists (source dashboard, terminal succeeded).
+    page.click("#fetch-action")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-runs-body] tr'); return el && el.textContent.includes('succeeded'); }"
+    )
+    body = page.text_content("[data-runs-body]")
+    assert "fetch" in body and "dashboard" in body and "succeeded" in body
+
+    # Filters narrow the list.
+    page.select_option("#runs-job", "report")
+    page.wait_for_function(
+        "() => document.querySelector('[data-runs-body]').textContent.includes('No runs yet.')"
+    )
+    page.select_option("#runs-job", "fetch")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-runs-body] tr'); return el && el.textContent.includes('succeeded'); }"
+    )
+
+    # Storage telemetry caption.
+    stats = page.text_content("[data-db-stats]")
+    assert "snapshot" in stats and "→" in stats
+    page.close()
+
+
+def test_retry_creates_new_run_id(browser_app_token: tuple[str, Browser]) -> None:
+    """A second fetch action produces a NEW run id (manual retry, no
+    automatic retry anywhere)."""
+    url, browser = browser_app_token
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_selector("#token-dialog[open]", timeout=15000)
+    page.fill("#token-input", "browser-smoke-test-token")
+    page.click('#token-form button[type="submit"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-status-value=\"villages\"]'); return el && el.textContent.trim() === '442'; }"
+    )
+    page.click("#dashboard-tab-operations")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-runs-body]'); return el; }"
+    )
+
+    page.click("#fetch-action")
+    page.wait_for_function(
+        "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: completed'); }"
+    )
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-runs-body] tr'); return el && el.textContent.includes('succeeded'); }"
+    )
+    first_rows = page.text_content("[data-runs-body]")
+
+    page.click("#fetch-action")
+    page.wait_for_function(
+        "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: completed'); }"
+    )
+    page.wait_for_function(
+        "() => { const rows = document.querySelector('[data-runs-body]').querySelectorAll('tr'); return rows.length >= 2; }"
+    )
+    # Both rows are distinct runs (new run id per action — nothing auto-retried).
+    rows = page.text_content("[data-runs-body]")
+    assert first_rows != rows
+    assert rows.count("succeeded") >= 2
     page.close()

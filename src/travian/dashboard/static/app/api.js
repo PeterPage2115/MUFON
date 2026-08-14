@@ -132,6 +132,30 @@ export var api = {
       "/api/analysis/players/" + encodeURIComponent(playerId) + "/history?days=" + encodeURIComponent(days)
     );
   },
+  runs: function (params) {
+    var parts = [];
+    if (params) {
+      parts = Object.keys(params)
+        .filter(function (key) {
+          return params[key] !== undefined && params[key] !== null && params[key] !== "";
+        })
+        .map(function (key) {
+          return [key, params[key]];
+        });
+    }
+    var qs = parts.length
+      ? "?" +
+        parts
+          .map(function (pair) {
+            return encodeURIComponent(pair[0]) + "=" + encodeURIComponent(pair[1]);
+          })
+          .join("&")
+      : "";
+    return request("GET", "/api/operations/runs" + qs);
+  },
+  run: function (runId) {
+    return request("GET", "/api/operations/runs/" + encodeURIComponent(runId));
+  },
 };
 
 // Kinds that honor the alliance filter (standings is a cross-alliance
