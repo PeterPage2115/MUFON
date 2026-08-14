@@ -2710,3 +2710,141 @@ class TestRuns:
         assert body["database_stats"]["snapshot_count"] == 1
         assert body["database_stats"]["latest_snapshot_date"] == SNAPSHOT_DATE
         assert body["database_stats"]["db_size_bytes"] > 0
+
+
+# --- Faza 5: watch feed + roster -------------------------------------------------
+
+
+class TestAnalysisWatch:
+    def test_normalized_items(self, tmp_path: Path) -> None:
+        """Gained/lost/conquest/deleted with severities and messages."""
+        db = tmp_path / "watch.db"
+        _seed_analysis_db(db)
+        env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            body = client.get("/api/analysis/watch").json()
+        assert body["from"] == "2026-08-08"
+        assert body["to"] == "2026-08-09"
+        kinds = {item["kind"]: item for item in body["items"]}
+        assert set(kinds) == {"village_gained", "deleted"}
+        # Village 7 gained (NOVA), village 4 deleted.
+        assert kinds["village_gained"]["village_id"] == 7
+        assert kinds["village_gained"]["severity"] == "info"
+        assert kinds["village_gained"]["to_tag"] == "NOVA"
+        assert kinds["village_gained"]["from_tag"] is None
+        assert "gained" in kinds["village_gained"]["message"]
+        assert kinds["deleted"]["village_id"] == 4
+        assert kinds["deleted"]["severity"] == "warning"
+        assert kinds["deleted"]["to_tag"] is None
+        # Items sorted: warnings first, then info.
+        assert body["items"][0]["kind"] == "deleted"
+        assert body["items"][-1]["kind"] == "village_gained"
+        assert body["total"] == 2
+
+    def test_conquests_and_losses_with_wars_seed(self, tmp_path: Path) -> None:
+        db = tmp_path / "watch.db"
+        _seed_wars_plain(db)
+        env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            body = client.get("/api/analysis/watch").json()
+        kinds = {item["kind"] for item in body["items"]}
+        # Seed: village 2 ENEMY→NOVA, village 3 NOVA→ENEMY (conquests),
+        # village 4 deleted, village 7 gained — village 3's loss is ALSO a
+        # conquest (deduped out of village_lost).
+        assert kinds == {"conquest", "deleted", "village_gained"}
+        conquest = {i["village_id"]: i for i in body["items"] if i["kind"] == "conquest"}
+        assert set(conquest) == {2, 3}
+        assert conquest[3]["from_tag"] == "NOVA"
+        assert conquest[3]["to_tag"] == "ENEMY"
+        assert "conquered" in conquest[3]["message"]
+        assert body["total"] == 4
+
+    def test_validation_and_limits(self, tmp_path: Path) -> None:
+        db = tmp_path / "watch.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/watch", params={"from": "2026-08-10"}).status_code == 422
+            assert client.get("/api/analysis/watch", params={"from": "2026-08-09", "to": "2026-08-09"}).status_code == 422
+            assert client.get("/api/analysis/watch", params={"limit": 501}).status_code == 422
+            one = client.get("/api/analysis/watch", params={"limit": 1}).json()
+            assert len(one["items"]) == 1
+            assert one["total"] == 2
+
+    def test_fewer_than_two_snapshots_empty(self, tmp_path: Path) -> None:
+        db = tmp_path / "watch.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/watch").json()
+        assert body == {"from": None, "to": None, "total": 0, "items": []}
+
+
+class TestAnalysisRoster:
+    def test_roster_rows_with_growth(self, tmp_path: Path) -> None:
+        db = tmp_path / "roster.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/roster").json()
+        assert body["snapshot_date"] == "2026-08-09"
+        by_name = {p["player_name"]: p for p in body["players"]}
+        # Player 1001 owns villages 1+2; 1005 owns 5; 1007 owns 7.
+        assert by_name["Player 1"]["villages"] == 2
+        assert by_name["Player 1"]["population"] == 5004
+        assert by_name["Player 1"]["growth"] == 2  # 5004 - 5002
+        assert by_name["Player 7"]["villages"] == 1
+        assert by_name["Player 7"]["growth"] == 600  # new this day
+        assert all(p["alliance_tag"] == "NOVA" for p in body["players"])
+        # Sorted by population desc.
+        pops = [p["population"] for p in body["players"]]
+        assert pops == sorted(pops, reverse=True)
+
+    def test_date_alliance_filters(self, tmp_path: Path) -> None:
+        db = tmp_path / "roster.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            enemy = client.get("/api/analysis/roster", params={"alliance": "ENEMY"}).json()
+        assert all(p["alliance_tag"] == "ENEMY" for p in enemy["players"])
+        assert {p["player_name"] for p in enemy["players"]} == {"Player 3", "Player 6", "Player 8"}
+        with TestClient(_app(db, env)) as client:
+            assert client.get("/api/analysis/roster", params={"date": "2026-08-01"}).status_code == 422
+            assert client.get("/api/analysis/roster", params={"alliance": "NOPE"}).status_code == 422
+            assert client.get("/api/analysis/roster", params={"limit": 201}).status_code == 422
+            limited = client.get("/api/analysis/roster", params={"limit": 2}).json()
+            assert len(limited["players"]) == 2
+            assert limited["total"] == 6  # NOVA+ENEMY players on the latest date
+
+    def test_empty_db(self, tmp_path: Path) -> None:
+        db = tmp_path / "roster.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/roster").json()
+        assert body["snapshot_date"] is None
+        assert body["players"] == []
+
+
+def _seed_wars_plain(db: Path) -> None:
+    """Wars scenario (plain copy of the browser seed): transfers 2/3, one
+    deletion (village 4), one new NOVA village (7)."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    store.save_snapshot(
+        conn,
+        "2026-08-07",
+        [
+            _row(1, population=100),
+            _row(2, population=200, player_id=2000, player_name="ENEMY-P0", alliance_id=8, alliance_tag="ENEMY"),
+            _row(3, population=300, player_id=1003, player_name="NOVA-P3"),
+            _row(4, population=400, player_id=2004, player_name="ENEMY-P4", alliance_id=8, alliance_tag="ENEMY"),
+        ],
+    )
+    store.save_snapshot(
+        conn,
+        "2026-08-08",
+        [
+            _row(1, population=110),
+            _row(2, population=210, player_id=2000, player_name="ENEMY-P0"),  # conquered by NOVA
+            _row(3, population=310, player_id=2003, player_name="ENEMY-P3", alliance_id=8, alliance_tag="ENEMY"),
+            _row(7, population=700, player_id=1007, player_name="NOVA-P7"),
+        ],
+    )
+    conn.close()

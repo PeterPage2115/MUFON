@@ -440,6 +440,7 @@ class PlayerAggregate:
 
     player_id: int
     player_name: str
+    alliance_tag: str | None
     villages: int
     population: int
     vp: int
@@ -524,7 +525,10 @@ def player_aggregates(
     rows = cast(
         list[Mapping[str, object]],
         conn.execute(
-            "SELECT player_id, MAX(player_name) AS player_name, COUNT(*) AS villages," + " SUM(population) AS population, SUM(victory_points) AS vp" + " FROM villages WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")" + " GROUP BY player_id",
+            "SELECT player_id, MAX(player_name) AS player_name, MAX(alliance_tag) AS alliance_tag,"
+            + " COUNT(*) AS villages, SUM(population) AS population, SUM(victory_points) AS vp"
+            + " FROM villages WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")"
+            + " GROUP BY player_id",
             (date, *sorted(alliance_ids)),
         ).fetchall(),
     )
@@ -532,6 +536,7 @@ def player_aggregates(
         _agg_int(row, "player_id"): PlayerAggregate(
             player_id=_agg_int(row, "player_id"),
             player_name=_agg_str(row, "player_name"),
+            alliance_tag=(_agg_str(row, "alliance_tag") or None) if row["alliance_tag"] else None,
             villages=_agg_int(row, "villages"),
             population=_agg_int(row, "population"),
             vp=_agg_int(row, "vp"),

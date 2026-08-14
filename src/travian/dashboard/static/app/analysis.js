@@ -133,6 +133,21 @@ function analysisElements() {
       regionDetailNote: document.querySelector("[data-region-detail-note]"),
       regionDetailError: document.querySelector("[data-region-detail-error]"),
       regionVillagesBody: document.querySelector("[data-region-villages-body]"),
+      watchFrom: document.getElementById("analysis-watch-from"),
+      watchTo: document.getElementById("analysis-watch-to"),
+      watchSeverity: document.getElementById("analysis-watch-severity"),
+      watchKind: document.getElementById("analysis-watch-kind"),
+      watchError: document.getElementById("analysis-watch-error"),
+      watchRange: document.querySelector("[data-watch-range]"),
+      watchList: document.querySelector("[data-watch-list]"),
+      watchEmpty: document.querySelector("[data-watch-empty]"),
+      watchCounts: document.querySelector("[data-watch-counts]"),
+      rosterDate: document.getElementById("analysis-roster-date"),
+      rosterAlliance: document.getElementById("analysis-roster-alliance"),
+      rosterError: document.getElementById("analysis-roster-error"),
+      rosterNote: document.querySelector("[data-roster-note]"),
+      rosterBody: document.querySelector("[data-roster-body]"),
+      rosterEmpty: document.querySelector("[data-roster-empty]"),
     };
   }
   return analysisEls;
@@ -193,7 +208,7 @@ function baseChartOpts() {
 
 // Kinds that honor the alliance filter (standings is a cross-alliance
 // comparison and never filters).
-var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players"];
+var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players", "watch"];
 
 
 function loadRegions() {
@@ -1632,6 +1647,22 @@ function wireExportButtons() {
         })
       );
     },
+    roster: function () {
+      var payload = analysisState.rosterPayload;
+      if (!payload || !payload.players.length) return;
+      var headers = ["Player", "Alliance", "Villages", "Population", "Growth", "VP"];
+      var rows = payload.players.map(function (p) {
+        return [
+          p.player_name,
+          p.alliance_tag || "",
+          p.villages,
+          p.population,
+          p.growth === null || p.growth === undefined ? "" : p.growth,
+          p.vp,
+        ];
+      });
+      exportCsv("roster-" + payload.snapshot_date + "-" + payload.alliance + ".csv", headers, rows);
+    },
     compare: function () {
       var payload = analysisState.comparePayload;
       if (!payload || !payload.regions.length) return;
@@ -1656,6 +1687,277 @@ function wireExportButtons() {
       if (exporter) exporter();
     });
   });
+}
+
+
+/* --- Watch tab ---------------------------------------------------------------- */
+
+function loadWatch() {
+  var panel = document.getElementById("panel-watch");
+  var els = analysisElements();
+  hidePanelError(panel);
+  setPanelBusy("watch", true);
+  return api
+    .analysis("dates")
+    .then(function (payload) {
+      var dates = payload.dates || [];
+      if (dates.length < 2) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("watch", false);
+        return;
+      }
+      hidePanelEmpty(panel);
+      fillDateSelect(els.watchFrom, dates);
+      fillDateSelect(els.watchTo, dates);
+      els.watchFrom.value = dates[dates.length - 2];
+      els.watchTo.value = dates[dates.length - 1];
+      return fetchWatch(els.watchFrom.value, els.watchTo.value);
+    })
+    .then(function () {
+      setPanelBusy("watch", false);
+    })
+    .catch(function () {
+      setPanelBusy("watch", false);
+      showPanelError(panel, "Couldn't load analysis data.", loadWatch);
+      activatedTabs.watch = false;
+    });
+}
+
+function fetchWatch(from, to) {
+  var els = analysisElements();
+  return api.analysis("watch", { from: from, to: to, limit: 500 }).then(function (payload) {
+    // Severity/kind are client-side filters over the full payload: the
+    // counters stay honest (X of Y items).
+    var severity = els.watchSeverity.value;
+    var kind = els.watchKind.value;
+    var items = (payload.items || []).filter(function (item) {
+      if (severity && item.severity !== severity) return false;
+      if (kind && item.kind !== kind) return false;
+      return true;
+    });
+    renderWatch({ from: payload.from, to: payload.to, total: payload.total, items: items });
+  });
+}
+
+function watchCountLabel(payload) {
+  var counts = { info: 0, warning: 0 };
+  (payload.items || []).forEach(function (item) {
+    counts[item.severity] = (counts[item.severity] || 0) + 1;
+  });
+  var label = payload.total + " item" + (payload.total === 1 ? "" : "s");
+  if (payload.items.length !== payload.total) {
+    label = payload.items.length + " of " + payload.total + " item" + (payload.total === 1 ? "" : "s");
+  }
+  return label + " · " + counts.warning + " warning" + (counts.warning === 1 ? "" : "s") +
+    " · " + counts.info + " info";
+}
+
+function renderWatch(payload) {
+  var els = analysisElements();
+  var items = payload.items || [];
+  setText(els.watchCounts, watchCountLabel(payload));
+  setText(els.watchRange, "Comparing " + payload.from + " → " + payload.to + ".");
+  els.watchRange.hidden = false;
+  els.watchEmpty.hidden = items.length > 0;
+  setText(els.watchEmpty, "No village movement between " + payload.from + " and " + payload.to + ".");
+  els.watchList.textContent = "";
+  items.forEach(function (item) {
+    var li = document.createElement("li");
+    li.className = "watch-item watch-item--" + item.severity;
+
+    var severity = document.createElement("span");
+    severity.className = "watch-item__severity";
+    severity.textContent = item.severity === "warning" ? "WRN" : "INF";
+    li.appendChild(severity);
+
+    var kind = document.createElement("span");
+    kind.className = "watch-item__kind";
+    kind.textContent = item.kind;
+    li.appendChild(kind);
+
+    var name = document.createElement("button");
+    name.type = "button";
+    name.className = "event-line__name";
+    name.textContent = item.village_name;
+    name.setAttribute("aria-label", "Open history for " + item.village_name);
+    name.addEventListener("click", function () {
+      openVillageHistory(item.village_id, item.village_name);
+    });
+    li.appendChild(name);
+
+    if (item.region) {
+      var region = document.createElement("button");
+      region.type = "button";
+      region.className = "watch-item__region";
+      region.textContent = "— " + item.region;
+      region.setAttribute("aria-label", "Open villages of " + item.region);
+      region.addEventListener("click", function () {
+        openRegionVillages(item.region);
+      });
+      li.appendChild(region);
+    }
+
+    var tags = document.createElement("span");
+    tags.className = "watch-item__tags mono";
+    if (item.from_tag && item.to_tag) {
+      tags.textContent = item.from_tag + " → " + item.to_tag;
+    } else if (item.to_tag) {
+      tags.textContent = "→ " + item.to_tag;
+    } else if (item.from_tag) {
+      tags.textContent = item.from_tag + " → —";
+    }
+    li.appendChild(tags);
+
+    var message = document.createElement("span");
+    message.className = "watch-item__message";
+    message.textContent = item.message || "";
+    li.appendChild(message);
+
+    els.watchList.appendChild(li);
+  });
+}
+
+function wireWatchControls() {
+  var els = analysisElements();
+  function onChange() {
+    var from = els.watchFrom.value;
+    var to = els.watchTo.value;
+    if (!from || !to) return;
+    if (from >= to) {
+      setText(els.watchError, "From must be earlier than To.");
+      els.watchError.hidden = false;
+      els.watchList.textContent = "";
+      els.watchRange.hidden = true;
+      return;
+    }
+    els.watchError.hidden = true;
+    setPanelBusy("watch", true);
+    fetchWatch(from, to)
+      .catch(function (err) {
+        showToast("Watch refresh failed", err.message, "error");
+      })
+      .then(function () {
+        setPanelBusy("watch", false);
+      });
+  }
+  els.watchFrom.addEventListener("change", onChange);
+  els.watchTo.addEventListener("change", onChange);
+  els.watchSeverity.addEventListener("change", onChange);
+  els.watchKind.addEventListener("change", onChange);
+}
+
+/* --- Roster tab --------------------------------------------------------------- */
+
+function loadRoster() {
+  var panel = document.getElementById("panel-roster");
+  var els = analysisElements();
+  hidePanelError(panel);
+  setPanelBusy("roster", true);
+  return api
+    .analysis("dates")
+    .then(function (payload) {
+      var dates = payload.dates || [];
+      if (!dates.length) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("roster", false);
+        return;
+      }
+      hidePanelEmpty(panel);
+      fillDateSelect(els.rosterDate, dates);
+      els.rosterDate.value = dates[dates.length - 1];
+      fillAllianceSelect(els.rosterAlliance, allianceTags);
+      return fetchRoster();
+    })
+    .then(function () {
+      setPanelBusy("roster", false);
+    })
+    .catch(function () {
+      setPanelBusy("roster", false);
+      showPanelError(panel, "Couldn't load analysis data.", loadRoster);
+      activatedTabs.roster = false;
+    });
+}
+
+function fillAllianceSelect(select, tags) {
+  select.textContent = "";
+  var combined = document.createElement("option");
+  combined.value = "combined";
+  combined.textContent = "Combined";
+  select.appendChild(combined);
+  tags.forEach(function (tag) {
+    var opt = document.createElement("option");
+    opt.value = tag;
+    opt.textContent = tag;
+    select.appendChild(opt);
+  });
+}
+
+function fetchRoster() {
+  var els = analysisElements();
+  return api
+    .analysis("roster", {
+      date: els.rosterDate.value,
+      alliance: els.rosterAlliance.value,
+      limit: 200,
+    })
+    .then(function (payload) {
+      renderRoster(payload);
+    });
+}
+
+function renderRoster(payload) {
+  var els = analysisElements();
+  var players = payload.players || [];
+  analysisState.rosterPayload = payload;
+  setExportEnabled("roster", players.length > 0);
+  els.rosterNote.hidden = false;
+  setText(
+    els.rosterNote,
+    payload.total + " player" + (payload.total === 1 ? "" : "s") +
+      " on " + payload.snapshot_date + " · showing " + players.length
+  );
+  els.rosterEmpty.hidden = players.length > 0;
+  setText(els.rosterEmpty, "No players for this alliance on " + payload.snapshot_date + ".");
+  els.rosterBody.textContent = "";
+  players.forEach(function (player) {
+    var tr = document.createElement("tr");
+    var tdName = document.createElement("td");
+    var name = document.createElement("button");
+    name.type = "button";
+    name.className = "event-line__name";
+    name.textContent = player.player_name;
+    name.setAttribute("aria-label", "Open history for " + player.player_name);
+    name.addEventListener("click", function () {
+      openPlayerHistory(player.player_id, player.player_name);
+    });
+    tdName.appendChild(name);
+    tr.appendChild(tdName);
+    tr.appendChild(numCell(player.alliance_tag || "—"));
+    tr.appendChild(numCell(fmtInt(player.villages)));
+    tr.appendChild(numCell(fmtInt(player.population)));
+    tr.appendChild(deltaCell(player.growth, null, null));
+    tr.appendChild(numCell(fmtInt(player.vp)));
+    els.rosterBody.appendChild(tr);
+  });
+}
+
+function wireRosterControls() {
+  var els = analysisElements();
+  function onChange() {
+    els.rosterError.hidden = true;
+    setPanelBusy("roster", true);
+    fetchRoster()
+      .catch(function (err) {
+        els.rosterError.hidden = false;
+        setText(els.rosterError, err.message || "Couldn't load the roster.");
+        els.rosterBody.textContent = "";
+      })
+      .then(function () {
+        setPanelBusy("roster", false);
+      });
+  }
+  els.rosterDate.addEventListener("change", onChange);
+  els.rosterAlliance.addEventListener("change", onChange);
 }
 
 /* Tab bar + wiring */
@@ -2158,6 +2460,8 @@ var tabLoaders = {
   wars: loadWars,
   changes: loadChanges,
   compare: loadCompare,
+  watch: loadWatch,
+  roster: loadRoster,
   villages: loadVillages,
 };
 
@@ -2180,7 +2484,8 @@ function activateTab(tab) {
   // Alliances tab is a cross-alliance chart with its own local picker and
   // the Wars tab always uses the tracked universe (never the filter).
   if (els.allianceFilter) {
-    els.allianceFilter.hidden = name === "alliances" || name === "wars" || allianceTags.length < 2;
+    els.allianceFilter.hidden =
+      name === "alliances" || name === "wars" || name === "roster" || allianceTags.length < 2;
   }
   if (!activatedTabs[name]) {
     activatedTabs[name] = true;
@@ -2333,6 +2638,8 @@ function wireAnalysis() {
   wireExportButtons();
   wireDaysSelect();
   wireCompareControls();
+  wireWatchControls();
+  wireRosterControls();
   // Regions is the default tab — its payload is fetched at init.
   activateTab(document.getElementById("tab-regions"));
 }

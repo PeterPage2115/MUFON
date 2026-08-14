@@ -682,6 +682,30 @@ def _regions_payload_cached(
         conn.close()
 
 
+def _village_population(conn: sqlite3.Connection, snapshot_date: str, village_id: int) -> int | None:
+    """One village's population on one date (watch payloads; None when gone)."""
+    row = cast(
+        Mapping[str, object] | None,
+        conn.execute(
+            "SELECT population FROM villages WHERE snapshot_date = ? AND village_id = ?",
+            (snapshot_date, village_id),
+        ).fetchone(),
+    )
+    return cast(int, row["population"]) if row is not None else None
+
+
+def _village_tag(conn: sqlite3.Connection, snapshot_date: str, village_id: int) -> str | None:
+    """One village's alliance tag on one date (None when gone)."""
+    row = cast(
+        Mapping[str, object] | None,
+        conn.execute(
+            "SELECT alliance_tag FROM villages WHERE snapshot_date = ? AND village_id = ?",
+            (snapshot_date, village_id),
+        ).fetchone(),
+    )
+    return cast(str, row["alliance_tag"]) if row is not None and row["alliance_tag"] else None
+
+
 def _event_dict(event: VillageEvent) -> dict[str, object]:
     """One village event in the events-browser payload shape.
 
@@ -1858,6 +1882,234 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
+
+    async def analysis_watch(
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
+        alliance: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> dict[str, object]:
+        """Normalized watch feed: village gained/lost, conquests and deleted
+        villages between two dates (ROADMAP.md §7).
+
+        Reuses ``village_events`` (our universe = the ``alliance`` filter) and
+        ``conquests_between`` (tracked universe) — it never writes alerts and
+        never sends Discord. ``village_gained`` is info; ``village_lost``,
+        ``conquest`` and ``deleted`` are warnings. The pair defaults to the
+        latest two snapshots; fewer than two snapshots → 200 empty with
+        ``from``/``to`` null; explicit unknown/reversed dates → 422."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                empty: dict[str, object] = {
+                    "from": None,
+                    "to": None,
+                    "total": 0,
+                    "items": [],
+                }
+                if len(all_dates) < 2:
+                    return empty
+                from_date = from_ if from_ is not None else all_dates[-2]
+                to_date = to if to is not None else all_dates[-1]
+                if from_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'from' date {from_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if to_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown 'to' date {to_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if from_date >= to_date:
+                    raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
+                ids = _resolve_alliance_ids(conn, to_date, cfg, alliance)
+                tracked_ids = _resolve_ids(conn, to_date, cfg.tracked_alliances)
+                prev_rows = store.load_villages(conn, from_date)
+                curr_rows = store.load_villages(conn, to_date)
+                gained, lost = village_events(prev_rows, curr_rows, ids)
+                conquests, tracked_deleted = conquests_between(prev_rows, curr_rows, tracked_ids)
+                conquered_ids = {event.village_id for event in conquests}
+                tracked_deleted_ids = {event.village_id for event in tracked_deleted}
+
+                items: list[dict[str, object]] = []
+                for event in gained:
+                    items.append(
+                        {
+                            "kind": "village_gained",
+                            "severity": "info",
+                            "from": from_date,
+                            "to": to_date,
+                            "village_id": event.village_id,
+                            "village_name": event.village_name,
+                            "region": event.region,
+                            "from_tag": None,
+                            "to_tag": _village_tag(conn, to_date, event.village_id),
+                            "population": _village_population(conn, to_date, event.village_id),
+                            "message": f"{event.village_name} gained by {event.new_owner_player or 'unknown'}",
+                        }
+                    )
+                for event in tracked_deleted:
+                    items.append(
+                        {
+                            "kind": "deleted",
+                            "severity": "warning",
+                            "from": from_date,
+                            "to": to_date,
+                            "village_id": event.village_id,
+                            "village_name": event.village_name,
+                            "region": event.region,
+                            "from_tag": event.from_tag,
+                            "to_tag": None,
+                            "population": event.population,
+                            "message": f"{event.village_name} deleted from the map",
+                        }
+                    )
+                for event in lost:
+                    if event.event == "lost_deleted":
+                        # Tracked deletions are already the "deleted" items
+                        # above; keep only losses outside the tracked universe.
+                        if event.village_id in tracked_deleted_ids:
+                            continue
+                        items.append(
+                            {
+                                "kind": "deleted",
+                                "severity": "warning",
+                                "from": from_date,
+                                "to": to_date,
+                                "village_id": event.village_id,
+                                "village_name": event.village_name,
+                                "region": event.region,
+                                "from_tag": _village_tag(conn, from_date, event.village_id),
+                                "to_tag": None,
+                                "population": _village_population(conn, from_date, event.village_id),
+                                "message": f"{event.village_name} deleted from the map",
+                            }
+                        )
+                    elif event.village_id not in conquered_ids:
+                        # A tracked→tracked transition is the wars conquest;
+                        # everything else leaving OUR alliance is a plain loss.
+                        items.append(
+                            {
+                                "kind": "village_lost",
+                                "severity": "warning",
+                                "from": from_date,
+                                "to": to_date,
+                                "village_id": event.village_id,
+                                "village_name": event.village_name,
+                                "region": event.region,
+                                "from_tag": _village_tag(conn, from_date, event.village_id),
+                                "to_tag": event.new_owner_tag,
+                                "population": _village_population(conn, to_date, event.village_id),
+                                "message": (
+                                    f"{event.village_name} lost to {event.new_owner_tag or 'unknown'}"
+                                ),
+                            }
+                        )
+                for event in conquests:
+                    items.append(
+                        {
+                            "kind": "conquest",
+                            "severity": "warning",
+                            "from": from_date,
+                            "to": to_date,
+                            "village_id": event.village_id,
+                            "village_name": event.village_name,
+                            "region": event.region,
+                            "from_tag": event.from_tag,
+                            "to_tag": event.to_tag,
+                            "population": event.population,
+                            "message": f"{event.village_name} conquered {event.from_tag} \u2192 {event.to_tag}",
+                        }
+                    )
+                # Deterministic order: severity first (warnings on top), then
+                # date pair, kind, region, name.
+                items.sort(
+                    key=lambda item: (
+                        0 if item["severity"] == "warning" else 1,
+                        item["kind"],
+                        item["region"] or "",
+                        item["village_name"] or "",
+                    )
+                )
+                return {
+                    "from": from_date,
+                    "to": to_date,
+                    "total": len(items),
+                    "items": items[:limit],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_roster(
+        date: str | None = None,
+        alliance: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 200,
+    ) -> dict[str, object]:
+        """Roster: one row per player of the selected alliance on one date.
+
+        SQL aggregate per stable ``player_id`` (villages/population/vp) with
+        growth against the previous snapshot; date defaults to the latest.
+        Unknown date/tag → 422; no match → 200 empty. Player rows link to
+        ``/players/{id}/history`` in the UI — no village lists here."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                if not all_dates:
+                    return {"snapshot_date": None, "alliance": alliance, "total": 0, "limit": limit, "players": []}
+                snapshot_date = date if date is not None else all_dates[-1]
+                if snapshot_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown date {snapshot_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                ids = _resolve_alliance_ids(conn, snapshot_date, cfg, alliance)
+                prev_date = all_dates[-2] if len(all_dates) >= 2 else None
+                curr = store.player_aggregates(conn, snapshot_date, ids)
+                prev = store.player_aggregates(conn, prev_date, ids) if prev_date is not None else None
+                players: list[dict[str, object]] = []
+                for player_id in sorted(curr):
+                    c = curr[player_id]
+                    p = prev.get(player_id) if prev is not None else None
+                    players.append(
+                        {
+                            "player_id": player_id,
+                            "player_name": c.player_name,
+                            "alliance_tag": c.alliance_tag,
+                            "villages": c.villages,
+                            "population": c.population,
+                            "vp": c.vp,
+                            "growth": (
+                                None if prev is None else c.population - (p.population if p is not None else 0)
+                            ),
+                        }
+                    )
+                players.sort(
+                    key=lambda p: (
+                        -cast(int, p["population"]),
+                        cast(str, p["player_name"]),
+                    )
+                )
+                return {
+                    "snapshot_date": snapshot_date,
+                    "alliance": alliance or "combined",
+                    "total": len(players),
+                    "limit": limit,
+                    "players": players[:limit],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
     async def analysis_players(alliance: str | None = None) -> dict[str, object]:
         """Latest-pair top players: population / growth / new villages / VP (10 each).
 
@@ -2011,6 +2263,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/api/analysis/regions/{region}/villages")(analysis_region_villages)
     _ = app.get("/api/analysis/overview")(analysis_overview)
     _ = app.get("/api/analysis/compare")(analysis_compare)
+    _ = app.get("/api/analysis/watch")(analysis_watch)
+    _ = app.get("/api/analysis/roster")(analysis_roster)
     _ = app.get("/api/analysis/villages")(analysis_villages)
     _ = app.get("/api/analysis/villages/{village_id}/history")(analysis_village_history)
     return app

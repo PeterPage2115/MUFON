@@ -2406,3 +2406,79 @@ tr.is-inactive td {
     }
   }
 }
+
+/* --- Watch + Roster (Faza 5) ---------------------------------------------------- */
+
+.watch-counts {
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--text-faint);
+}
+
+.watch-list {
+  list-style: none;
+  margin: var(--space-4) var(--space-6) var(--space-6);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.watch-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-primary);
+  border: 1px solid var(--border-default);
+  font-size: 0.875rem;
+}
+
+.watch-item--warning {
+  border-left: 3px solid var(--status-warning);
+}
+
+.watch-item--info {
+  border-left: 3px solid var(--status-info);
+}
+
+.watch-item__severity {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  color: var(--text-faint);
+}
+
+.watch-item__kind {
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.watch-item__region {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.watch-item__region:hover,
+.watch-item__region:focus-visible {
+  color: var(--accent-gold-soft);
+}
+
+.watch-item__tags {
+  color: var(--text-secondary);
+}
+
+.watch-item__message {
+  color: var(--text-secondary);
+}

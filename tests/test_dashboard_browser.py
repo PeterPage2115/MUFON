@@ -1616,3 +1616,98 @@ def test_retry_creates_new_run_id(browser_app_token: tuple[str, Browser]) -> Non
     assert first_rows != rows
     assert rows.count("succeeded") >= 2
     page.close()
+
+
+# --- Faza 5: Watch feed + Roster -------------------------------------------------
+
+
+def test_watch_tab_items_filters_and_links(browser_app: tuple[str, Browser]) -> None:
+    """Watch: normalized items with severity labels and counters; the
+    severity filter narrows; village names open the explorer history."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-watch")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-watch-list] li'); return el; }"
+    )
+    # The seeded pair: 440 gained villages (info) → warnings first.
+    first = page.text_content("[data-watch-list] li")
+    assert "WRN" in first or "INF" in first
+    counts = page.text_content("[data-watch-counts]")
+    assert "440 items" in counts
+    assert "0 warnings" in counts and "440 info" in counts
+    assert "Comparing 2026-08-07 → 2026-08-08" in page.text_content("[data-watch-range]")
+
+    # Severity filter narrows to zero warnings (all info).
+    page.select_option("#analysis-watch-severity", "warning")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-watch-list]'); return el && el.children.length === 0; }"
+    )
+    assert "0 of 440 items" in page.text_content("[data-watch-counts]")
+    page.select_option("#analysis-watch-severity", "")
+
+    # A gained item links to the village explorer history.
+    page.click('[data-watch-list] [aria-label^="Open history for Village 10000"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-village-history-table]'); return el && !el.hidden; }"
+    )
+    page.close()
+
+
+def test_roster_tab_rows_and_player_detail_link(browser_app: tuple[str, Browser]) -> None:
+    """Roster: per-player rows with growth and an alliance filter; the player
+    name reuses the player-history detail."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-roster")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-roster-body] tr'); return el; }"
+    )
+    body = page.text_content("[data-roster-body]")
+    assert "ENEMY-P219" in body  # top by population (gained village, 1219 pop)
+    assert "+1,219" in body  # growth vs the previous snapshot
+    assert "440 players on 2026-08-08" in page.text_content("[data-roster-note]")
+
+    # The alliance select narrows to NOVA only.
+    page.select_option("#analysis-roster-alliance", "NOVA")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-roster-body] tr'); return el && el.textContent.includes('NOVA-P219'); }"
+    )
+    assert "220 players on 2026-08-08" in page.text_content("[data-roster-note]")
+
+    # Player row opens the shared player-history detail.
+    page.click('[aria-label="Open history for NOVA-P219"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-player-history-table]'); return el && !el.hidden; }"
+    )
+    assert "NOVA-P219" in page.text_content("#player-detail-name")
+    page.close()
+
+
+def test_roster_export(browser_app: tuple[str, Browser]) -> None:
+    """Roster CSV names the snapshot and the alliance."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#tab-roster")
+    page.wait_for_function(
+        "() => !document.querySelector('[data-export=\"roster\"]').disabled"
+    )
+    with page.expect_download() as download_info:
+        page.click('[data-export="roster"]')
+    assert "roster-2026-08-08-combined.csv" in download_info.value.suggested_filename
+    page.close()

@@ -104,6 +104,8 @@
               <button class="tab-bar__tab" role="tab" id="tab-wars" aria-controls="panel-wars" aria-selected="false" tabindex="-1">Wars</button>
               <button class="tab-bar__tab" role="tab" id="tab-changes" aria-controls="panel-changes" aria-selected="false" tabindex="-1">Changes</button>
               <button class="tab-bar__tab" role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false" tabindex="-1">Compare</button>
+              <button class="tab-bar__tab" role="tab" id="tab-watch" aria-controls="panel-watch" aria-selected="false" tabindex="-1">Watch</button>
+              <button class="tab-bar__tab" role="tab" id="tab-roster" aria-controls="panel-roster" aria-selected="false" tabindex="-1">Roster</button>
               <button class="tab-bar__tab" role="tab" id="tab-villages" aria-controls="panel-villages" aria-selected="false" tabindex="-1">Villages</button>
             </div>
 
@@ -465,6 +467,80 @@
               </div>
               <p class="field-help" data-compare-movement hidden></p>
               <p class="empty-state" data-compare-empty hidden></p>
+            </section>
+
+            <section class="analysis-panel" id="panel-watch" role="tabpanel" aria-labelledby="tab-watch" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">Village movement between the selected dates</p>
+                <span class="watch-counts" data-watch-counts></span>
+              </div>
+              <div class="analysis-controls">
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-watch-from">From</label>
+                  <select id="analysis-watch-from" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-watch-to">To</label>
+                  <select id="analysis-watch-to" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-watch-severity">Severity</label>
+                  <select id="analysis-watch-severity" class="analysis-select">
+                    <option value="">All</option>
+                    <option value="warning">warnings</option>
+                    <option value="info">info</option>
+                  </select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-watch-kind">Kind</label>
+                  <select id="analysis-watch-kind" class="analysis-select">
+                    <option value="">All kinds</option>
+                    <option value="village_gained">gained</option>
+                    <option value="village_lost">lost</option>
+                    <option value="conquest">conquest</option>
+                    <option value="deleted">deleted</option>
+                  </select>
+                </div>
+                <p class="analysis-controls__error" id="analysis-watch-error" role="alert" hidden></p>
+              </div>
+              <p class="field-help" data-watch-range hidden></p>
+              <ul class="watch-list" data-watch-list aria-live="polite"></ul>
+              <p class="empty-state" data-watch-empty hidden></p>
+            </section>
+
+            <section class="analysis-panel" id="panel-roster" role="tabpanel" aria-labelledby="tab-roster" hidden>
+              <div class="analysis-toolbar">
+                <p class="overline">One row per player of the selected alliance</p>
+                <button class="button button--outline button--small" type="button" data-export="roster" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls">
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-roster-date">Snapshot</label>
+                  <select id="analysis-roster-date" class="analysis-select"></select>
+                </div>
+                <div class="analysis-control">
+                  <label class="overline" for="analysis-roster-alliance">Alliance</label>
+                  <select id="analysis-roster-alliance" class="analysis-select"></select>
+                </div>
+                <p class="analysis-controls__error" id="analysis-roster-error" role="alert" hidden></p>
+              </div>
+              <p class="field-help" data-roster-note hidden></p>
+              <div class="data-table__wrap">
+                <table class="data-table" aria-label="Alliance roster">
+                  <thead>
+                    <tr>
+                      <th class="th--left" scope="col">Player</th>
+                      <th class="th--left" scope="col">Alliance</th>
+                      <th class="th--num" scope="col">Villages</th>
+                      <th class="th--num" scope="col">Population</th>
+                      <th class="th--num" scope="col">Growth</th>
+                      <th class="th--num" scope="col">VP</th>
+                    </tr>
+                  </thead>
+                  <tbody data-roster-body></tbody>
+                </table>
+              </div>
+              <p class="empty-state" data-roster-empty hidden></p>
             </section>
 
             <section class="analysis-panel" id="panel-villages" role="tabpanel" aria-labelledby="tab-villages" hidden>
