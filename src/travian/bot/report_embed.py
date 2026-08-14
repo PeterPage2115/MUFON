@@ -7,35 +7,35 @@ All user-facing text lives in ``travian.strings``.
 Pinned structure: ONE message with up to 4 embeds, in order —
 
 1. ``📊 Daily Report`` (only when ``"summary"`` is in ``sections`` — always
-   true for the daily message): description = context line (server —
-   snapshot — tags, `` (baseline)`` when there is no previous snapshot)
-   + ``# Summary``; inline KPI fields (Villages, Population, Players, VP,
-   Regions, New / Lost), 3 per row on desktop.
+   true for the daily message): description = the context line (server —
+   snapshot — tags, `` (baseline)`` when there is no previous snapshot);
+   inline KPI fields (Villages, Population, Players, VP, Regions,
+   New / Lost), 3 per row on desktop. The embed title is the card heading —
+   no ``# Summary`` inside the description.
 2. ``🗺️ Regions`` (only when ``"regions"`` in ``sections`` and
-   ``data.regions`` non-empty): COMPACT mobile-safe list in the description
-   — ACTIVE regions first (total population ≥ 4,000, the game rule), then
-   the inactive ones after a divider. Each region is two short lines:
-   ``<region> · <share> · <pop>`` and ``Δ <share_delta> · VP <vp_delta> ·
-   <to50>``; region names truncate to 10 chars and every fenced line is
-   hard-capped at 36 chars, so Discord mobile never creates a horizontal
-   scroll. There is no control bar and no fixed column layout — the visible
-   share percentage is the control signal. To 50%: ✓ when the region is
+   ``data.regions`` non-empty): ACTIVE regions first (total population ≥
+   4,000, the game rule), then the inactive ones. Capped (``region_limit``
+   set, the daily card): each shown region is one inline field
+   (``<region> · <share>`` / ``<pop> pop + Δ line``) and the tail collapses
+   behind a ``More regions`` field; ``Legend`` explains the glyphs and a
+   ``Biggest moves`` field names the best/worst Δ % moves when deltas
+   exist. Uncapped (``/regiony``): the same blocks as proportional
+   description lines under the intro ``Control share and change vs previous
+   snapshot``, inactive regions after the ``Inactive regions`` heading,
+   truncated only by the 4096-char budget. To 50%: ✓ when the region is
    controlled (active AND strictly > 50% of the total population), ``+N``
    when active and short, ``—`` when inactive. Δ % is our control-share
-   change vs yesterday ("—" on baseline days); the legend below the fence
-   explains every symbol. With ``region_limit`` set, only the top *limit*
-   ACTIVE regions render and the rest (remaining active + all inactive)
-   collapse behind a ``…and N more`` line; the movers line below the legend
-   names the best and worst Δ % moves of the day when any delta exists.
-   ``region_names`` (exact snapshot names, max 10) restricts the list AND
-   the Summary KPI to those regions. The ``…and N more`` guard also fits
-   the list to the 4096-char description.
+   change vs yesterday ("—" on baseline days). ``region_names`` (exact
+   snapshot names, max 10) restricts the list AND the Summary KPI to those
+   regions.
 3. ``⚔️ Standings`` (only when ``"standings"`` in ``sections`` and
-   ``data.standings`` non-empty): fenced table, OUR tags first (config
-   order within the two groups), ★ marker + footnote (Markdown bold does
-   not render inside code fences). With ``standings_limit`` the table shows
-   only the top *limit* alliances by current population (tag ASC tie-break)
-   before the ★/ours-first ordering, with a ``…and N more alliances`` line.
+   ``data.standings`` non-empty): OUR tags first (config order within the
+   two groups). Capped (``standings_limit`` set, the daily card): each
+   selected alliance is one inline field (``<★ tag>`` / pop+VP with Δs), a
+   ``More alliances`` field collapses the tail and ``Legend`` (``★ our
+   alliances``) always closes the card. Uncapped: the same rows as
+   proportional description lines under the intro ``Population and VP ·
+   change vs previous snapshot``.
 4. ``🏗️ New & Lost Villages`` (only when ``"villages"`` in ``sections`` and
    either list is non-empty): bold event lines under ``#`` headings, cap 15
    per list. New lines show the region and founder (``by <player>``), lost
@@ -45,13 +45,13 @@ Pinned structure: ONE message with up to 4 embeds, in order —
 
 ``sections`` is a subset of ``REPORT_SECTIONS``; the daily message uses
 ``DAILY_SECTIONS`` (summary + regions + standings, regions and standings
-capped at 10 active rows each) and the on-demand commands request a single section.
+capped at 10 rows each) and the on-demand commands request a single section.
 
 Colors: embed 1 uses the configured color; embeds 2–4 use the fixed palette
 constants. Every embed carries the footer. ``#``/``###`` headings render
-only in descriptions (not field values — discord-api-docs issue #7167);
-code fences render in descriptions, so the tables live there instead of
-fields (no 1024-char field cap, no multi-field splitting).
+only in descriptions (not field values — discord-api-docs issue #7167), so
+the village sections keep their headings while the capped cards use fields
+(no code fences, no 1024-char multi-field splitting).
 
 Delta rendering: None → "—", 0 → "±0", >0 → "+N", <0 → "−N" (U+2212);
 thousands are grouped in tables and KPIs.
@@ -109,8 +109,8 @@ def build_report_embed(
 
     ``sections`` selects which embeds to build (``DAILY_SECTIONS`` for the
     daily message, single-section sets for the on-demand commands);
-    ``region_limit`` caps the Regions list to the top *limit* ACTIVE regions
-    with the rest collapsed behind a ``…and N more`` line.
+    ``region_limit`` caps the Regions card to the top *limit* ACTIVE regions
+    with the rest collapsed behind a ``More regions`` field.
     ``region_names`` (exact snapshot region names, max 10) restricts the
     Regions list AND the Summary KPI Regions field to those regions — the
     filter runs BEFORE the KPI, movers and body, so all three describe the
@@ -229,14 +229,15 @@ def _summary_embed(
     color: int,
     regions: list[RegionStat],
 ) -> discord.Embed:
-    """Embed 1: context description + ``# Summary`` + inline KPI fields.
+    """Embed 1: context description + inline KPI fields — no ``# Summary``
+    heading (the embed title is the card heading).
 
     ``regions`` is the (possibly REPORT_REGIONS-filtered) region list — the
     Regions KPI must describe the same scope as the Regions embed."""
     embed = discord.Embed(
         title=strings.EMBED_TITLE_REPORT,
         color=color,
-        description=f"{description}\n\n{strings.HEADING_SUMMARY}",
+        description=description,
     )
     _ = embed.set_footer(text=footer)
 
@@ -270,46 +271,24 @@ def _summary_embed(
     return embed
 
 
-#: Hard cap per fenced Regions line — Discord mobile scrolls horizontally
-#: past this width, so the compact layout must never exceed it.
-_REGION_LINE_MAX = 36
-
-
-def _region_lines(r: RegionStat) -> list[str]:
-    """The compact two-line rendering of one region (mobile-safe).
-
-    Line 1: ``<region> · <share> · <pop>``; line 2: ``Δ <share_delta> · VP
-    <vp_delta> · <to50>``. The region name is truncated to 10 chars and each
-    line is hard-capped at ``_REGION_LINE_MAX`` chars — the values survive
-    (share/pop/deltas are bounded), the cap is defensive.
-    """
+def _region_to50(r: RegionStat) -> str:
+    """The To-50% cell: ✓ when controlled, — when inactive, else +N needed."""
     needed = to50_needed(r)
     if region_controlled(r):
-        to50 = strings.REGION_CONTROLLED
-    elif needed is None:
-        to50 = strings.REGION_INACTIVE_CELL
-    else:
-        to50 = strings.REGION_TO50_NEEDED.format(n=needed)
-    line1 = strings.REGION_LINE.format(
-        region=_truncate(r.region, 10),
-        share=f"{r.share:.1%}",
-        pop=f"{r.our_pop:,}",
-    )
-    line2 = strings.REGION_DELTA_LINE.format(
-        share_delta=_render_share_delta(r.share_delta),
-        vp_delta=_render_table_delta(r.vp_delta),
-        to50=to50,
-    )
-    return [_truncate(line, _REGION_LINE_MAX) for line in (line1, line2)]
+        return strings.REGION_CONTROLLED
+    if needed is None:
+        return strings.REGION_INACTIVE_CELL
+    return strings.REGION_TO50_NEEDED.format(n=needed)
 
 
 def _mover_token(delta: float, region: str) -> str:
-    """One movers-line token: ``+3.3% Corinium`` / ``−5.3% Teutones``."""
+    """One movers token: ``+3.3% Corinium`` / ``−5.3% Teutones``."""
     return f"{_render_share_delta(delta)} {region}"
 
 
-def _region_movers_line(regions: list[RegionStat]) -> str | None:
-    """The best/worst Δ % movers line, or None when no region has a delta.
+def _region_movers_field(regions: list[RegionStat]) -> tuple[str, str] | None:
+    """The best/worst Δ % movers as a (name, value) field, or None when no
+    region has a delta.
 
     Selection (deterministic): every region with a non-None ``share_delta``
     is a candidate; best = max by ``(share_delta, region)``, worst = min by
@@ -322,47 +301,97 @@ def _region_movers_line(regions: list[RegionStat]) -> str | None:
     best = max(candidates, key=lambda c: (c[0], c[1]))
     worst = min(candidates, key=lambda c: (c[0], c[1]))
     if best == worst:
-        return strings.REGION_MOVERS_SINGLE.format(move=_mover_token(*best))
-    return strings.REGION_MOVERS_LINE.format(best=_mover_token(*best), worst=_mover_token(*worst))
+        return (
+            strings.REGION_MOVERS_SINGLE_FIELD,
+            strings.REGION_MOVERS_SINGLE_FIELD_VALUE.format(move=_mover_token(*best)),
+        )
+    return (
+        strings.REGION_MOVERS_FIELD,
+        strings.REGION_MOVERS_FIELD_VALUE.format(best=_mover_token(*best), worst=_mover_token(*worst)),
+    )
+
+
+def _region_text_lines(r: RegionStat) -> list[str]:
+    """The proportional two-line rendering of one region (uncapped list):
+    ``<region> · <share> · <pop>`` and ``Δ <share_delta> · VP <vp_delta> ·
+    <to50>`` — no fixed columns, no width cap (no code fence)."""
+    return [
+        strings.REGION_TEXT_LINE.format(
+            region=_truncate(r.region, 10),
+            share=f"{r.share:.1%}",
+            pop=f"{r.our_pop:,}",
+        ),
+        strings.REGION_TEXT_DELTA_LINE.format(
+            share_delta=_render_share_delta(r.share_delta),
+            vp_delta=_render_table_delta(r.vp_delta),
+            to50=_region_to50(r),
+        ),
+    ]
 
 
 def _regions_embed(regions: list[RegionStat], footer: str, limit: int | None = None) -> discord.Embed:
-    """Embed 2: compact region list — active regions first, inactive after a
-    divider, each region as two mobile-safe lines (no fixed columns, no
-    control bar — the visible share percentage is the control signal). With
-    ``limit`` only the top *limit* ACTIVE regions render and the rest
-    (remaining active + all inactive) collapse behind a ``…and N more`` line
-    (preceded by the divider); the movers line follows the legend when any
-    region has a Δ %."""
+    """Embed 2: region list — active regions first, inactive after the
+    heading. Capped (``limit``, the daily card): each shown ACTIVE region
+    is one inline field (the share percentage in the name is the control
+    signal) and the rest collapse behind a ``More regions`` field, with
+    ``Legend`` and (when deltas exist) ``Biggest moves`` closing the card.
+    Uncapped (``/regiony``): the same blocks as proportional description
+    lines under the intro, fitted to the 4096-char budget with the
+    ``…and N more`` guard."""
     active = sorted((r for r in regions if region_active(r)), key=lambda r: (-r.share, r.region))
     inactive = sorted((r for r in regions if not region_active(r)), key=lambda r: (-r.share, r.region))
-    lines: list[str] = []
     if limit is not None:
+        embed = discord.Embed(
+            title=strings.EMBED_TITLE_REGIONS,
+            color=_COLOR_REGIONS,
+            description="",
+        )
+        _ = embed.set_footer(text=footer)
         shown = min(limit, len(active))
         for r in active[:shown]:
-            lines.extend(_region_lines(r))
+            _ = embed.add_field(
+                name=strings.REGION_FIELD_NAME.format(
+                    region=_truncate(r.region, 10),
+                    share=f"{r.share:.1%}",
+                ),
+                value=strings.REGION_FIELD_VALUE.format(
+                    pop=r.our_pop,
+                    share_delta=_render_share_delta(r.share_delta),
+                    vp_delta=_render_table_delta(r.vp_delta),
+                    to50=_region_to50(r),
+                ),
+                inline=True,
+            )
         hidden = len(regions) - shown
         if hidden > 0:
-            lines.append(strings.REGION_TABLE_DIVIDER)
-            lines.append(strings.MORE_LINE.format(n=hidden))
-    else:
-        for r in active:
-            lines.extend(_region_lines(r))
-        if inactive:
-            lines.append(strings.REGION_TABLE_DIVIDER)
-            for r in inactive:
-                lines.extend(_region_lines(r))
-    prefix = f"{strings.HEADING_REGIONS}\n\n```\n"
-    suffix = f"\n```\n\n{strings.REGION_LEGEND}"
-    movers = _region_movers_line(regions)
-    if movers is not None:
-        suffix += f"\n{movers}"
-    budget = _DESCRIPTION_MAX - len(prefix) - len(suffix)
-    table = "\n".join(_fit_lines(lines, budget=budget))
+            _ = embed.add_field(
+                name=strings.REGION_MORE_FIELDS,
+                value=strings.REGION_MORE_FIELDS_VALUE.format(n=hidden),
+                inline=False,
+            )
+        _ = embed.add_field(
+            name=strings.REGION_LEGEND_FIELD,
+            value=strings.REGION_LEGEND_FIELD_VALUE,
+            inline=False,
+        )
+        movers = _region_movers_field(regions)
+        if movers is not None:
+            _ = embed.add_field(name=movers[0], value=movers[1], inline=False)
+        return embed
+
+    lines: list[str] = []
+    for r in active:
+        lines.extend(_region_text_lines(r))
+    if inactive:
+        lines.append(strings.REGION_INACTIVE_HEADING)
+        for r in inactive:
+            lines.extend(_region_text_lines(r))
+    intro = strings.REGION_DESCRIPTION_INTRO
+    table = "\n".join(_fit_lines(lines, budget=_DESCRIPTION_MAX - len(intro) - 1))
     embed = discord.Embed(
         title=strings.EMBED_TITLE_REGIONS,
         color=_COLOR_REGIONS,
-        description=prefix + table + suffix,
+        description=f"{intro}\n{table}" if table else intro,
     )
     _ = embed.set_footer(text=footer)
     return embed
@@ -374,44 +403,69 @@ def _standings_embed(
     footer: str,
     limit: int | None = None,
 ) -> discord.Embed:
-    """Embed 3: fenced comparison table — OUR tags first (★ marker), the rest
-    in config order. Markdown bold does not render inside code fences, so the
-    footnote explains the ★ (string decision). With ``limit`` the table shows
-    only the top *limit* alliances by CURRENT population (tag ASC tie-break);
-    the ★ / ours-first ordering is applied AFTER the selection, and the
-    truncated tail collapses behind a ``…and N more alliances`` line."""
+    """Embed 3: alliance list — OUR tags first (★ marker), the rest in
+    config order. Capped (``limit``, the daily card): only the top *limit*
+    by CURRENT population (tag ASC tie-break) render as inline fields; the
+    ★ / ours-first ordering is applied AFTER the selection, the truncated
+    tail collapses behind a ``More alliances`` field and ``Legend``
+    (``★ our alliances``) always closes the card. Uncapped: the same rows
+    as proportional description lines under the intro."""
     ours = set(our_tags)
     if limit is not None:
         ranked = sorted(standings, key=lambda s: (-s.population, s.tag))[:limit]
         hidden = len(standings) - len(ranked)
         ordered = [s for s in ranked if s.tag in ours] + [s for s in ranked if s.tag not in ours]
-    else:
-        hidden = 0
-        ordered = [s for s in standings if s.tag in ours] + [s for s in standings if s.tag not in ours]
-    rows = [strings.STANDINGS_TABLE_HEADER, strings.STANDINGS_TABLE_DIVIDER]
-    for s in ordered:
-        tag = _truncate(s.tag, 7)
-        if s.tag in ours:
-            tag = _truncate(strings.STANDINGS_OURS_MARK + s.tag, 7)
-        rows.append(
-            strings.STANDINGS_TABLE_LINE.format(
-                tag=tag,
-                pop=s.population,
-                pop_delta=_render_table_delta(s.population_delta),
-                vp=s.vp,
-                vp_delta=_render_table_delta(s.vp_delta),
-            )
+        embed = discord.Embed(
+            title=strings.EMBED_TITLE_STANDINGS,
+            color=_COLOR_STANDINGS,
+            description="",
         )
-    if hidden > 0:
-        rows.append(strings.STANDINGS_MORE_LINE.format(n=hidden))
-    prefix = f"{strings.HEADING_STANDINGS}\n\n```\n"
-    suffix = f"\n```\n\n{strings.STANDINGS_OURS_FOOTNOTE}"
-    budget = _DESCRIPTION_MAX - len(prefix) - len(suffix)
-    table = "\n".join(_fit_lines(rows, budget=budget))
+        _ = embed.set_footer(text=footer)
+        for s in ordered:
+            marker = strings.STANDINGS_MARKER if s.tag in ours else ""
+            _ = embed.add_field(
+                name=strings.STANDINGS_FIELD_NAME.format(
+                    marker=marker,
+                    tag=_truncate(s.tag, 7 - len(marker)),
+                ),
+                value=strings.STANDINGS_FIELD_VALUE.format(
+                    pop=s.population,
+                    pop_delta=_render_table_delta(s.population_delta),
+                    vp=s.vp,
+                    vp_delta=_render_table_delta(s.vp_delta),
+                ),
+                inline=True,
+            )
+        if hidden > 0:
+            _ = embed.add_field(
+                name=strings.STANDINGS_MORE_FIELDS,
+                value=strings.STANDINGS_MORE_FIELDS_VALUE.format(n=hidden),
+                inline=False,
+            )
+        _ = embed.add_field(
+            name=strings.STANDINGS_LEGEND_FIELD,
+            value=strings.STANDINGS_LEGEND_FIELD_VALUE,
+            inline=False,
+        )
+        return embed
+
+    ordered = [s for s in standings if s.tag in ours] + [s for s in standings if s.tag not in ours]
+    lines = [
+        strings.STANDINGS_TEXT_LINE.format(
+            tag=_truncate(s.tag, 7),
+            pop=s.population,
+            pop_delta=_render_table_delta(s.population_delta),
+            vp=s.vp,
+            vp_delta=_render_table_delta(s.vp_delta),
+        )
+        for s in ordered
+    ]
+    intro = strings.STANDINGS_DESCRIPTION_INTRO
+    table = "\n".join(_fit_lines(lines, budget=_DESCRIPTION_MAX - len(intro) - 1))
     embed = discord.Embed(
         title=strings.EMBED_TITLE_STANDINGS,
         color=_COLOR_STANDINGS,
-        description=prefix + table + suffix,
+        description=f"{intro}\n{table}" if table else intro,
     )
     _ = embed.set_footer(text=footer)
     return embed

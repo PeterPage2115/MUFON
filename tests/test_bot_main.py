@@ -645,9 +645,14 @@ class TestReportRegionsInReport:
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
         sent = channel.sent[0]
         regions = next(e for e in sent if e.title == strings.EMBED_TITLE_REGIONS)
-        description = regions.description or ""
-        assert "Borders" in description
-        assert "Testland" not in description
+        # Capped card: only the filtered region renders (its field or the
+        # movers value); nothing else from the map leaks in.
+        assert any(
+            "Borders" in f.name or "Borders" in (f.value or "") for f in regions.fields
+        )
+        assert not any(
+            "Testland" in f.name or "Testland" in (f.value or "") for f in regions.fields
+        )
 
     def test_unknown_report_regions_fall_back_with_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -661,7 +666,9 @@ class TestReportRegionsInReport:
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
         sent = channel.sent[0]
         regions = next(e for e in sent if e.title == strings.EMBED_TITLE_REGIONS)
-        assert "Testland" in (regions.description or "")  # top-10 fallback
+        # Top-10 fallback: the movers field still names the full scope.
+        values = [f.value for f in regions.fields]
+        assert any("Testland" in (v or "") for v in values)
         logs = _logs(_db_path(tmp_path))
         assert any(
             entry["job"] == "report"
@@ -687,11 +694,13 @@ class TestReportRegionsInReport:
         asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
         sent = channel.sent[0]
         standings = next(e for e in sent if e.title == strings.EMBED_TITLE_STANDINGS)
-        # Top-10 by current population: T19..T10; the tail collapses.
-        description = standings.description or ""
-        assert "T19" in description
-        assert "T09" not in description
-        assert "…and 10 more alliances" in description
+        # Top-10 by current population: T19..T10 inline fields; the tail
+        # collapses behind the More alliances field.
+        names = [f.name for f in standings.fields]
+        assert names[:10] == [f"T{i:02d}" for i in range(19, 9, -1)]
+        assert "T09" not in names
+        more = next(f for f in standings.fields if f.name == strings.STANDINGS_MORE_FIELDS)
+        assert more.value == "10 not shown"
 
 
 # --- run_fetch ----------------------------------------------------------------
@@ -1580,11 +1589,12 @@ class TestSectionRunners:
         embeds = asyncio.run(bot_main.run_regions())
         assert [e.title for e in embeds] == [strings.EMBED_TITLE_REGIONS]
         description = embeds[0].description or ""
-        # The on-demand command carries the FULL table (no region_limit) —
-        # all rows render, no more-line inside the fence.
+        # The on-demand command carries the FULL list (no region_limit) —
+        # all rows render as proportional lines, no more-line, no fence.
+        assert strings.REGION_DESCRIPTION_INTRO in description
         assert "Testland" in description
         assert "…and " not in description
-        assert strings.REGION_LEGEND in description
+        assert "```" not in description
 
     def test_run_villages_empty_without_snapshot(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_bot_env(monkeypatch, tmp_path)

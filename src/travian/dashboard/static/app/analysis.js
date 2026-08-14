@@ -265,7 +265,7 @@ function prepareCustomPair(tab) {
   var r = analysisState.ranges[tab];
   return api.analysis("dates").then(function (payload) {
     var dates = payload.dates || [];
-    fillPairSelects(tab, dates);
+    fillPairSelects(tab, dates, "Need at least two snapshots");
     if (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1) {
       revertStaleCustom(tab);
       return true; // the fallback (days 7) is valid — reload normally
@@ -274,12 +274,12 @@ function prepareCustomPair(tab) {
   });
 }
 
-function fillPairSelects(tab, dates) {
+function fillPairSelects(tab, dates, emptyText) {
   var fromEl = document.querySelector('[data-range-from="' + tab + '"]');
   var toEl = document.querySelector('[data-range-to="' + tab + '"]');
   if (!fromEl || !toEl) return;
-  fillDateSelect(fromEl, dates);
-  fillDateSelect(toEl, dates);
+  fillDateSelect(fromEl, dates, emptyText);
+  fillDateSelect(toEl, dates, emptyText);
 }
 
 function reloadTab(tab) {
@@ -294,7 +294,7 @@ function loadRegions() {
   var els = analysisElements();
   hidePanelError(panel);
   setPanelBusy("regions", true);
-  tableLoading(els.regionsBody, 6);
+  tableLoading(els.regionsBody, 5);
   var request = function () {
     return api
       .analysis("regions", rangeParams("regions"))
@@ -378,16 +378,17 @@ function renderRegions(payload) {
   analysisState.regionsSeries = series;
 
   els.regionSelect.textContent = "";
-  ordered.forEach(function (name) {
-    var opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    els.regionSelect.appendChild(opt);
-  });
-  if (region) els.regionSelect.value = region;
+  fillSelectOptions(
+    els.regionSelect,
+    ordered.map(function (name) {
+      return { value: name, label: name };
+    }),
+    "No region history available"
+  );
+  if (ordered.length && region) els.regionSelect.value = region;
 
   if (!ordered.length) {
-    showChartUnavailable(panel.querySelector(".chart-card"));
+    showChartUnavailable(panel.querySelector(".chart-card"), "No region history available for this range.");
     return;
   }
   renderRegionChart(region);
@@ -398,6 +399,7 @@ function regionRow(row) {
   if (!row.active) tr.classList.add("is-inactive");
 
   var tdRegion = document.createElement("td");
+  tdRegion.setAttribute("data-label", "Region");
   tdRegion.className = "region-name";
   var regionButton = document.createElement("button");
   regionButton.type = "button";
@@ -410,6 +412,7 @@ function regionRow(row) {
   tdRegion.appendChild(regionButton);
 
   var tdControl = document.createElement("td");
+  tdControl.setAttribute("data-label", "Control");
   // Semantic meter: real progressbar semantics with a visible percentage —
   // never a color-only or glyph-only signal (ROADMAP.md §4 / DESIGN §8).
   var bar = document.createElement("span");
@@ -423,16 +426,14 @@ function regionRow(row) {
   bar.textContent = (row.share * 100).toFixed(1) + "%";
   tdControl.appendChild(bar);
 
-  var tdShare = document.createElement("td");
-  tdShare.className = "num";
-  tdShare.textContent = (row.share * 100).toFixed(1) + "%";
-
   var tdPop = document.createElement("td");
   tdPop.className = "num";
+  tdPop.setAttribute("data-label", "Pop");
   tdPop.textContent = fmtInt(row.our_pop);
 
   var tdDelta = document.createElement("td");
   tdDelta.className = "num";
+  tdDelta.setAttribute("data-label", "\u0394");
   var d = row.share_delta;
   if (d === null || d === undefined) {
     tdDelta.textContent = "\u2014";
@@ -450,6 +451,7 @@ function regionRow(row) {
 
   var tdTo50 = document.createElement("td");
   tdTo50.className = "num";
+  tdTo50.setAttribute("data-label", "To 50%");
   if (row.controlled) {
     tdTo50.textContent = "\u2713";
     tdTo50.classList.add("is-positive");
@@ -462,7 +464,6 @@ function regionRow(row) {
 
   tr.appendChild(tdRegion);
   tr.appendChild(tdControl);
-  tr.appendChild(tdShare);
   tr.appendChild(tdPop);
   tr.appendChild(tdDelta);
   tr.appendChild(tdTo50);
@@ -947,14 +948,60 @@ function renderPlayers(payload) {
   });
 }
 
-function fillDateSelect(select, dates) {
+//: ONE disabled placeholder option — a dynamic select is never blank.
+function setSelectPlaceholder(select, text) {
   select.textContent = "";
-  dates.forEach(function (d) {
-    var opt = document.createElement("option");
-    opt.value = d;
-    opt.textContent = d;
-    select.appendChild(opt);
+  var opt = document.createElement("option");
+  opt.disabled = true;
+  opt.value = "";
+  opt.textContent = text;
+  select.appendChild(opt);
+}
+
+//: The single DOM path for dynamic <select> contents: ``options`` are
+//: (value, label) pairs; an empty list leaves ONE disabled placeholder —
+//: never a blank control with a misleading empty selection.
+function fillSelectOptions(select, options, emptyText) {
+  if (!options || !options.length) {
+    setSelectPlaceholder(select, emptyText);
+    return;
+  }
+  select.textContent = "";
+  options.forEach(function (opt) {
+    var el = document.createElement("option");
+    el.value = opt.value;
+    el.textContent = opt.label;
+    select.appendChild(el);
   });
+}
+
+//: Every dynamic select starts with a visible disabled ``Loading…`` option
+//: so no control is ever blank during its first request.
+function primeDynamicSelects() {
+  var selects = [];
+  var regionSelect = document.getElementById("analysis-region-select");
+  if (regionSelect) selects.push(regionSelect);
+  Array.prototype.push.apply(
+    selects,
+    Array.prototype.slice.call(document.querySelectorAll("[data-range-from], [data-range-to]"))
+  );
+  var rosterDate = document.getElementById("analysis-roster-date");
+  var rosterAlliance = document.getElementById("analysis-roster-alliance");
+  if (rosterDate) selects.push(rosterDate);
+  if (rosterAlliance) selects.push(rosterAlliance);
+  selects.forEach(function (select) {
+    setSelectPlaceholder(select, "Loading\u2026");
+  });
+}
+
+function fillDateSelect(select, dates, emptyText) {
+  fillSelectOptions(
+    select,
+    (dates || []).map(function (d) {
+      return { value: d, label: d };
+    }),
+    emptyText || "No snapshots available"
+  );
 }
 
 function setEventsBusy(busy) {
@@ -973,6 +1020,8 @@ function loadEvents() {
     .analysis("dates")
     .then(function (payload) {
       var dates = payload.dates || [];
+      fillDateSelect(els.eventsFrom, dates, "Need at least two snapshots");
+      fillDateSelect(els.eventsTo, dates, "Need at least two snapshots");
       if (dates.length < 2) {
         showPanelEmpty(panel, "No data yet.");
         setPanelBusy("events", false);
@@ -980,8 +1029,6 @@ function loadEvents() {
         return;
       }
       hidePanelEmpty(panel);
-      fillDateSelect(els.eventsFrom, dates);
-      fillDateSelect(els.eventsTo, dates);
       setRangeSelectValue("events");
       var r = analysisState.ranges.events;
       if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
@@ -1109,6 +1156,8 @@ function loadWars() {
     .analysis("dates")
     .then(function (payload) {
       var dates = payload.dates || [];
+      fillDateSelect(els.warsFrom, dates, "Need at least two snapshots");
+      fillDateSelect(els.warsTo, dates, "Need at least two snapshots");
       if (dates.length < 2) {
         showPanelEmpty(panel, "No data yet.");
         setPanelBusy("wars", false);
@@ -1116,8 +1165,6 @@ function loadWars() {
         return;
       }
       hidePanelEmpty(panel);
-      fillDateSelect(els.warsFrom, dates);
-      fillDateSelect(els.warsTo, dates);
       setRangeSelectValue("wars");
       var r = analysisState.ranges.wars;
       if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
@@ -1931,14 +1978,14 @@ function loadWatch() {
     .analysis("dates")
     .then(function (payload) {
       var dates = payload.dates || [];
+      fillDateSelect(els.watchFrom, dates, "Need at least two snapshots");
+      fillDateSelect(els.watchTo, dates, "Need at least two snapshots");
       if (dates.length < 2) {
         showPanelEmpty(panel, "No data yet.");
         setPanelBusy("watch", false);
         return;
       }
       hidePanelEmpty(panel);
-      fillDateSelect(els.watchFrom, dates);
-      fillDateSelect(els.watchTo, dates);
       setRangeSelectValue("watch");
       var r = analysisState.ranges.watch;
       if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
@@ -2122,13 +2169,13 @@ function loadRoster() {
     .analysis("dates")
     .then(function (payload) {
       var dates = payload.dates || [];
+      fillDateSelect(els.rosterDate, dates);
       if (!dates.length) {
         showPanelEmpty(panel, "No data yet.");
         setPanelBusy("roster", false);
         return;
       }
       hidePanelEmpty(panel);
-      fillDateSelect(els.rosterDate, dates);
       els.rosterDate.value = dates[dates.length - 1];
       fillAllianceSelect(els.rosterAlliance, allianceTags);
       return fetchRoster();
@@ -2306,16 +2353,25 @@ function wireRangeControls(tab) {
       var r = analysisState.ranges[tab];
       r.mode = "custom";
       syncAnalysisUrl();
-      // Reveal the pair with the last valid pair as the starting point
-      // (or the 7-day window when none is stored).
+      // Reveal the pair controls DISABLED, then fill them from the real
+      // date catalog: the pair selects are re-enabled only after their
+      // options exist (a blank/enabled pair is never shown).
+      var fromEl = document.querySelector('[data-range-from="' + tab + '"]');
+      var toEl = document.querySelector('[data-range-to="' + tab + '"]');
+      var pairControls = document.querySelectorAll('[data-range-pair="' + tab + '"]');
+      Array.prototype.forEach.call(pairControls, function (el) {
+        el.hidden = false;
+      });
+      if (fromEl) fromEl.disabled = true;
+      if (toEl) toEl.disabled = true;
       api.analysis("dates").then(function (payload) {
         var dates = payload.dates || [];
-        fillPairSelects(tab, dates);
-        var pairControls = document.querySelectorAll('[data-range-pair="' + tab + '"]');
-        Array.prototype.forEach.call(pairControls, function (el) {
-          el.hidden = false;
-        });
-        if (!dates.length) return;
+        fillPairSelects(tab, dates, "Need at least two snapshots");
+        if (fromEl) fromEl.disabled = false;
+        if (toEl) toEl.disabled = false;
+        // Fewer than two snapshots: the disabled placeholder stays and the
+        // existing no-data state is kept — never a blank selection.
+        if (dates.length < 2) return;
         if (!r.from || dates.indexOf(r.from) === -1 || !r.to || dates.indexOf(r.to) === -1) {
           r.from = dates[Math.max(0, dates.length - 7)];
           r.to = dates[dates.length - 1];
@@ -2427,14 +2483,14 @@ function loadCompare() {
     .analysis("dates")
     .then(function (payload) {
       var dates = payload.dates || [];
+      fillDateSelect(els.compareFrom, dates, "Need at least two snapshots");
+      fillDateSelect(els.compareTo, dates, "Need at least two snapshots");
       if (dates.length < 2) {
         showPanelEmpty(panel, "No data yet.");
         setPanelBusy("compare", false);
         return;
       }
       hidePanelEmpty(panel);
-      fillDateSelect(els.compareFrom, dates);
-      fillDateSelect(els.compareTo, dates);
       setRangeSelectValue("compare");
       var r = analysisState.ranges.compare;
       if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
@@ -3039,6 +3095,9 @@ function wireAnalysis() {
   wireCompareControls();
   wireWatchControls();
   wireRosterControls();
+  // Every dynamic select starts with a visible disabled Loading… option —
+  // no blank control during the first request.
+  primeDynamicSelects();
   // One range controller per historical tab — never a shared global window.
   RANGE_TABS.forEach(function (tab) {
     wireRangeControls(tab);

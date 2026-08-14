@@ -11,14 +11,13 @@ Wording decisions (locked by tests, documented in learnings):
   SIGN — typographically consistent with the em-dash separators).
 - truncation line "…and N more" (… = U+2026 HORIZONTAL ELLIPSIS).
 - separators are " — " (U+2014 em dash) and " · " (U+00B7 middle dot).
-- truncated names end with "…" (U+2026): regions at 10 chars (compact
-  mobile lines), standings tags at 7, village names at 24, player names at 18.
-- the Regions fence is the COMPACT mobile layout: every line is capped at 36
-  chars (region name 10, then share/pop/deltas as plain text — no fixed
-  columns, no control bar) so Discord mobile never creates a horizontal
-  scroll; the Standings fence stays fixed-width 39-char lines.
-- table headers are COMPUTED with the same cell widths as the data rows so
-  the labels sit exactly over their columns — never hand-pad them.
+- truncated names end with "…" (U+2026): regions at 10 chars, standings
+  tags at 7 (including the "★ " marker), village names at 24, player names
+  at 18.
+- the capped daily Regions/Standings cards are FIELD-based (inline fields,
+  no code fences — Discord mobile renders them without horizontal scroll);
+  the uncapped on-demand paths render the same blocks as proportional
+  description lines with a short intro. No fixed-width table exists.
 """
 
 # --- Embed description ------------------------------------------------------
@@ -38,9 +37,8 @@ EMBED_TITLE_STANDINGS = "⚔️ Standings"
 EMBED_TITLE_VILLAGES = "🏗️ New & Lost Villages"
 
 # --- Section headings (render only in descriptions) ----------------------------
-HEADING_SUMMARY = "# Summary"
-HEADING_REGIONS = "# Regions"
-HEADING_STANDINGS = "# Standings"
+# Summary/Regions/Standings cards carry NO heading: the embed title is the
+# card heading. Village sections keep theirs (they share one embed).
 HEADING_NEW_VILLAGES = "# New Villages"
 HEADING_LOST_VILLAGES = "# Lost Villages"
 
@@ -68,28 +66,38 @@ LOST_DELETED_LINE = "**{name}** ({x}|{y}) — deleted"  # region-absent fallback
 LOST_DELETED_REGION_LINE = "**{name}** ({x}|{y}) — {region} — deleted"
 OWNER_UNKNOWN = "unknown"
 
-# --- Tables (Standings + Regions) ------------------------------------------------
-# Standings stays a fixed-width fence: tag col 0, pop col 8, Δ pop col 16,
-# VP col 24, Δ VP col 32 (39-char lines). Headers are built with the SAME
-# widths as the data cells (numeric columns right-aligned) — do not "tidy".
-# Regions uses the COMPACT mobile layout (no horizontal scroll on Discord
-# mobile): each region is two short lines, region names truncated to 10
-# chars and every fenced line hard-capped at 36 chars.
-STANDINGS_TABLE_HEADER = f"{'Tag':<7} {'Pop':>7} {'Δ Pop':>7} {'VP':>7} {'Δ VP':>7}"
-STANDINGS_TABLE_LINE = "{tag:<7} {pop:>7,} {pop_delta:>7} {vp:>7,} {vp_delta:>7}"
-STANDINGS_TABLE_DIVIDER = "─" * 39  # U+2500
-STANDINGS_OURS_MARK = "★"
-STANDINGS_OURS_FOOTNOTE = "_★ our alliances_"
-STANDINGS_MORE_LINE = "…and {n} more alliances"
-REGION_LINE = "{region} · {share} · {pop}"
-REGION_DELTA_LINE = "Δ {share_delta} · VP {vp_delta} · {to50}"
-REGION_TABLE_DIVIDER = "─" * 36  # U+2500 — short enough for the mobile cap
+# --- Discord cards (Standings + Regions) ----------------------------------------
+# The capped DAILY cards render each item as an inline FIELD (name ≤ 256,
+# value ≤ 1024, ≤ 25 fields per embed): Discord mobile lays fields out
+# without horizontal scroll. The uncapped on-demand paths render the same
+# blocks as proportional description lines (4096-char budget) — no
+# fixed-width fence anywhere.
+REGION_FIELD_NAME = "{region} · {share}"
+REGION_FIELD_VALUE = "{pop:,} pop\nΔ {share_delta} · VP {vp_delta} · {to50}"
+REGION_MORE_FIELDS = "More regions"
+REGION_MORE_FIELDS_VALUE = "{n} not shown"
+REGION_LEGEND_FIELD = "Legend"
+REGION_LEGEND_FIELD_VALUE = "✓ controlled · +N needed · — inactive · Δ share vs previous snapshot"
+REGION_MOVERS_FIELD = "Biggest moves"
+REGION_MOVERS_FIELD_VALUE = "{best} · {worst}"
+REGION_MOVERS_SINGLE_FIELD = "Biggest move"
+REGION_MOVERS_SINGLE_FIELD_VALUE = "{move}"
+STANDINGS_FIELD_NAME = "{marker}{tag}"
+STANDINGS_FIELD_VALUE = "Pop {pop:,} · Δ {pop_delta}\nVP {vp:,} · Δ {vp_delta}"
+STANDINGS_MARKER = "★ "  # marker + tag stay within 7 visible chars
+STANDINGS_MORE_FIELDS = "More alliances"
+STANDINGS_MORE_FIELDS_VALUE = "{n} not shown"
+STANDINGS_LEGEND_FIELD = "Legend"
+STANDINGS_LEGEND_FIELD_VALUE = "★ our alliances"
+REGION_TEXT_LINE = "{region} · {share} · {pop}"
+REGION_TEXT_DELTA_LINE = "Δ {share_delta} · VP {vp_delta} · {to50}"
+REGION_DESCRIPTION_INTRO = "Control share and change vs previous snapshot"
+REGION_INACTIVE_HEADING = "Inactive regions"
+STANDINGS_TEXT_LINE = "{tag} · Pop {pop:,} · Δ {pop_delta} · VP {vp:,} · Δ {vp_delta}"
+STANDINGS_DESCRIPTION_INTRO = "Population and VP · change vs previous snapshot"
 REGION_CONTROLLED = "✓"
 REGION_INACTIVE_CELL = "—"  # To-50% cell for inactive regions (same glyph as DELTA_NONE, different column)
 REGION_TO50_NEEDED = "+{n:,}"
-REGION_LEGEND = "_✓ = we control (active region, >50% of its population) · +N = population still needed for control · — = inactive (total population below 4,000) · Δ % = our control change vs yesterday_"
-REGION_MOVERS_LINE = "_Biggest moves: {best} · {worst}_"
-REGION_MOVERS_SINGLE = "_Biggest move: {move}_"
 
 # --- Delta rendering ---------------------------------------------------------------
 DELTA_NONE = "—"

@@ -128,13 +128,12 @@
                 <p class="analysis-controls__error" id="range-regions-error" role="alert" hidden></p>
               </div>
               <div class="analysis-layout--regions">
-                <div class="data-table__wrap">
+                <div class="data-table__wrap data-table__wrap--regions">
                   <table class="data-table data-table--regions" aria-label="Region control summary">
                     <thead>
                       <tr>
                         <th class="th--left" scope="col">Region</th>
                         <th class="th--left" scope="col">Control</th>
-                        <th class="th--num" scope="col">Share</th>
                         <th class="th--num" scope="col">Pop</th>
                         <th class="th--num" scope="col">Δ %</th>
                         <th class="th--num" scope="col">To 50%</th>
@@ -147,8 +146,10 @@
                   <div class="chart-card__head">
                     <p class="overline">Share over time</p>
                     <span class="card-caption" data-as-of="regions" hidden></span>
-                    <label class="overline" for="analysis-region-select">Region</label>
-                    <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
+                    <div class="chart-card__filter">
+                      <label class="overline" for="analysis-region-select">Region</label>
+                      <select id="analysis-region-select" class="analysis-select" aria-label="Region to chart"></select>
+                    </div>
                   </div>
                   <div class="chart-card__canvas">
                     <canvas id="analysis-chart-regions" role="img" aria-label="Share of population over time"></canvas>

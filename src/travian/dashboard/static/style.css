@@ -1509,6 +1509,16 @@ code,
   overflow-x: auto;
 }
 
+/* The Regions summary reflows into cards on phones — it never scrolls
+   locally (the other wide tables keep their local scrollers). */
+.data-table__wrap--regions {
+  overflow: visible;
+}
+
+.data-table__wrap--regions::after {
+  content: none;
+}
+
 .data-table {
   border-collapse: collapse;
   font-size: 0.8125rem;
@@ -1632,6 +1642,24 @@ tr.is-inactive td {
 
 .chart-card__head label {
   margin-inline-start: auto;
+}
+
+/* The Regions chart filter (label + select) is its own flex item so the
+   select's hit area is never overlapped by the header row. */
+.chart-card__filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+  min-width: 0;
+}
+
+.chart-card__filter label {
+  margin-inline-start: 0;
+}
+
+.chart-card__filter .analysis-select {
+  min-width: 130px;
 }
 
 .analysis-select {
@@ -2386,6 +2414,113 @@ tr.is-inactive td {
 
   .analysis-select {
     min-height: 36px;
+  }
+}
+
+/* --- Regions-only reflow (<=760px) ---------------------------------------------- */
+/* The Regions summary becomes bounded two-line cards — Region + Control on
+   line one (three-column grid), Pop / Δ / To 50% on line two — so the
+   686px screenshot never needs a local horizontal scroller. The header
+   stays semantically present but visually clipped; cell data-labels carry
+   the column names. Other wide tables keep their local scrollers. */
+@media (max-width: 760px) {
+  /* Ten analysis tabs do not fit one row between 681 and 760 px — the
+     bars wrap there too, so the document never widens (the <=680px block
+     keeps its own wrap + nowrap rules). */
+  .tab-bar--views,
+  .tab-bar--analysis {
+    flex-wrap: wrap;
+  }
+
+  .data-table__wrap--regions {
+    overflow: visible;
+  }
+
+  .data-table__wrap--regions::after {
+    content: none;
+  }
+
+  .data-table--regions thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .data-table--regions tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border-default);
+  }
+
+  .data-table--regions td {
+    display: block;
+    padding: 0;
+    border-bottom: none;
+  }
+
+  .data-table--regions td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.6875rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: var(--space-1);
+  }
+
+  .data-table--regions td:nth-child(1) {
+    grid-column: 1 / 3;
+    grid-row: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .data-table--regions td:nth-child(1) .event-line__name {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+  }
+
+  .data-table--regions td:nth-child(2) {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data-table--regions td:nth-child(3) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .data-table--regions td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .data-table--regions td:nth-child(5) {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  /* The chart filter takes the full row under the header label. */
+  .chart-card__filter {
+    flex: 1 1 100%;
+    margin-inline-start: 0;
+  }
+
+  .chart-card__filter .analysis-select {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
   }
 }
 

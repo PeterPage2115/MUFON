@@ -279,14 +279,14 @@ export function hidePanelError(panel) {
   if (stateEl && stateEl.parentNode) stateEl.parentNode.removeChild(stateEl);
 }
 
-export function showChartUnavailable(card) {
+export function showChartUnavailable(card, message) {
   var stateEl = card.querySelector(".empty-state");
   if (!stateEl) {
     stateEl = document.createElement("p");
     stateEl.className = "empty-state";
     card.appendChild(stateEl);
   }
-  stateEl.textContent = "Chart library unavailable.";
+  stateEl.textContent = message || "Chart library unavailable.";
   card.classList.add("is-empty");
 }
 

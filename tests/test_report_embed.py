@@ -3,37 +3,40 @@
 Decisions locked by these tests (all wording lives in ``travian.strings``):
 
 - Pinned structure: ONE message with up to 4 embeds — Daily Report (only
-  when "summary" is in ``sections``), Regions (COMPACT mobile-safe list,
-  only when "regions" in ``sections`` and regions exist), Standings (fenced
-  table, only when "standings" in ``sections`` and standings exist, our
-  tags first ★ + footnote), New & Lost Villages (only when "villages" in
-  ``sections`` and events exist). The daily subset is ``DAILY_SECTIONS``
-  (summary + regions + standings) with ``region_limit=10`` and
-  ``standings_limit=10``; the on-demand commands request a single section.
-  Only the first embed carries the context description; every embed
-  carries the footer.
-- Sections render inside DESCRIPTIONS (``#`` headings work there, not in
-  field values): 4096-char budget; ``_fit_lines`` truncates tables with a
-  ``…and N more`` line.
+  when "summary" is in ``sections``), Regions (only when "regions" in
+  ``sections`` and regions exist), Standings (only when "standings" in
+  ``sections`` and standings exist, our tags first ★), New & Lost Villages
+  (only when "villages" in ``sections`` and events exist). The daily subset
+  is ``DAILY_SECTIONS`` (summary + regions + standings) with
+  ``region_limit=10`` and ``standings_limit=10``; the on-demand commands
+  request a single section. Only the first embed carries the context
+  description (its own card heading is the title — no ``# Summary`` inside);
+  every embed carries the footer.
+- CAPPED daily cards (limits set) are FIELD-based: one inline field per
+  region/alliance (name ≤ 256, value ≤ 1024, ≤ 25 fields per embed), a
+  ``More regions``/``More alliances`` field collapses the tail, ``Legend``
+  explains the glyphs (★ = our alliances) and the Regions card adds a
+  ``Biggest moves`` field when deltas exist. No code fences anywhere.
+- UNCAPPED paths (``/regiony``, the pure builder's full list) render the
+  same blocks as proportional description lines under a short intro:
+  Regions adds the ``Inactive regions`` heading, ``_fit_lines`` truncates
+  to the 4096-char budget with a ``…and N more`` line.
 - KPI grid: inline fields (Villages, Population, Players, VP, Regions,
   New / Lost), values grouped, parens dropped when the delta is None.
 - Region activity rule (game rule): a region is ACTIVE with total population
   ≥ 4,000; control = active AND strictly > 50% of the total (exactly 50% is
-  NOT controlled — "+1" cell). Inactive regions sit after a divider with
-  "—" in To 50%. The Δ % column (our control-share change vs yesterday,
-  "—" on baseline days, "±0.0%" below 0.05 pp) sits in the second compact
-  line; the legend below the fence explains every symbol. With
-  ``region_limit`` the list keeps only the top *limit* ACTIVE regions and
-  collapses the rest (remaining active + all inactive) behind a ``…and N
-  more`` line; ``region_names`` restricts the list AND the KPI to the
-  selected exact names (unknown names dropped); the movers line names the
-  best/worst Δ % moves when deltas exist.
-- MOBILE CONTRACT: every fenced Regions line is ≤ 36 chars (region names
-  truncated at 10); no fixed columns, no control bar — the share percentage
-  is the control signal. Standings stays 39-char fixed-width lines; with
-  ``standings_limit`` only the top *limit* by current population (tag ASC
-  tie-break) render, ★/ours-first applies AFTER the selection and the tail
-  collapses behind ``…and N more alliances``.
+  NOT controlled — "+1" cell). Inactive regions follow the ``Inactive
+  regions`` heading with "—" in To 50%. The Δ % value (our control-share
+  change vs yesterday, "—" on baseline days, "±0.0%" below 0.05 pp) sits in
+  the second field/line. With ``region_limit`` the card keeps only the top
+  *limit* ACTIVE regions and collapses the rest (remaining active + all
+  inactive) behind ``More regions``; ``region_names`` restricts the list
+  AND the KPI to the selected exact names (unknown names dropped); the
+  movers field names the best/worst Δ % moves when deltas exist.
+- Standings: with ``standings_limit`` only the top *limit* by current
+  population (tag ASC tie-break) render, ★/ours-first applies AFTER the
+  selection and the tail collapses behind ``More alliances``; markers stay
+  within 7 visible chars including the "★ " marker.
 - Village event lines carry the region; new lines show the founder
   ("by <player>"), lost lines the conqueror ("conquered by <tag>" /
   "deleted") — EXCEPT same-player transitions, which render "alliance
@@ -43,7 +46,7 @@ Decisions locked by these tests (all wording lives in ``travian.strings``):
 - Baseline day (no previous snapshot): KPI parens dropped, all Δ cells
   "—", " (baseline)" in the description.
 - Caps: 15 village events per section (more-line when exceeded); names
-  truncated (region 10, tag 7, village 24).
+  truncated (region 10, tag 7 incl. marker, village 24).
 - Delta rendering: None → "—", 0 → "±0", >0 → "+N", <0 → "−N" (U+2212).
 """
 
@@ -230,10 +233,14 @@ def worst_case_report() -> ReportData:
     )
 
 
-def table_lines(description: str) -> list[str]:
-    """The fenced table's lines (header + divider + rows) from a description."""
-    content = description.split("```")[1]
-    return content.strip("\n").split("\n")
+def fields(embed: discord.Embed) -> list[tuple[str, str]]:
+    """The embed's fields as (name, value) pairs, in order."""
+    return [(field_name(f), field_value(f)) for f in embed.fields]
+
+
+def desc_lines(description: str) -> list[str]:
+    """The description's lines."""
+    return description.split("\n")
 
 
 class TestStructure:
@@ -250,20 +257,18 @@ class TestStructure:
     def test_description_context_on_first_embed_only(self):
         embeds = build_report_embed(default_report(), ["WOLF", "FALCON"], "2026-08-08")
 
-        assert embeds[0].description == (
-            "Report for cw.x2.international — snapshot 2026-08-08 — WOLF, FALCON\n\n# Summary"
-        )
+        assert embeds[0].description == "Report for cw.x2.international — snapshot 2026-08-08 — WOLF, FALCON"
         assert all("Report for" not in (e.description or "") for e in embeds[1:])
 
     def test_description_without_date(self):
         embeds = build_report_embed(default_report(), ["WOLF"], None)
 
-        assert embeds[0].description == "Report for cw.x2.international — WOLF\n\n# Summary"
+        assert embeds[0].description == "Report for cw.x2.international — WOLF"
 
     def test_description_without_tags(self):
         embeds = build_report_embed(default_report(), [], "2026-08-08")
 
-        assert embeds[0].description == "Report for cw.x2.international — snapshot 2026-08-08\n\n# Summary"
+        assert embeds[0].description == "Report for cw.x2.international — snapshot 2026-08-08"
 
     def test_footer_on_every_embed(self):
         embeds = build_report_embed(default_report(), ["WOLF"], "2026-08-08")
@@ -375,12 +380,12 @@ class TestSummaryKpi:
 
 
 class TestRegionTable:
-    """The COMPACT mobile contract: each region is two short lines (region ·
-    share · pop / Δ · VP · to50), region names truncate to 10 chars, every
-    fenced line stays ≤ 36 chars and active regions precede inactive after
-    the divider — no fixed columns, no control bar."""
+    """The uncapped contract: each region is two proportional lines (region ·
+    share · pop / Δ · VP · to50), region names truncate to 10 chars, active
+    regions precede inactive after the ``Inactive regions`` heading — no
+    code fence, no fixed columns, no width cap."""
 
-    def test_compact_two_lines_per_region_with_all_values(self):
+    def test_two_lines_per_region_with_all_values(self):
         regions = [
             make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, our_vp=5000, vp_delta=1814, share_delta=0.021),
             make_region("Borders", 5, 2500, 18000, 0.25, 100, our_vp=600, vp_delta=-25, share_delta=-0.005),
@@ -388,35 +393,34 @@ class TestRegionTable:
         ]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        assert table_lines(desc(embeds[1])) == [
+        assert desc_lines(desc(embeds[1])) == [
+            strings.REGION_DESCRIPTION_INTRO,
             "Eburacum · 54.6% · 39,221",
             "Δ +2.1% · VP +1,814 · ✓",
             "Borders · 25.0% · 2,500",
             "Δ −0.5% · VP −25 · +6,501",
-            strings.REGION_TABLE_DIVIDER,
+            strings.REGION_INACTIVE_HEADING,
             "Segestica · 5.4% · 126",
             "Δ ±0.0% · VP ±0 · —",
         ]
 
-    def test_every_fenced_line_within_36_chars(self):
-        # Worst case: long region names and 7-digit numbers — the hard
-        # mobile cap holds for EVERY fenced line.
-        regions = [
-            make_region("DurnonovariaExtraLongName", 79, 1, 20000000, 0.0, 9999999, vp_delta=9999999, share_delta=1.0)
-            for _ in range(5)
-        ]
+    def test_no_code_fence_anywhere(self):
+        regions = [make_region("Eburacum", 79, 39221, 71800, 0.546, 1814, share_delta=0.021)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+        capped = build_report_embed(
+            make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10
+        )
 
-        for line in table_lines(desc(embeds[1])):
-            assert len(line) <= 36, line
+        assert "```" not in desc(embeds[1])
+        assert "```" not in desc(capped[1])
 
     def test_long_region_name_truncated_to_10(self):
         regions = [make_region("DurnonovariaExtra", 1, 1000, 5000, 0.2, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        line = next(l for l in table_lines(desc(embeds[1])) if l.startswith("Durnonova"))
+        line = next(l for l in desc_lines(desc(embeds[1])) if l.startswith("Durnonova"))
         assert line.startswith("Durnonova… ")
-        assert len(line) <= 36
+        assert len(line) <= 30
 
     def test_strict_more_than_half_is_not_controlled(self):
         # Exactly 50% of an even total: needs +1 to exceed half — regression
@@ -424,26 +428,29 @@ class TestRegionTable:
         regions = [make_region("Half", 1, 4000, 8000, 0.5, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[0] == "Half · 50.0% · 4,000"
-        assert lines[1] == "Δ — · VP — · +1"
+        lines = desc_lines(desc(embeds[1]))
+        assert lines[1] == "Half · 50.0% · 4,000"
+        assert lines[2] == "Δ — · VP — · +1"
 
     def test_zero_pop_region_is_inactive(self):
         regions = [make_region("Empty", 1, 0, 0, 0.0, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
-        # No active regions → the divider opens the fence (inactive block).
-        assert lines[0] == strings.REGION_TABLE_DIVIDER
-        assert lines[1] == "Empty · 0.0% · 0"
-        assert lines[2] == "Δ — · VP — · —"
+        lines = desc_lines(desc(embeds[1]))
+        # No active regions → the heading opens the inactive block.
+        assert lines == [
+            strings.REGION_DESCRIPTION_INTRO,
+            strings.REGION_INACTIVE_HEADING,
+            "Empty · 0.0% · 0",
+            "Δ — · VP — · —",
+        ]
 
     def test_vp_delta_dash_on_baseline(self):
         regions = [make_region("A", 1, 1000, 5000, 0.2, None, vp_delta=None)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[1] == "Δ — · VP — · +1,501"
+        lines = desc_lines(desc(embeds[1]))
+        assert lines[2] == "Δ — · VP — · +1,501"
 
     def test_more_line_on_pathological_overflow(self):
         regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(90)]
@@ -451,9 +458,9 @@ class TestRegionTable:
 
         description = desc(embeds[1])
         assert len(description) <= 4096
-        lines = table_lines(description)
-        # The fence is truncated to the 4096-char budget — never all 180
-        # lines (a more-line only fits when the budget leaves room).
+        lines = desc_lines(description)
+        # The description is truncated to the 4096-char budget — never all
+        # 180 lines (a more-line only fits when the budget leaves room).
         assert len(lines) < 180
         assert "Region 89" not in "\n".join(lines)
 
@@ -493,40 +500,44 @@ class TestSectionsAndRegionLimit:
         assert DAILY_SECTIONS <= REPORT_SECTIONS
         assert {"villages"} <= REPORT_SECTIONS
 
-    def test_region_limit_condenses_with_more_line(self):
+    def test_region_limit_condenses_with_more_field(self):
         regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(30)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=8)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[0].startswith("Region 00")
-        assert lines[14].startswith("Region 07")  # 8th (last) shown region, line 1 of 2
-        assert lines[15].startswith("Δ ")  # its second line
-        assert lines[16] == strings.REGION_TABLE_DIVIDER
-        assert lines[17] == strings.MORE_LINE.format(n=22)  # 30 regions − 8 shown
-        assert len(lines) == 18  # 8×2 region lines + divider + more-line
-        # The more-line sits INSIDE the fence and no full region lines follow.
-        assert not any(line.startswith("Region 0") for line in lines[18:])
+        assert fields(embeds[1]) == [
+            ("Region 00 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 01 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 02 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 03 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 04 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 05 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 06 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Region 07 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            (strings.REGION_MORE_FIELDS, "22 not shown"),
+            (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE),
+        ]
+        # The inline region fields come first, the card fields after.
+        assert [f.inline for f in embeds[1].fields] == [True] * 8 + [False, False]
 
-    def test_region_limit_zero_shows_only_more_line(self):
+    def test_region_limit_zero_shows_only_more_field(self):
         regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(5)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=0)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines == [
-            strings.REGION_TABLE_DIVIDER,
-            strings.MORE_LINE.format(n=5),
+        assert fields(embeds[1]) == [
+            (strings.REGION_MORE_FIELDS, "5 not shown"),
+            (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE),
         ]
 
     def test_region_limit_none_keeps_full_table(self):
         regions = [make_region(f"Region {i:02d}", 1, 1000, 5000, 0.2, 1) for i in range(30)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
+        lines = desc_lines(desc(embeds[1]))
         assert "Region 29" in "\n".join(lines)
         assert not any(line.startswith("…and ") for line in lines)
 
     def test_region_limit_counts_only_active_rows(self):
-        # 3 active + 2 inactive; limit 2 → 2 active regions + more-line for 3.
+        # 3 active + 2 inactive; limit 2 → 2 active regions + more-field for 3.
         regions = [
             make_region(f"Active {i}", 1, 1000, 5000, 0.2, 1) for i in range(3)
         ] + [
@@ -534,54 +545,62 @@ class TestSectionsAndRegionLimit:
         ]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=2)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[0].startswith("Active 0")
-        assert lines[2].startswith("Active 1")
-        assert lines[4] == strings.REGION_TABLE_DIVIDER
-        assert lines[5] == strings.MORE_LINE.format(n=3)
-        assert "Inactive" not in "\n".join(lines)
+        assert fields(embeds[1]) == [
+            ("Active 0 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            ("Active 1 · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            (strings.REGION_MORE_FIELDS, "3 not shown"),
+            (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE),
+        ]
+        assert "Inactive" not in " ".join(v for _, v in fields(embeds[1]))
 
-    def test_region_limit_hides_inactive_block_behind_more_line(self):
-        # With a limit set, inactive regions are ALWAYS behind the more-line
+    def test_region_limit_hides_inactive_block_behind_more_field(self):
+        # With a limit set, inactive regions are ALWAYS behind the more-field
         # (the plan's assumption: region_limit counts only top ACTIVE rows).
         regions = [make_region("A", 1, 1000, 5000, 0.2, 1), make_region("B", 1, 900, 4000, 0.225, 1)]
         regions += [make_region("C", 1, 100, 500, 0.2, 1), make_region("D", 1, 100, 500, 0.2, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[0].startswith("B")  # share 22.5% > 20% → first
-        assert lines[2].startswith("A")
-        assert lines[4] == strings.REGION_TABLE_DIVIDER
-        assert lines[5] == strings.MORE_LINE.format(n=2)
-        assert not any(line.startswith(("C", "D")) for line in lines)
+        assert fields(embeds[1]) == [
+            ("B · 22.5%", "900 pop\nΔ — · VP — · +1,101"),
+            ("A · 20.0%", "1,000 pop\nΔ — · VP — · +1,501"),
+            (strings.REGION_MORE_FIELDS, "2 not shown"),
+            (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE),
+        ]
+        assert not any(k.startswith(("C", "D")) for k, _ in fields(embeds[1]))
 
 
 class TestRegionMoversLine:
+    """The capped card closes with a ``Biggest moves`` field naming the
+    best/worst Δ % moves of the day (a single candidate uses its own
+    one-move form)."""
+
     def test_best_and_worst_from_deltas(self):
         regions = [
             make_region("Corinium", 1, 1000, 5000, 0.2, 1, share_delta=0.033),
             make_region("Teutones", 1, 1000, 5000, 0.2, 1, share_delta=-0.053),
             make_region("Steady", 1, 1000, 5000, 0.2, 1, share_delta=0.0),
         ]
-        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
 
-        assert desc(embeds[1]).endswith(
-            strings.REGION_MOVERS_LINE.format(best="+3.3% Corinium", worst="−5.3% Teutones")
-        )
+        assert fields(embeds[1])[-2:] == [
+            (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE),
+            (strings.REGION_MOVERS_FIELD, "+3.3% Corinium · −5.3% Teutones"),
+        ]
 
     def test_single_candidate_renders_one_move(self):
         regions = [make_region("Only", 1, 1000, 5000, 0.2, 1, share_delta=0.021)]
-        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
 
-        assert desc(embeds[1]).endswith(strings.REGION_MOVERS_SINGLE.format(move="+2.1% Only"))
+        assert fields(embeds[1])[-1] == (strings.REGION_MOVERS_SINGLE_FIELD, "+2.1% Only")
 
     def test_omitted_when_no_deltas(self):
         regions = [make_region("A", 1, 1000, 5000, 0.2, 1)]
-        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
 
-        assert strings.REGION_MOVERS_LINE.split("{")[0] not in desc(embeds[1])
-        assert strings.REGION_MOVERS_SINGLE.split("{")[0] not in desc(embeds[1])
-        assert desc(embeds[1]).endswith(strings.REGION_LEGEND)
+        names = [name for name, _ in fields(embeds[1])]
+        assert strings.REGION_MOVERS_FIELD not in names
+        assert strings.REGION_MOVERS_SINGLE_FIELD not in names
+        assert fields(embeds[1])[-1] == (strings.REGION_LEGEND_FIELD, strings.REGION_LEGEND_FIELD_VALUE)
 
     def test_ties_break_by_region_name(self):
         # Equal deltas: best = lexicographically largest region, worst = smallest.
@@ -591,15 +610,16 @@ class TestRegionMoversLine:
             make_region("Gamma", 1, 1000, 5000, 0.2, 1, share_delta=-0.01),
             make_region("Delta", 1, 1000, 5000, 0.2, 1, share_delta=-0.01),
         ]
-        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
+        embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08", region_limit=10)
 
-        assert desc(embeds[1]).endswith(
-            strings.REGION_MOVERS_LINE.format(best="+2.0% Beta", worst="−1.0% Delta")
+        assert fields(embeds[1])[-1] == (
+            strings.REGION_MOVERS_FIELD,
+            "+2.0% Beta · −1.0% Delta",
         )
 
 
 class TestStandingsTable:
-    def test_table_format_ours_first(self):
+    def test_text_lines_ours_first(self):
         data = make_report(
             standings=[
                 make_standings("AAA", population=3000, vp=800, population_delta=-50, vp_delta=0),
@@ -611,39 +631,37 @@ class TestStandingsTable:
 
         standings = next(e for e in embeds if e.title == strings.EMBED_TITLE_STANDINGS)
         assert desc(standings) == (
-            f"# Standings\n\n```\n{strings.STANDINGS_TABLE_HEADER}\n"
-            f"{strings.STANDINGS_TABLE_DIVIDER}\n"
-            "★WOLF     5,000    +120     900     +10\n"
-            "AAA       3,000     −50     800      ±0\n"
-            "BBB       1,000       —     700       —\n"
-            "```\n\n"
-            f"{strings.STANDINGS_OURS_FOOTNOTE}"
+            f"{strings.STANDINGS_DESCRIPTION_INTRO}\n"
+            "WOLF · Pop 5,000 · Δ +120 · VP 900 · Δ +10\n"
+            "AAA · Pop 3,000 · Δ −50 · VP 800 · Δ ±0\n"
+            "BBB · Pop 1,000 · Δ — · VP 700 · Δ —"
         )
 
     def test_our_tags_marked_with_star_only(self):
         data = make_report(
             standings=[make_standings("WOLF"), make_standings("WOLF2"), make_standings("AAA")]
         )
-        embeds = build_report_embed(data, ["WOLF", "WOLF2"], "2026-08-08")
+        embeds = build_report_embed(data, ["WOLF", "WOLF2"], "2026-08-08", standings_limit=10)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("★WOLF ")
-        assert lines[3].startswith("★WOLF2")
-        assert lines[4].startswith("AAA ")
-        assert "★AAA" not in desc(embeds[1])
+        assert [name for name, _ in fields(embeds[1])][:3] == ["★ WOLF", "★ WOLF2", "AAA"]
+        assert "★ AAA" not in " ".join(fields(embeds[1])[0])
 
-    def test_rows_aligned_with_header(self):
-        data = make_report(standings=[make_standings("WOLF"), make_standings("AAA")])
-        embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
+    def test_field_values_exact(self):
+        data = make_report(
+            standings=[
+                make_standings("WOLF", population=5000, vp=900, population_delta=120, vp_delta=10),
+                make_standings("AAA", population=3000, vp=800, population_delta=-50, vp_delta=0),
+                make_standings("BBB", population=1000, vp=700, population_delta=None, vp_delta=None),
+            ]
+        )
+        embeds = build_report_embed(data, ["WOLF"], "2026-08-08", standings_limit=10)
 
-        lines = table_lines(desc(embeds[1]))
-        header = lines[0]
-        rows = [l for l in lines[1:] if l != strings.STANDINGS_TABLE_DIVIDER]
-        assert len(header) == 39
-        assert all(len(l) == len(header) for l in rows)
-        # Pop cell 8 (digits at 10); the header label sits flush-right over it.
-        assert rows[0].index("1,000") == 10
-        assert header.index("Pop") + len("Pop") == rows[0].index("1,000") + len("1,000")
+        assert fields(embeds[1])[:3] == [
+            ("★ WOLF", "Pop 5,000 · Δ +120\nVP 900 · Δ +10"),
+            ("AAA", "Pop 3,000 · Δ −50\nVP 800 · Δ ±0"),
+            ("BBB", "Pop 1,000 · Δ —\nVP 700 · Δ —"),
+        ]
+        assert fields(embeds[1])[-1] == (strings.STANDINGS_LEGEND_FIELD, strings.STANDINGS_LEGEND_FIELD_VALUE)
 
     def test_omitted_when_empty(self):
         embeds = build_report_embed(make_report(), ["WOLF"], "2026-08-08")
@@ -657,20 +675,24 @@ class TestStandingsTable:
                 make_standings("OURSVERYLONG", population=2000, vp=2),
             ]
         )
-        embeds = build_report_embed(data, ["OURSVERYLONG"], "2026-08-08")
+        embeds = build_report_embed(data, ["OURSVERYLONG"], "2026-08-08", standings_limit=10)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("★OURSV…")
-        assert lines[3].startswith("VERYLO…")
+        # Marker + tag stay within 7 visible chars.
+        assert fields(embeds[1])[0][0] == "★ OURS…"
+        assert fields(embeds[1])[1][0] == "VERYLO…"
 
     def test_more_line_on_overflow(self):
-        # 110 rows × 39 chars ≈ 4,290 + header/divider — over the 4,096 budget.
-        standings = [make_standings(f"T{i:02d}", population=100 + i, vp=1) for i in range(110)]
+        # 130 wide rows ≈ 6,500 chars — over the 4,096 description budget;
+        # the tail collapses behind the more-line.
+        standings = [
+            make_standings(f"T{i:02d}", population=9999999 + i, vp=9999999) for i in range(130)
+        ]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08")
 
         description = desc(embeds[1])
         assert len(description) <= 4096
-        assert table_lines(description)[-1].startswith("…and ")
+        assert desc_lines(description)[-1].startswith("…and ")
+        assert "T129" not in description
 
     def test_baseline_dashes(self):
         data = make_report(
@@ -678,8 +700,8 @@ class TestStandingsTable:
         )
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2] == "★WOLF     1,000       —     900       —"
+        lines = desc_lines(desc(embeds[1]))
+        assert lines[1] == "WOLF · Pop 1,000 · Δ — · VP 900 · Δ —"
 
 
 class TestVillageEvents:
@@ -857,17 +879,18 @@ class TestBaseline:
         embeds = build_report_embed(data, ["WOLF"], "2026-08-08")
 
         assert embeds[0].description == (
-            "Report for cw.x2.international — snapshot 2026-08-08 — WOLF (baseline)\n\n# Summary"
+            "Report for cw.x2.international — snapshot 2026-08-08 — WOLF (baseline)"
         )
         assert [field_value(f) for f in embeds[0].fields[:4]] == ["42", "5,000", "11", "340"]
         # Regions lines: Δ % and VP Δ render "—"; exactly 50% is NOT
         # controlled → "+1".
-        regions_lines = table_lines(desc(embeds[1]))
-        assert regions_lines[0] == "A · 50.0% · 4,000"
-        assert regions_lines[1] == "Δ — · VP — · +1"
+        regions_lines = desc_lines(desc(embeds[1]))
+        assert regions_lines[0] == strings.REGION_DESCRIPTION_INTRO
+        assert regions_lines[1] == "A · 50.0% · 4,000"
+        assert regions_lines[2] == "Δ — · VP — · +1"
         # Standings row: both Δ columns render "—".
-        standings_line = table_lines(desc(embeds[2]))[2]
-        assert standings_line == "★WOLF     1,000       —     900       —"
+        standings_lines = desc_lines(desc(embeds[2]))
+        assert standings_lines[1] == "WOLF · Pop 1,000 · Δ — · VP 900 · Δ —"
 
 
 class TestLimits:
@@ -880,12 +903,39 @@ class TestLimits:
             assert len(desc(e)) <= 4096
             assert embed_total(e) <= 6000
 
+    def test_worst_case_capped_fields_within_limits(self):
+        # The daily card: 10+10 capped rows as inline fields — every field
+        # name <= 256, every value <= 1024, <= 25 fields, description and
+        # total length within Discord limits.
+        embeds = build_report_embed(
+            worst_case_report(),
+            ["WOLF"],
+            "2026-08-08",
+            sections=DAILY_SECTIONS,
+            region_limit=10,
+            standings_limit=10,
+        )
+
+        assert len(embeds) == 3
+        for e in embeds:
+            assert len(e.fields) <= 25
+            assert len(desc(e)) <= 4096
+            for f in e.fields:
+                assert len(field_name(f)) <= 256
+                assert len(field_value(f)) <= 1024
+            assert embed_total(e) <= 6000
+        # The capped cards carry their tail + legend fields (the worst-case
+        # regions are all inactive: total 800 < 4,000 → zero shown).
+        assert (strings.REGION_MORE_FIELDS, "30 not shown") in fields(embeds[1])
+        assert (strings.STANDINGS_MORE_FIELDS, "20 not shown") in fields(embeds[2])
+        assert (strings.STANDINGS_LEGEND_FIELD, strings.STANDINGS_LEGEND_FIELD_VALUE) in fields(embeds[2])
+
     def test_worst_case_regions_all_fit_no_more_line(self):
-        # 30 regions × 58 chars ≈ 1,740 — the 4096-char description holds all
-        # of them (the old 20-row field cap is gone by design).
+        # 30 regions × 2 proportional lines ≈ 1,740 — the 4096-char
+        # description holds all of them (no field cap, no fence).
         embeds = build_report_embed(worst_case_report(), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
+        lines = desc_lines(desc(embeds[1]))
         assert "Region29" in "\n".join(lines)
         assert not any(line.startswith("…and ") for line in lines)
 
@@ -901,18 +951,22 @@ class TestRegionNamesFilter:
             make_region("Gamma", 1, 1000, 5000, 0.2, 1, share_delta=0.03),
         ]
         embeds = build_report_embed(
-            make_report(regions=regions), ["WOLF"], "2026-08-08", region_names=["Gamma", "Alpha"]
+            make_report(regions=regions),
+            ["WOLF"],
+            "2026-08-08",
+            region_names=["Gamma", "Alpha"],
+            region_limit=10,
         )
 
-        lines = table_lines(desc(embeds[1]))
-        assert "Beta" not in "\n".join(lines)
-        assert lines[0].startswith("Alpha")  # share tie → name asc within the subset
-        assert lines[2].startswith("Gamma")
+        names = [name for name, _ in fields(embeds[1])]
+        assert "Beta" not in " ".join(names)
+        assert names[:2] == ["Alpha · 20.0%", "Gamma · 20.0%"]  # share tie → name asc within the subset
         kpi = next(f for f in embeds[0].fields if f.name == strings.KPI_REGIONS)
         assert field_value(kpi) == "0 of 2 active regions controlled"
         # Movers restricted to the filtered scope.
-        assert desc(embeds[1]).endswith(
-            strings.REGION_MOVERS_LINE.format(best="+3.0% Gamma", worst="+2.0% Alpha")
+        assert fields(embeds[1])[-1] == (
+            strings.REGION_MOVERS_FIELD,
+            "+3.0% Gamma · +2.0% Alpha",
         )
 
     def test_unknown_names_dropped(self):
@@ -921,8 +975,8 @@ class TestRegionNamesFilter:
             make_report(regions=regions), ["WOLF"], "2026-08-08", region_names=["Nope", "Alpha"]
         )
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[0].startswith("Alpha")
+        lines = desc_lines(desc(embeds[1]))
+        assert lines[1].startswith("Alpha")
         assert "Nope" not in desc(embeds[1])
 
     def test_empty_match_set_yields_no_regions_embed(self):
@@ -940,7 +994,7 @@ class TestRegionNamesFilter:
         regions = [make_region("Alpha", 1, 1000, 5000, 0.2, 1), make_region("Beta", 1, 1000, 5000, 0.2, 1)]
         embeds = build_report_embed(make_report(regions=regions), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
+        lines = desc_lines(desc(embeds[1]))
         assert "Beta" in "\n".join(lines)
         kpi = next(f for f in embeds[0].fields if f.name == strings.KPI_REGIONS)
         assert field_value(kpi) == "0 of 2 active regions controlled"
@@ -949,27 +1003,31 @@ class TestRegionNamesFilter:
 class TestStandingsLimit:
     """Daily-report standings cap: top *limit* by CURRENT population (tag ASC
     tie-break), then the ★/ours-first ordering; the tail collapses behind a
-    ``…and N more alliances`` line."""
+    ``More alliances`` field and ``Legend`` always closes the card."""
 
-    def test_top_10_by_current_population_with_more_line(self):
+    def test_top_10_by_current_population_with_more_field(self):
         standings = [make_standings(f"T{i:02d}", population=100 + i, vp=1) for i in range(30)]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08", standings_limit=10)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("T29")  # highest population first
-        assert lines[11].startswith("T20")  # 10th row
-        assert lines[12] == strings.STANDINGS_MORE_LINE.format(n=20)
-        assert len(lines) == 13  # header + divider + 10 rows + more-line
+        assert fields(embeds[1]) == [
+            (f"T{i:02d}", f"Pop {100 + i:,} · Δ +50\nVP 1 · Δ +10") for i in range(29, 19, -1)
+        ] + [
+            (strings.STANDINGS_MORE_FIELDS, "20 not shown"),
+            (strings.STANDINGS_LEGEND_FIELD, strings.STANDINGS_LEGEND_FIELD_VALUE),
+        ]
+        # 10 inline + More + Legend = 12 fields, far below Discord's 25.
+        assert len(embeds[1].fields) == 12
+        assert [f.inline for f in embeds[1].fields] == [True] * 10 + [False, False]
 
     def test_ours_outside_top_10_not_injected(self):
         standings = [make_standings(f"T{i:02d}", population=1000 + i, vp=1) for i in range(10)]
         standings += [make_standings("WOLF", population=500, vp=1), make_standings("ENEMY", population=400, vp=1)]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08", standings_limit=10)
 
-        description = desc(embeds[1])
-        assert "WOLF" not in description
-        assert "ENEMY" not in description
-        assert strings.STANDINGS_MORE_LINE.format(n=2) in description
+        names = [name for name, _ in fields(embeds[1])]
+        assert "WOLF" not in names
+        assert "ENEMY" not in names
+        assert (strings.STANDINGS_MORE_FIELDS, "2 not shown") in fields(embeds[1])
 
     def test_ours_first_within_selection(self):
         standings = [
@@ -980,12 +1038,15 @@ class TestStandingsLimit:
         ]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08", standings_limit=3)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("★WOLF")  # ours first, marked
-        assert lines[3].startswith("AAA")
-        assert lines[4].startswith("CCC")
-        assert "BBB" not in desc(embeds[1])
-        assert lines[5] == strings.STANDINGS_MORE_LINE.format(n=1)
+        assert [name for name, _ in fields(embeds[1])] == [
+            "★ WOLF",  # ours first, marked
+            "AAA",
+            "CCC",
+            strings.STANDINGS_MORE_FIELDS,
+            strings.STANDINGS_LEGEND_FIELD,
+        ]
+        more = next(v for n, v in fields(embeds[1]) if n == strings.STANDINGS_MORE_FIELDS)
+        assert more == "1 not shown"
 
     def test_tag_asc_tiebreak(self):
         standings = [
@@ -994,17 +1055,19 @@ class TestStandingsLimit:
         ]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08", standings_limit=1)
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("AAA")  # equal pop → tag ASC
-        assert lines[3] == strings.STANDINGS_MORE_LINE.format(n=1)
+        assert [name for name, _ in fields(embeds[1])] == [
+            "AAA",  # equal pop → tag ASC
+            strings.STANDINGS_MORE_FIELDS,
+            strings.STANDINGS_LEGEND_FIELD,
+        ]
 
     def test_no_limit_keeps_full_ours_first_order(self):
         standings = [make_standings("AAA", population=100, vp=1), make_standings("WOLF", population=200, vp=1)]
         embeds = build_report_embed(make_report(standings=standings), ["WOLF"], "2026-08-08")
 
-        lines = table_lines(desc(embeds[1]))
-        assert lines[2].startswith("★WOLF")
-        assert lines[3].startswith("AAA")
+        lines = desc_lines(desc(embeds[1]))
+        assert lines[1].startswith("WOLF · Pop 200")
+        assert lines[2].startswith("AAA · Pop 100")
         assert "…and " not in desc(embeds[1])
 
 

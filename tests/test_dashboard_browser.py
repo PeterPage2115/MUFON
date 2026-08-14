@@ -1004,29 +1004,31 @@ def _count(page: Page, prefix: str) -> int:
     )
 
 
-def test_mobile_375_no_document_scroll_and_full_regions_table(browser_app: tuple[str, Browser]) -> None:
-    """375 px: the document never scrolls horizontally and the regions table
-    keeps the Δ % / To 50% columns behind its own local scroller."""
+@pytest.mark.parametrize("width", [375, 686])
+def test_regions_responsive_layout_has_no_local_scroll(browser_app: tuple[str, Browser], width: int) -> None:
+    """375/686 px: the document never scrolls horizontally, the Regions
+    summary reflows into compact two-line cards (five cells, visible
+    Pop/Δ/To-50% labels) and keeps its semantic progressbar — no local
+    horizontal scroller."""
     url, browser = browser_app
     page = browser.new_page()
     page.set_default_timeout(15000)
-    page.set_viewport_size({"width": 375, "height": 812})
+    page.set_viewport_size({"width": width, "height": 900})
     page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
 
-    # No horizontal document scroll at 375 px.
-    offenders = page.evaluate(
-        "() => { const w = window.innerWidth; return Array.from(document.querySelectorAll('*'))"
-        ".filter((el) => el.getBoundingClientRect().right > w + 1)"
-        ".slice(0, 8).map((el) => el.tagName + '.' + String(el.className).split(' ')[0] + ' right=' + Math.round(el.getBoundingClientRect().right)); }"
-    )
-    print("OFFENDERS:", offenders)
+    # No horizontal document scroll at either width.
     no_overflow = page.evaluate(
         "() => document.documentElement.scrollWidth <= window.innerWidth + 1"
     )
-    assert no_overflow
+    assert no_overflow, f"document overflows at {width}px"
+    # The Regions wrapper never scrolls locally either.
+    wrap_ok = page.evaluate(
+        "() => { const el = document.querySelector('.data-table__wrap--regions'); return el.scrollWidth <= el.clientWidth + 1; }"
+    )
+    assert wrap_ok, f"regions wrap overflows at {width}px"
     # Both tab bars WRAP on phones: no horizontal strip, every label
     # reachable (the old overflow-x strip is gone).
     bars = page.evaluate(
@@ -1037,16 +1039,109 @@ def test_mobile_375_no_document_scroll_and_full_regions_table(browser_app: tuple
         "() => Array.from(document.querySelectorAll('#analysis-tabs .tab-bar__tab')).map((t) => t.textContent.trim())"
     )
     assert analysis_labels == ["Regions", "Alliances", "Players", "Events", "Wars", "Changes", "Compare", "Watch", "Roster", "Villages"]
-    # The table keeps every column; the wrap scrolls locally instead.
+
+    # Exactly five cells; the mobile data labels are rendered (::before).
     assert page.locator("[data-regions-body] tr").count() == 1
     first_row_cells = page.locator("[data-regions-body] tr").first.locator("td")
-    assert first_row_cells.count() == 6
-    wrap = page.evaluate(
-        "() => { const el = document.querySelector('.data-table__wrap'); return el.scrollWidth > el.clientWidth; }"
+    assert first_row_cells.count() == 5
+    labels = first_row_cells.evaluate_all(
+        "(els) => els.map((e) => e.getAttribute('data-label'))"
     )
-    assert wrap
-    # Δ % and To 50% are visible in the DOM (never display:none).
-    assert "%" in first_row_cells.nth(4).text_content()
+    assert labels == ["Region", "Control", "Pop", "Δ", "To 50%"]
+    before = page.evaluate(
+        "() => getComputedStyle(document.querySelectorAll('[data-regions-body] td')[2], '::before').content"
+    )
+    assert "Pop" in before
+    # The progressbar stays semantic with aria-valuenow.
+    meter = page.locator("[data-regions-body] .control-bar").first
+    assert meter.get_attribute("role") == "progressbar"
+    assert meter.get_attribute("aria-valuemin") == "0"
+    assert meter.get_attribute("aria-valuemax") == "100"
+    assert meter.get_attribute("aria-valuenow") is not None
+    page.close()
+
+
+@pytest.mark.parametrize("width", [368, 375, 686, 1440])
+def test_regions_controls_are_selectable_and_explicit(browser_app: tuple[str, Browser], width: int) -> None:
+    """Every visible dynamic select has non-empty option text, is enabled
+    and sized, and its center is not covered by another element; the region
+    chart select accepts a change and a valid custom From/To pair accepts
+    both dates."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    def assert_select_ok(selector: str) -> None:
+        state = page.evaluate(
+            """(sel) => {
+                const el = document.querySelector(sel);
+                el.scrollIntoView({ block: 'center' });
+                const rect = el.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                const top = document.elementFromPoint(cx, cy);
+                const covered = top !== null && top !== el && !el.contains(top);
+                const texts = Array.from(el.options).map((o) => o.textContent.trim());
+                return {
+                    disabled: el.disabled,
+                    zero: rect.width === 0 || rect.height === 0,
+                    empty: texts.length === 0 || texts.some((t) => t === ""),
+                    covered: covered,
+                };
+            }""",
+            selector,
+        )
+        assert state == {"disabled": False, "zero": False, "empty": False, "covered": False}, (
+            selector,
+            state,
+        )
+
+    visible = page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+            '#analysis-region-select, [data-range-from], [data-range-to], #analysis-roster-date, #analysis-roster-alliance'
+        ))
+            .filter((s) => {
+                const r = s.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            })
+            .map((s) => s.id)"""
+    )
+    assert visible, f"no visible dynamic selects at {width}px"
+    for sel_id in visible:
+        assert_select_ok("#" + sel_id)
+
+    # The region chart select accepts a change (single seeded region).
+    assert page.input_value("#analysis-region-select") == "Testland"
+    page.select_option("#analysis-region-select", "Testland")
+    assert page.input_value("#analysis-region-select") == "Testland"
+
+    # Custom From/To: options come from the real date catalog, both selects
+    # are enabled and usable, and the pair accepts both dates.
+    page.select_option("#range-regions", "custom")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('range-regions-to'); return el && el.value === '2026-08-08' && !el.disabled && document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'; }"
+    )
+    assert_select_ok("#range-regions-from")
+    assert_select_ok("#range-regions-to")
+    assert page.input_value("#range-regions-from") == "2026-08-07"
+    assert page.input_value("#range-regions-to") == "2026-08-08"
+    # Both dates are selectable in each pair select; an invalid pair shows
+    # the controls error, the valid pair reloads the panel. One change at a
+    # time: two simultaneous pair changes would overlap reload chains.
+    page.select_option("#range-regions-from", "2026-08-08")
+    page.select_option("#range-regions-to", "2026-08-08")
+    assert page.evaluate("() => document.getElementById('range-regions-error').hidden === false")
+    page.select_option("#range-regions-from", "2026-08-07")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false' && document.getElementById('range-regions-from').value === '2026-08-07' && document.getElementById('range-regions-to').value === '2026-08-08'"
+    )
+    assert page.input_value("#range-regions-from") == "2026-08-07"
+    assert page.input_value("#range-regions-to") == "2026-08-08"
     page.close()
 
 
