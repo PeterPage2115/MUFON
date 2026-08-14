@@ -9,7 +9,6 @@ import {
   $,
   setText,
   formatTime,
-  formatTimestamp,
   showToast,
   cssVar,
   fmtInt,
@@ -37,13 +36,15 @@ var SERIES_COLORS = ["#1abc9c", "#e67e22", "#3498db", "#f1c40f"];
 function analysisElements() {
   if (!analysisEls) {
     analysisEls = {
-      range: document.querySelector("[data-analysis-range]"),
       allianceFilter: document.getElementById("analysis-alliance-filter"),
       // Only the analysis sub-tabs — the top-level dashboard view tabs live
       // in #dashboard-view-tabs and are wired separately.
       tabs: Array.prototype.slice.call(document.querySelectorAll("#analysis-tabs .tab-bar__tab")),
       panels: Array.prototype.slice.call(document.querySelectorAll(".analysis-panel")),
       regionsBody: document.querySelector("[data-regions-body]"),
+      regionsToolbar: document.querySelector("[data-regions-toolbar]"),
+      playersToolbar: document.querySelector("[data-players-toolbar]"),
+      changesToolbar: document.querySelector("[data-changes-toolbar]"),
       regionSelect: document.getElementById("analysis-region-select"),
       regionCanvas: document.getElementById("analysis-chart-regions"),
       regionTop: document.getElementById("region-top"),
@@ -64,7 +65,7 @@ function analysisElements() {
       playersNew: document.querySelector("[data-players-new]"),
       eventsFrom: document.getElementById("analysis-events-from"),
       eventsTo: document.getElementById("analysis-events-to"),
-      eventsError: document.querySelector(".analysis-controls__error"),
+      eventsError: document.getElementById("analysis-events-error"),
       eventsGrid: document.querySelector(".events-grid"),
       eventsEmpty: document.querySelector("[data-events-empty]"),
       gainedList: document.querySelector("[data-events-gained]"),
@@ -206,10 +207,87 @@ function baseChartOpts() {
   };
 }
 
-// Kinds that honor the alliance filter (standings is a cross-alliance
-// comparison and never filters).
-var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players", "watch"];
+// The alliance-filter surface lives in api.js (ALLIANCE_FILTERED_KINDS);
+// this module only decides the filter's VISIBILITY per tab (activateTab).
 
+
+//: Range helpers shared by every historical tab. Each tab owns exactly one
+//: range (ranges[tab]); pair tabs (events/wars/compare/watch) always send
+//: explicit from/to computed from their mode, series tabs (regions/
+//: alliances/changes) send days or the explicit pair.
+function rangeParams(tab) {
+  var r = analysisState.ranges[tab];
+  if (r.mode === "custom") return { from: r.from, to: r.to };
+  return { days: r.days };
+}
+
+//: The (from, to) pair for ``tab`` over the available dates — the stored
+//: custom pair when valid, else the last ``days`` snapshots (all when
+//: fewer exist). Null when fewer than two dates exist or the stored custom
+//: pair is invalid.
+function tabPair(tab, dates) {
+  if (!dates || dates.length < 2) return null;
+  var r = analysisState.ranges[tab];
+  if (r.mode === "custom") {
+    if (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1 || r.from >= r.to) return null;
+    return [r.from, r.to];
+  }
+  return [dates[Math.max(0, dates.length - r.days)], dates[dates.length - 1]];
+}
+
+function setRangeSelectValue(tab) {
+  var select = document.querySelector('[data-range-select="' + tab + '"]');
+  if (!select) return;
+  var r = analysisState.ranges[tab];
+  select.value = r.mode === "custom" ? "custom" : String(r.days);
+}
+
+function setPairSelectValues(tab, from, to) {
+  var fromEl = document.querySelector('[data-range-from="' + tab + '"]');
+  var toEl = document.querySelector('[data-range-to="' + tab + '"]');
+  if (fromEl && from) fromEl.value = from;
+  if (toEl && to) toEl.value = to;
+}
+
+//: Revert a stored custom pair that no longer exists among the snapshot
+//: dates to the 7-day default — never a request loop, never a broken pair.
+function revertStaleCustom(tab) {
+  analysisState.ranges[tab] = { mode: "days", days: 7, from: null, to: null };
+  syncAnalysisUrl();
+  setRangeSelectValue(tab);
+}
+
+//: Ensure the tab's custom pair is populated and valid against the
+//: snapshot dates. Resolves with true when a request may proceed; false
+//: when the pair is invalid (from >= to) — the caller shows the error
+//: instead of requesting.
+function prepareCustomPair(tab) {
+  var r = analysisState.ranges[tab];
+  return api.analysis("dates").then(function (payload) {
+    var dates = payload.dates || [];
+    fillPairSelects(tab, dates);
+    if (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1) {
+      revertStaleCustom(tab);
+      return true; // the fallback (days 7) is valid — reload normally
+    }
+    return r.from < r.to;
+  });
+}
+
+function fillPairSelects(tab, dates) {
+  var fromEl = document.querySelector('[data-range-from="' + tab + '"]');
+  var toEl = document.querySelector('[data-range-to="' + tab + '"]');
+  if (!fromEl || !toEl) return;
+  fillDateSelect(fromEl, dates);
+  fillDateSelect(toEl, dates);
+}
+
+function reloadTab(tab) {
+  if (activatedTabs[tab] && tabLoaders[tab]) {
+    analysisState.dirtyTabs[tab] = false;
+    tabLoaders[tab]();
+  }
+}
 
 function loadRegions() {
   var panel = document.getElementById("panel-regions");
@@ -217,17 +295,36 @@ function loadRegions() {
   hidePanelError(panel);
   setPanelBusy("regions", true);
   tableLoading(els.regionsBody, 6);
-  return api
-    .analysis("regions", { days: analysisState.days })
-    .then(function (payload) {
-      renderRegions(payload);
+  var request = function () {
+    return api
+      .analysis("regions", rangeParams("regions"))
+      .then(function (payload) {
+        renderRegions(payload);
+        setPanelBusy("regions", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("regions", false);
+        showPanelError(panel, "Couldn't load analysis data.", loadRegions);
+        activatedTabs.regions = false; // next activation retries
+      });
+  };
+  if (analysisState.ranges.regions.mode !== "custom") return request();
+  return prepareCustomPair("regions").then(function (valid) {
+    if (!valid) {
       setPanelBusy("regions", false);
-    })
-    .catch(function (err) {
-      setPanelBusy("regions", false);
-      showPanelError(panel, "Couldn't load analysis data.", loadRegions);
-      activatedTabs.regions = false; // next activation retries
-    });
+      var errEl = document.getElementById("range-regions-error");
+      if (errEl) {
+        errEl.hidden = false;
+        setText(errEl, "From must be earlier than To.");
+      }
+      els.regionsBody.textContent = "";
+      setExportEnabled("regions", false);
+      return;
+    }
+    var errEl = document.getElementById("range-regions-error");
+    if (errEl) errEl.hidden = true;
+    return request();
+  });
 }
 
 function renderRegions(payload) {
@@ -242,11 +339,24 @@ function renderRegions(payload) {
 
   if (!current.length || !dates.length) {
     showPanelEmpty(panel, "No data yet.");
-    els.range.hidden = true;
     return;
   }
   hidePanelEmpty(panel);
-  els.range.hidden = false;
+
+  // Honest labels: the table is a single pair (latest vs previous in the
+  // selected range), the chart spans the whole range.
+  var latestLabel = payload.current_date
+    ? "Latest snapshot: " + payload.current_date + (payload.previous_date ? " vs previous snapshot" : "")
+    : "Latest snapshot vs previous";
+  setText(els.regionsToolbar, latestLabel);
+  setRangeSelectValue("regions");
+  var pairControls = document.querySelectorAll('[data-range-pair="regions"]');
+  Array.prototype.forEach.call(pairControls, function (el) {
+    el.hidden = analysisState.ranges.regions.mode !== "custom";
+  });
+  if (analysisState.ranges.regions.mode === "custom") {
+    setPairSelectValues("regions", analysisState.ranges.regions.from, analysisState.ranges.regions.to);
+  }
 
   els.regionsBody.textContent = "";
   current.forEach(function (row) {
@@ -403,23 +513,28 @@ function renderRegionChart(region) {
   });
 
   // Textual fallback: the exact payload as a semantic table — the canvas
-  // describes it, tooltips are never the only way to read the chart.
+  // describes it, tooltips are never the only way to read the chart. The
+  // table is NEWEST-FIRST (matches the other history tables); the chart
+  // itself stays ASC.
   var tableHeaders = ["Date", "Share", "Our pop", "Total pop"];
-  var tableRows = dates.map(function (d, i) {
-    var p = byDate[d];
-    return [
-      d,
-      p ? (p.share * 100).toFixed(1) + "%" : "—",
-      p ? fmtInt(p.our_pop) : "—",
-      p ? fmtInt(p.total_pop) : "—",
-    ];
-  });
+  var tableRows = dates
+    .map(function (d, i) {
+      var p = byDate[d];
+      return [
+        d,
+        p ? (p.share * 100).toFixed(1) + "%" : "—",
+        p ? fmtInt(p.our_pop) : "—",
+        p ? fmtInt(p.total_pop) : "—",
+      ];
+    })
+    .reverse();
   var tableDetails = fillChartDataTable(card, "chart-data-regions", tableHeaders, tableRows);
-  var asOf = dates.length ? dates[dates.length - 1] : null;
+  var payload = analysisState.regionsPayload || {};
+  var rangeCaption = "Selected range: " + (payload.range_from || "—") + " → " + (payload.range_to || "—");
   var asOfEl = document.querySelector('[data-as-of="regions"]');
   if (asOfEl) {
-    asOfEl.hidden = !asOf;
-    if (asOf) setText(asOfEl, "as of " + asOf);
+    asOfEl.hidden = false;
+    if (asOfEl.textContent !== rangeCaption) setText(asOfEl, rangeCaption);
   }
 
   if (!window.Chart) {
@@ -506,57 +621,92 @@ function loadStandings() {
   if (!analysisState.charts.alliances) {
     showChartLoading(panel.querySelector(".chart-card"));
   }
-  return api
-    .standings(selection, analysisState.days)
-    .then(function (payload) {
-      var dates = payload.dates || [];
-      var series = payload.series || [];
-      analysisState.standingsTags = payload.available_tags || [];
-      if (selection === null) {
-        // First load: the request carried no tag params — adopt the first
-        // eight resolved defaults and slice the fetched series client-side
-        // (no extra request).
-        analysisState.standingsDefaults = (payload.default_tags || []).slice(0, 8);
-        analysisState.standingsSelection = analysisState.standingsDefaults.slice();
-        var chosen = analysisState.standingsSelection;
-        series = series.filter(function (row) {
-          return chosen.indexOf(row.tag) !== -1;
-        });
-      }
-      analysisState.standingsPayload = { dates: dates, series: series };
-      setExportEnabled("standings", series.length > 0);
-      renderStandingsPicker();
-      if (!dates.length) {
-        showPanelEmpty(panel, "No data yet.");
-      } else if (!series.length) {
-        if ((analysisState.standingsTags || []).length) {
-          // Tags exist but none are selected/defaulted: keep the picker
-          // visible with the hint — the user must be able to choose. The
-          // chart card's loading/empty state must go, or it hides the
-          // picker (ROADMAP.md §4 picker fix).
-          hidePanelEmpty(panel);
-          var chartCard = panel.querySelector(".chart-card");
-          if (chartCard) {
-            chartCard.classList.remove("is-empty");
-            var staleState = chartCard.querySelector(".empty-state");
-            if (staleState && staleState.parentNode) staleState.parentNode.removeChild(staleState);
-          }
-          renderStandingsPicker();
-          updateStandingsFeedback();
-        } else {
-          showPanelEmpty(panel, "No data yet.");
+  var request = function () {
+    return api
+      .standings(selection, rangeParams("alliances"))
+      .then(function (payload) {
+        var dates = payload.dates || [];
+        var series = payload.series || [];
+        analysisState.standingsTags = payload.available_tags || [];
+        if (selection === null) {
+          // First load: the request carried no tag params — adopt the
+          // resolved top-10 defaults and slice the fetched series
+          // client-side (no extra request).
+          analysisState.standingsDefaults = (payload.default_tags || []).slice(0, 10);
+          analysisState.standingsSelection = analysisState.standingsDefaults.slice();
+          var chosen = analysisState.standingsSelection;
+          series = series.filter(function (row) {
+            return chosen.indexOf(row.tag) !== -1;
+          });
         }
-      } else {
-        hidePanelEmpty(panel);
-        renderStandingsChart();
+        analysisState.standingsPayload = {
+          dates: dates,
+          series: series,
+          range_from: payload.range_from,
+          range_to: payload.range_to,
+        };
+        setExportEnabled("standings", series.length > 0);
+        renderStandingsPicker();
+        setRangeSelectValue("alliances");
+        var pairControls = document.querySelectorAll('[data-range-pair="alliances"]');
+        Array.prototype.forEach.call(pairControls, function (el) {
+          el.hidden = analysisState.ranges.alliances.mode !== "custom";
+        });
+        if (analysisState.ranges.alliances.mode === "custom") {
+          setPairSelectValues("alliances", analysisState.ranges.alliances.from, analysisState.ranges.alliances.to);
+        }
+        if (!dates.length) {
+          showPanelEmpty(panel, "No data yet.");
+        } else if (!series.length) {
+          if ((analysisState.standingsTags || []).length) {
+            // Tags exist but none are selected/defaulted: keep the picker
+            // visible with the hint — the user must be able to choose. The
+            // chart card's loading/empty state must go, or it hides the
+            // picker (ROADMAP.md §4 picker fix).
+            hidePanelEmpty(panel);
+            var chartCard = panel.querySelector(".chart-card");
+            if (chartCard) {
+              chartCard.classList.remove("is-empty");
+              var staleState = chartCard.querySelector(".empty-state");
+              if (staleState && staleState.parentNode) staleState.parentNode.removeChild(staleState);
+            }
+            renderStandingsPicker();
+            updateStandingsFeedback();
+          } else {
+            showPanelEmpty(panel, "No data yet.");
+          }
+        } else {
+          hidePanelEmpty(panel);
+          renderStandingsChart();
+        }
+        setPanelBusy("alliances", false);
+      })
+      .catch(function (err) {
+        setPanelBusy("alliances", false);
+        showPanelError(panel, "Couldn't load analysis data.", loadStandings);
+        activatedTabs.alliances = false;
+      });
+  };
+  if (analysisState.ranges.alliances.mode !== "custom") return request();
+  return prepareCustomPair("alliances").then(function (valid) {
+    if (!valid) {
+      setPanelBusy("alliances", false);
+      var errEl = document.getElementById("range-alliances-error");
+      if (errEl) {
+        errEl.hidden = false;
+        setText(errEl, "From must be earlier than To.");
       }
-      setPanelBusy("alliances", false);
-    })
-    .catch(function (err) {
-      setPanelBusy("alliances", false);
-      showPanelError(panel, "Couldn't load analysis data.", loadStandings);
-      activatedTabs.alliances = false;
-    });
+      var card = panel.querySelector(".chart-card");
+      if (card) card.hidden = true;
+      setExportEnabled("standings", false);
+      return;
+    }
+    var errEl = document.getElementById("range-alliances-error");
+    if (errEl) errEl.hidden = true;
+    var card = panel.querySelector(".chart-card");
+    if (card) card.hidden = false;
+    return request();
+  });
 }
 
 function renderStandingsPicker() {
@@ -564,6 +714,14 @@ function renderStandingsPicker() {
   if (!els.standingsOptions) return;
   var selected = analysisState.standingsSelection || [];
   var needle = els.standingsSearch.value.trim().toLowerCase();
+  var payload = analysisState.standingsPayload;
+  var truncated = payload && payload.available_truncated;
+  var note = document.getElementById("analysis-standings-catalog-note");
+  if (note) {
+    var noteText = "Top 10 by latest population";
+    if (truncated > 0) noteText += " \u00b7 " + truncated + " more on the map";
+    setText(note, noteText);
+  }
   els.standingsOptions.textContent = "";
   (analysisState.standingsTags || []).forEach(function (tag) {
     var label = document.createElement("label");
@@ -590,12 +748,12 @@ function updateStandingsFeedback() {
   var message = "";
   if (checked === 0) {
     message = "Select at least one alliance.";
-  } else if (checked > 8) {
-    message = "Select up to 8 alliances.";
+  } else if (checked > 10) {
+    message = "Select up to 10 alliances.";
   }
   setText(els.standingsFeedback, message);
   els.standingsFeedback.classList.toggle("is-error", message !== "");
-  els.standingsApply.disabled = checked === 0 || checked > 8;
+  els.standingsApply.disabled = checked === 0 || checked > 10;
 }
 
 function wireStandingsPicker() {
@@ -678,27 +836,30 @@ function renderStandingsChart() {
   var series = payload.series || [];
   var metric = analysisState.metric;
 
-  // Textual fallback with the exact payload: one column per series.
+  // Textual fallback with the exact payload: one column per series,
+  // NEWEST-FIRST (the chart itself stays ASC).
   var tableHeaders = ["Date"].concat(series.map(function (row) {
     return row.tag;
   }));
-  var tableRows = dates.map(function (d) {
-    var cells = [d];
-    series.forEach(function (row) {
-      var byDate = {};
-      (row[metric === "vp" ? "vp_points" : "points"] || []).forEach(function (pair) {
-        byDate[pair[0]] = pair[1];
+  var tableRows = dates
+    .map(function (d) {
+      var cells = [d];
+      series.forEach(function (row) {
+        var byDate = {};
+        (row[metric === "vp" ? "vp_points" : "points"] || []).forEach(function (pair) {
+          byDate[pair[0]] = pair[1];
+        });
+        cells.push(byDate[d] !== undefined ? fmtInt(byDate[d]) : "—");
       });
-      cells.push(byDate[d] !== undefined ? fmtInt(byDate[d]) : "—");
-    });
-    return cells;
-  });
+      return cells;
+    })
+    .reverse();
   var tableDetails = fillChartDataTable(card, "chart-data-standings", tableHeaders, tableRows);
-  var asOf = dates.length ? dates[dates.length - 1] : null;
+  var rangeCaption = "Selected range: " + (payload.range_from || "—") + " → " + (payload.range_to || "—");
   var asOfEl = document.querySelector('[data-as-of="standings"]');
   if (asOfEl) {
-    asOfEl.hidden = !asOf;
-    if (asOf) setText(asOfEl, "as of " + asOf);
+    asOfEl.hidden = false;
+    if (asOfEl.textContent !== rangeCaption) setText(asOfEl, rangeCaption);
   }
 
   if (!window.Chart) {
@@ -761,6 +922,17 @@ function renderPlayers(payload) {
   analysisState.playersPayload = payload;
   analysisState.playersSnapshot = payload.snapshot_date || "latest";
   setExportEnabled("players", (payload.population || []).length > 0);
+  // The players rankings are a LATEST-PAIR view — the toolbar names the
+  // pair explicitly (never a fake "range").
+  if (els.playersToolbar) {
+    setText(
+      els.playersToolbar,
+      payload.snapshot_date
+        ? "Latest snapshot: " + payload.snapshot_date +
+          (payload.previous_date ? " vs " + payload.previous_date : "")
+        : "Latest snapshot vs previous"
+    );
+  }
   playersSection(els.playersPopulation, payload.population || [], function (s) {
     return numCell(fmtInt(s.population));
   });
@@ -810,19 +982,24 @@ function loadEvents() {
       hidePanelEmpty(panel);
       fillDateSelect(els.eventsFrom, dates);
       fillDateSelect(els.eventsTo, dates);
-      if (analysisState.from && dates.indexOf(analysisState.from) !== -1) {
-        els.eventsFrom.value = analysisState.from;
-      } else {
-        els.eventsFrom.value = dates[dates.length - 2];
+      setRangeSelectValue("events");
+      var r = analysisState.ranges.events;
+      if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
+        revertStaleCustom("events");
+        setRangeSelectValue("events");
       }
-      if (analysisState.to && dates.indexOf(analysisState.to) !== -1) {
-        els.eventsTo.value = analysisState.to;
-      } else {
-        els.eventsTo.value = dates[dates.length - 1];
+      var pair = tabPair("events", dates);
+      if (!pair) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("events", false);
+        setEventsBusy(false);
+        return;
       }
-      analysisState.from = els.eventsFrom.value;
-      analysisState.to = els.eventsTo.value;
-      return fetchEvents(analysisState.from, analysisState.to);
+      els.eventsFrom.value = pair[0];
+      els.eventsTo.value = pair[1];
+      analysisState.ranges.events.from = pair[0];
+      analysisState.ranges.events.to = pair[1];
+      return fetchEvents(pair[0], pair[1]);
     })
     .then(function () {
       setEventsBusy(false);
@@ -909,6 +1086,10 @@ function eventLine(ev, gained) {
   } else if (ev.event === "lost_deleted") {
     meta.textContent = "deleted";
     meta.classList.add("is-muted");
+  } else if (ev.same_player) {
+    // The owner switched alliances (stable player_id) — the village was
+    // NOT conquered, so the line never says "conquered".
+    meta.textContent = "Alliance changed to " + (ev.owner_tag || ev.owner_player || "unknown");
   } else {
     meta.textContent = "conquered by " + (ev.owner_tag || ev.owner_player || "unknown");
   }
@@ -937,19 +1118,24 @@ function loadWars() {
       hidePanelEmpty(panel);
       fillDateSelect(els.warsFrom, dates);
       fillDateSelect(els.warsTo, dates);
-      if (analysisState.warsFrom && dates.indexOf(analysisState.warsFrom) !== -1) {
-        els.warsFrom.value = analysisState.warsFrom;
-      } else {
-        els.warsFrom.value = dates[dates.length - 2];
+      setRangeSelectValue("wars");
+      var r = analysisState.ranges.wars;
+      if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
+        revertStaleCustom("wars");
+        setRangeSelectValue("wars");
       }
-      if (analysisState.warsTo && dates.indexOf(analysisState.warsTo) !== -1) {
-        els.warsTo.value = analysisState.warsTo;
-      } else {
-        els.warsTo.value = dates[dates.length - 1];
+      var pair = tabPair("wars", dates);
+      if (!pair) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("wars", false);
+        setWarsBusy(false);
+        return;
       }
-      analysisState.warsFrom = els.warsFrom.value;
-      analysisState.warsTo = els.warsTo.value;
-      return fetchWars(analysisState.warsFrom, analysisState.warsTo);
+      els.warsFrom.value = pair[0];
+      els.warsTo.value = pair[1];
+      analysisState.ranges.wars.from = pair[0];
+      analysisState.ranges.wars.to = pair[1];
+      return fetchWars(pair[0], pair[1]);
     })
     .then(function () {
       setWarsBusy(false);
@@ -1097,11 +1283,11 @@ function warsLine(ev) {
 
   var meta = document.createElement("span");
   meta.className = "event-line__meta";
-  if (ev.from_tag !== undefined) {
-    meta.textContent =
-      (ev.to_tag !== undefined ? ev.from_tag + " \u2192 " + ev.to_tag : ev.from_tag) +
-      " \u00b7 " +
-      (ev.to_player || ev.from_player || "unknown");
+  if (ev.from_tag !== undefined && ev.to_tag !== undefined) {
+    // The aggregate title above already states FROM → TO — the row itself
+    // shows the village, coordinates and the player only (the direction
+    // never repeats per row).
+    meta.textContent = ev.to_player || ev.from_player || "unknown";
   } else {
     meta.textContent = "deleted \u00b7 " + (ev.from_player || "unknown");
   }
@@ -1117,29 +1303,66 @@ function loadChanges() {
   hidePanelError(panel);
   setPanelBusy("changes", true);
   tableLoading(els.changesBody, 9);
-  return api
-    .analysis("deltas", { days: analysisState.days })
-    .then(function (payload) {
-      var rows = payload.rows || [];
-      analysisState.changesPayload = payload;
-      setExportEnabled("changes", rows.length > 0);
-      if (!rows.length) {
-        showPanelEmpty(panel, "No data yet.");
+  var request = function () {
+    return api
+      .analysis("deltas", rangeParams("changes"))
+      .then(function (payload) {
+        var rows = payload.rows || [];
+        analysisState.changesPayload = payload;
+        setExportEnabled("changes", rows.length > 0);
+        setRangeSelectValue("changes");
+        var pairControls = document.querySelectorAll('[data-range-pair="changes"]');
+        Array.prototype.forEach.call(pairControls, function (el) {
+          el.hidden = analysisState.ranges.changes.mode !== "custom";
+        });
+        if (analysisState.ranges.changes.mode === "custom") {
+          setPairSelectValues("changes", analysisState.ranges.changes.from, analysisState.ranges.changes.to);
+        }
+        if (els.changesToolbar) {
+          setText(
+            els.changesToolbar,
+            payload.range_from && payload.range_to
+              ? "Selected range: " + payload.range_from + " \u2192 " + payload.range_to
+              : "Daily headline history"
+          );
+        }
+        if (!rows.length) {
+          showPanelEmpty(panel, "No data yet.");
+          setPanelBusy("changes", false);
+          return;
+        }
+        hidePanelEmpty(panel);
+        els.changesBody.textContent = "";
+        // Newest observation first — the chart payload stays ASC, the
+        // table is a DESC presentation of the same data.
+        rows.slice().reverse().forEach(function (row) {
+          els.changesBody.appendChild(changeRow(row));
+        });
         setPanelBusy("changes", false);
-        return;
-      }
-      hidePanelEmpty(panel);
-      els.changesBody.textContent = "";
-      rows.slice().reverse().forEach(function (row) {
-        els.changesBody.appendChild(changeRow(row));
+      })
+      .catch(function (err) {
+        setPanelBusy("changes", false);
+        showPanelError(panel, "Couldn't load analysis data.", loadChanges);
+        activatedTabs.changes = false;
       });
+  };
+  if (analysisState.ranges.changes.mode !== "custom") return request();
+  return prepareCustomPair("changes").then(function (valid) {
+    if (!valid) {
       setPanelBusy("changes", false);
-    })
-    .catch(function (err) {
-      setPanelBusy("changes", false);
-      showPanelError(panel, "Couldn't load analysis data.", loadChanges);
-      activatedTabs.changes = false;
-    });
+      var errEl = document.getElementById("range-changes-error");
+      if (errEl) {
+        errEl.hidden = false;
+        setText(errEl, "From must be earlier than To.");
+      }
+      els.changesBody.textContent = "";
+      setExportEnabled("changes", false);
+      return;
+    }
+    var errEl = document.getElementById("range-changes-error");
+    if (errEl) errEl.hidden = true;
+    return request();
+  });
 }
 
 /* Villages tab (explorer + owner history) */
@@ -1333,7 +1556,8 @@ function renderVillageHistory(payload) {
 
   els.villageHistoryTable.hidden = false;
   els.villageHistoryBody.textContent = "";
-  history.forEach(function (point) {
+  // Newest observation first (the chart stays ASC — table vs trend axis).
+  history.slice().reverse().forEach(function (point) {
     els.villageHistoryBody.appendChild(villageHistoryRow(point));
   });
 
@@ -1547,12 +1771,13 @@ function wireExportButtons() {
       var payload = analysisState.changesPayload;
       var rows = payload && payload.rows ? payload.rows : [];
       if (!rows.length) return;
-      var snapshot = rows[rows.length - 1].date;
+      // CSV mirrors the on-screen table: newest observation first.
+      var newest = rows[rows.length - 1];
       var headers = ["Date", "Previous snapshot", "Days elapsed", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
       exportCsv(
-        "changes-" + snapshot + ".csv",
+        "changes-" + newest.date + ".csv",
         headers,
-        rows.map(function (r) {
+        rows.slice().reverse().map(function (r) {
           return [r.date, r.previous_date, r.elapsed_days, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
         })
       );
@@ -1569,7 +1794,7 @@ function wireExportButtons() {
         rows.push(["lost", e.village_name, e.x, e.y, e.region || "", e.owner_tag || e.owner_player || ""]);
       });
       exportCsv(
-        "events-" + analysisState.from + "-" + analysisState.to + "-limit-" + analysisState.eventsLimit + ".csv",
+        "events-" + analysisState.ranges.events.from + "-" + analysisState.ranges.events.to + "-limit-" + analysisState.eventsLimit + ".csv",
         headers,
         rows
       );
@@ -1587,7 +1812,11 @@ function wireExportButtons() {
       (payload.deleted || []).forEach(function (e) {
         rows.push(["deleted", e.from_tag, "", e.village_name, e.x + "|" + e.y, e.region || "", e.from_player, "", e.population]);
       });
-      exportCsv("wars-" + analysisState.warsFrom + "-" + analysisState.warsTo + ".csv", headers, rows);
+      exportCsv(
+        "wars-" + analysisState.ranges.wars.from + "-" + analysisState.ranges.wars.to + ".csv",
+        headers,
+        rows
+      );
     },
     players: function () {
       var payload = analysisState.playersPayload;
@@ -1622,7 +1851,7 @@ function wireExportButtons() {
       payload.series.forEach(function (s) {
         byTag[s.tag] = s;
       });
-      var rows = (payload.dates || []).map(function (d) {
+      var rows = (payload.dates || []).slice().reverse().map(function (d) {
         var cells = [d];
         payload.series.forEach(function (s) {
           var byDate = {};
@@ -1637,12 +1866,13 @@ function wireExportButtons() {
       var payload = analysisState.changesPayload;
       var rows = payload && payload.rows ? payload.rows : [];
       if (!rows.length) return;
-      var snapshot = rows[rows.length - 1].date;
+      // Same DESC order as the screen (newest observation first).
+      var newest = rows[rows.length - 1];
       var headers = ["Date", "Previous snapshot", "Days elapsed", "Villages", "Villages Δ", "Population", "Population Δ", "Players", "Players Δ", "VP", "VP Δ"];
       exportCsv(
-        "deltas-" + snapshot + ".csv",
+        "deltas-" + newest.date + ".csv",
         headers,
-        rows.map(function (r) {
+        rows.slice().reverse().map(function (r) {
           return [r.date, r.previous_date, r.elapsed_days, r.villages, r.villages_delta, r.population, r.population_delta, r.players, r.players_delta, r.vp, r.vp_delta];
         })
       );
@@ -1709,9 +1939,23 @@ function loadWatch() {
       hidePanelEmpty(panel);
       fillDateSelect(els.watchFrom, dates);
       fillDateSelect(els.watchTo, dates);
-      els.watchFrom.value = dates[dates.length - 2];
-      els.watchTo.value = dates[dates.length - 1];
-      return fetchWatch(els.watchFrom.value, els.watchTo.value);
+      setRangeSelectValue("watch");
+      var r = analysisState.ranges.watch;
+      if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
+        revertStaleCustom("watch");
+        setRangeSelectValue("watch");
+      }
+      var pair = tabPair("watch", dates);
+      if (!pair) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("watch", false);
+        return;
+      }
+      els.watchFrom.value = pair[0];
+      els.watchTo.value = pair[1];
+      analysisState.ranges.watch.from = pair[0];
+      analysisState.ranges.watch.to = pair[1];
+      return fetchWatch(pair[0], pair[1]);
     })
     .then(function () {
       setPanelBusy("watch", false);
@@ -1831,6 +2075,10 @@ function wireWatchControls() {
       return;
     }
     els.watchError.hidden = true;
+    // A touched pair is a custom range for this tab.
+    analysisState.ranges.watch = { mode: "custom", days: 7, from: from, to: to };
+    syncAnalysisUrl();
+    setRangeSelectValue("watch");
     setPanelBusy("watch", true);
     fetchWatch(from, to)
       .catch(function (err) {
@@ -1840,10 +2088,27 @@ function wireWatchControls() {
         setPanelBusy("watch", false);
       });
   }
+  function onRangeChange() {
+    var value = document.querySelector('[data-range-select="watch"]').value;
+    if (value === "custom") {
+      // Enter custom with the last valid pair as the starting point.
+      var r = analysisState.ranges.watch;
+      r.mode = "custom";
+      syncAnalysisUrl();
+      setRangeSelectValue("watch");
+      return;
+    }
+    var days = Number(value);
+    analysisState.ranges.watch = { mode: "days", days: days === 30 || days === 60 ? days : 7, from: null, to: null };
+    syncAnalysisUrl();
+    loadWatch();
+  }
   els.watchFrom.addEventListener("change", onChange);
   els.watchTo.addEventListener("change", onChange);
   els.watchSeverity.addEventListener("change", onChange);
   els.watchKind.addEventListener("change", onChange);
+  var rangeSelect = document.querySelector('[data-range-select="watch"]');
+  if (rangeSelect) rangeSelect.addEventListener("change", onRangeChange);
 }
 
 /* --- Roster tab --------------------------------------------------------------- */
@@ -1964,10 +2229,13 @@ function wireRosterControls() {
 
 /* --- context bar + URL state (Faza 3) -------------------------------------- */
 //
-// The Intelligence context: range (7|30|60 days), alliance, and the current
-// from/to pair live in the URL query (?view=&tab=&alliance=&days=&from=&to=)
-// and the local preference key — never near the token. Invalid values are
-// rejected to safe defaults and never cause a request loop.
+// The Intelligence context: alliance, the active tab, and ONE range per
+// historical tab live in the URL query (?view=&tab=&alliance=&range_<tab>=
+// &from_<tab>=&to_<tab>=) and the local preference key (v2, per-tab) —
+// never near the token. Invalid values are rejected to safe defaults (7
+// days) and never cause a request loop.
+
+var RANGE_TABS = ["regions", "alliances", "changes", "events", "wars", "compare", "watch"];
 
 export function syncAnalysisUrl() {
   var params = new URLSearchParams(window.location.search);
@@ -1987,91 +2255,165 @@ export function syncAnalysisUrl() {
   } else {
     params.delete("alliance");
   }
-  if (analysisState.days !== 30) {
-    params.set("days", String(analysisState.days));
-  } else {
-    params.delete("days");
-  }
-  if (analysisState.from && analysisState.to) {
-    params.set("from", analysisState.from);
-    params.set("to", analysisState.to);
-  } else {
-    params.delete("from");
-    params.delete("to");
-  }
+  RANGE_TABS.forEach(function (tab) {
+    var r = analysisState.ranges[tab];
+    if (r.mode === "custom") {
+      params.set("range_" + tab, "custom");
+      params.set("from_" + tab, r.from || "");
+      params.set("to_" + tab, r.to || "");
+    } else if (r.days !== 7) {
+      params.set("range_" + tab, String(r.days));
+      params.delete("from_" + tab);
+      params.delete("to_" + tab);
+    } else {
+      params.delete("range_" + tab);
+      params.delete("from_" + tab);
+      params.delete("to_" + tab);
+    }
+  });
   var qs = params.toString();
   var target = window.location.pathname + (qs ? "?" + qs : "");
   history.replaceState(null, "", target);
   try {
     window.localStorage.setItem(
-      "mufon.dashboard.view.v1",
-      JSON.stringify({ days: analysisState.days, alliance: analysisState.alliance })
+      "mufon.dashboard.view.v2",
+      JSON.stringify({ alliance: analysisState.alliance, ranges: analysisState.ranges })
     );
   } catch (_e) {
     /* preference is best-effort; the URL is the source of truth */
   }
 }
 
-export function setDays(days) {
-  var valid = days === 7 || days === 30 || days === 60;
-  analysisState.days = valid ? days : 30;
-  var select = document.getElementById("analysis-days");
-  if (select && select.value !== String(analysisState.days)) select.value = String(analysisState.days);
-  var range = analysisElements().range;
-  if (range) {
-    range.hidden = false;
-    setText(range, "Last " + analysisState.days + " days");
-  }
-  // The range shapes every filtered tab: reload the active one now, mark
-  // the rest dirty for their next activation.
-  markAllianceDirty();
-  if (activatedTabs[activeTabName] && tabLoaders[activeTabName]) {
-    analysisState.dirtyTabs[activeTabName] = false;
-    tabLoaders[activeTabName]();
-  }
+function setTabRange(tab, mode, days) {
+  analysisState.ranges[tab] = { mode: mode, days: days, from: null, to: null };
   syncAnalysisUrl();
+  // The range shapes only THIS tab: reload it now, leave every other tab
+  // untouched.
+  if (activatedTabs[tab] && tabLoaders[tab]) {
+    analysisState.dirtyTabs[tab] = false;
+    tabLoaders[tab]();
+  }
 }
 
-function wireDaysSelect() {
-  var select = document.getElementById("analysis-days");
+//: One shared range controller per historical tab (replaces the old global
+//: days select): 7|30|60|Custom presets, plus the tab's custom pair.
+function wireRangeControls(tab) {
+  var select = document.querySelector('[data-range-select="' + tab + '"]');
   if (!select) return;
-  select.value = String(analysisState.days);
-  var range = analysisElements().range;
-  if (range) {
-    range.hidden = false;
-    setText(range, "Last " + analysisState.days + " days");
-  }
   select.addEventListener("change", function () {
-    setDays(Number(select.value));
+    var value = select.value;
+    if (value === "custom") {
+      var r = analysisState.ranges[tab];
+      r.mode = "custom";
+      syncAnalysisUrl();
+      // Reveal the pair with the last valid pair as the starting point
+      // (or the 7-day window when none is stored).
+      api.analysis("dates").then(function (payload) {
+        var dates = payload.dates || [];
+        fillPairSelects(tab, dates);
+        var pairControls = document.querySelectorAll('[data-range-pair="' + tab + '"]');
+        Array.prototype.forEach.call(pairControls, function (el) {
+          el.hidden = false;
+        });
+        if (!dates.length) return;
+        if (!r.from || dates.indexOf(r.from) === -1 || !r.to || dates.indexOf(r.to) === -1) {
+          r.from = dates[Math.max(0, dates.length - 7)];
+          r.to = dates[dates.length - 1];
+        }
+        setPairSelectValues(tab, r.from, r.to);
+        reloadTab(tab);
+      });
+      return;
+    }
+    var days = Number(value);
+    setTabRange(tab, "days", days === 30 || days === 60 ? days : 7);
   });
 }
 
+//: Custom pair selectors for the series tabs (regions/alliances/changes) —
+//: events/wars/compare/watch wire their existing From/To in their own
+//: control functions.
+function wirePairSelects(tab) {
+  var fromEl = document.querySelector('[data-range-from="' + tab + '"]');
+  var toEl = document.querySelector('[data-range-to="' + tab + '"]');
+  if (!fromEl || !toEl) return;
+  function onChange() {
+    var from = fromEl.value;
+    var to = toEl.value;
+    if (!from || !to) return;
+    analysisState.ranges[tab].mode = "custom";
+    analysisState.ranges[tab].from = from;
+    analysisState.ranges[tab].to = to;
+    syncAnalysisUrl();
+    var errEl = document.getElementById("range-" + tab + "-error");
+    if (from >= to) {
+      if (errEl) {
+        errEl.hidden = false;
+        setText(errEl, "From must be earlier than To.");
+      }
+      // The stale table must not contradict the message: clear it.
+      var panel = document.getElementById("panel-" + tab);
+      var body = panel && panel.querySelector("tbody");
+      if (body) body.textContent = "";
+      var card = panel && panel.querySelector(".chart-card");
+      if (card) card.hidden = true;
+      setExportEnabled(tab === "alliances" ? "standings" : tab, false);
+      return;
+    }
+    if (errEl) errEl.hidden = true;
+    reloadTab(tab);
+  }
+  fromEl.addEventListener("change", onChange);
+  toEl.addEventListener("change", onChange);
+}
+
 //: Bootstrap entry: apply URL + stored preference context before the first
-//: analysis load. Invalid days fall back to the stored/30 default; an
+//: analysis load. Invalid range values fall back to the 7-day default; an
 //: invalid alliance is reset by renderAllianceFilter once tags resolve.
+//: Custom pairs are validated against the dates list at load time (a stale
+//: pair reverts to 7 — never a request loop).
 export function applyInitialContext() {
   var params = new URLSearchParams(window.location.search);
-  var daysRaw = params.get("days");
   var allianceRaw = params.get("alliance");
   var stored = null;
   try {
-    stored = JSON.parse(window.localStorage.getItem("mufon.dashboard.view.v1") || "null");
+    stored = JSON.parse(window.localStorage.getItem("mufon.dashboard.view.v2") || "null");
   } catch (_e) {
     stored = null;
   }
-  var days = daysRaw !== null ? Number(daysRaw) : stored && stored.days ? stored.days : 30;
-  analysisState.days = days === 7 || days === 30 || days === 60 ? days : 30;
   if (allianceRaw !== null) {
     analysisState.alliance = allianceRaw === "combined" ? "combined" : allianceRaw;
   } else if (stored && stored.alliance) {
     analysisState.alliance = stored.alliance;
   }
-  var fromRaw = params.get("from");
-  var toRaw = params.get("to");
-  if (fromRaw && toRaw) {
-    analysisState.from = fromRaw;
-    analysisState.to = toRaw;
-  }
+  RANGE_TABS.forEach(function (tab) {
+    var r = analysisState.ranges[tab];
+    var modeRaw = params.get("range_" + tab);
+    var fromRaw = params.get("from_" + tab);
+    var toRaw = params.get("to_" + tab);
+    var storedRange = stored && stored.ranges && stored.ranges[tab];
+    if (modeRaw === "custom") {
+      if (fromRaw && toRaw) {
+        r.mode = "custom";
+        r.from = fromRaw;
+        r.to = toRaw;
+      }
+      // Incomplete custom values stay on the 7-day default.
+    } else if (modeRaw !== null) {
+      var days = Number(modeRaw);
+      r.mode = "days";
+      r.days = days === 30 || days === 60 ? days : 7;
+    } else if (storedRange) {
+      if (storedRange.mode === "custom" && storedRange.from && storedRange.to) {
+        r.mode = "custom";
+        r.from = storedRange.from;
+        r.to = storedRange.to;
+      } else {
+        r.mode = "days";
+        r.days = storedRange.days === 30 || storedRange.days === 60 ? storedRange.days : 7;
+      }
+    }
+  });
 }
 
 /* --- Compare tab ------------------------------------------------------------- */
@@ -2093,20 +2435,24 @@ function loadCompare() {
       hidePanelEmpty(panel);
       fillDateSelect(els.compareFrom, dates);
       fillDateSelect(els.compareTo, dates);
-      if (analysisState.from && dates.indexOf(analysisState.from) !== -1) {
-        els.compareFrom.value = analysisState.from;
-      } else {
-        els.compareFrom.value = dates[0];
+      setRangeSelectValue("compare");
+      var r = analysisState.ranges.compare;
+      if (r.mode === "custom" && (dates.indexOf(r.from) === -1 || dates.indexOf(r.to) === -1)) {
+        revertStaleCustom("compare");
+        setRangeSelectValue("compare");
       }
-      if (analysisState.to && dates.indexOf(analysisState.to) !== -1) {
-        els.compareTo.value = analysisState.to;
-      } else {
-        els.compareTo.value = dates[dates.length - 1];
+      var pair = tabPair("compare", dates);
+      if (!pair) {
+        showPanelEmpty(panel, "No data yet.");
+        setPanelBusy("compare", false);
+        return;
       }
-      analysisState.from = els.compareFrom.value;
-      analysisState.to = els.compareTo.value;
+      els.compareFrom.value = pair[0];
+      els.compareTo.value = pair[1];
+      analysisState.ranges.compare.from = pair[0];
+      analysisState.ranges.compare.to = pair[1];
       syncAnalysisUrl();
-      return fetchCompare(analysisState.from, analysisState.to);
+      return fetchCompare(pair[0], pair[1]);
     })
     .then(function () {
       setPanelBusy("compare", false);
@@ -2222,9 +2568,9 @@ function wireCompareControls() {
       return;
     }
     els.compareError.hidden = true;
-    analysisState.from = from;
-    analysisState.to = to;
+    analysisState.ranges.compare = { mode: "custom", days: 7, from: from, to: to };
     syncAnalysisUrl();
+    setRangeSelectValue("compare");
     setPanelBusy("compare", true);
     fetchCompare(from, to)
       .catch(function (err) {
@@ -2234,8 +2580,24 @@ function wireCompareControls() {
         setPanelBusy("compare", false);
       });
   }
+  function onRangeChange() {
+    var value = document.querySelector('[data-range-select="compare"]').value;
+    if (value === "custom") {
+      var r = analysisState.ranges.compare;
+      r.mode = "custom";
+      syncAnalysisUrl();
+      setRangeSelectValue("compare");
+      return;
+    }
+    var days = Number(value);
+    analysisState.ranges.compare = { mode: "days", days: days === 30 || days === 60 ? days : 7, from: null, to: null };
+    syncAnalysisUrl();
+    loadCompare();
+  }
   els.compareFrom.addEventListener("change", onChange);
   els.compareTo.addEventListener("change", onChange);
+  var rangeSelect = document.querySelector('[data-range-select="compare"]');
+  if (rangeSelect) rangeSelect.addEventListener("change", onRangeChange);
 }
 
 /* --- drill-downs: player history + region villages --------------------------- */
@@ -2308,7 +2670,8 @@ function renderPlayerHistory(payload) {
   setText(els.playerDetailName, (history.length ? history[history.length - 1].player_name : "Player") + " \u00b7 #" + payload.player_id);
   els.playerHistoryTable.hidden = false;
   els.playerHistoryBody.textContent = "";
-  history.forEach(function (point) {
+  // Newest observation first (the chart stays ASC — table vs trend axis).
+  history.slice().reverse().forEach(function (point) {
     var tr = document.createElement("tr");
     var tdDate = document.createElement("td");
     tdDate.className = "date-cell";
@@ -2387,7 +2750,9 @@ function renderPlayerChart(history) {
   analysisState.charts.player = chart;
 }
 
-// Regions: every row opens the region's villages for the latest pair date.
+// Regions: every row opens the region's villages for the range-end date
+// (the table's "current" snapshot — matches the selected range, not a
+// hard-coded latest).
 function openRegionVillages(region) {
   var els = analysisElements();
   var seq = ++analysisState.regionVillagesSeq;
@@ -2397,8 +2762,11 @@ function openRegionVillages(region) {
   els.regionDetailNote.hidden = true;
   setText(els.regionDetailTitle, region);
   setPanelBusy("regions", true);
+  var params = {};
+  var regionsPayload = analysisState.regionsPayload;
+  if (regionsPayload && regionsPayload.current_date) params.date = regionsPayload.current_date;
   return api
-    .analysis("regions/" + encodeURIComponent(region) + "/villages", {})
+    .analysis("regions/" + encodeURIComponent(region) + "/villages", params)
     .then(function (payload) {
       if (seq !== analysisState.regionVillagesSeq) return;
       renderRegionVillages(payload);
@@ -2478,11 +2846,10 @@ function activateTab(tab) {
   var name = tab.id.replace("tab-", "");
   activeTabName = name;
   syncAnalysisUrl();
-  // Six tabs can overflow on narrow screens — keep the chosen one visible.
-  tab.scrollIntoView({ block: "nearest", inline: "nearest" });
-  // The global alliance filter scopes regions/events/changes/players; the
-  // Alliances tab is a cross-alliance chart with its own local picker and
-  // the Wars tab always uses the tracked universe (never the filter).
+  // The header Scope filter scopes regions/players/events/changes/compare/
+  // watch; Alliances has its own local Series picker, Wars is always the
+  // tracked universe and Roster its own local Alliance select (never the
+  // header filter).
   if (els.allianceFilter) {
     els.allianceFilter.hidden =
       name === "alliances" || name === "wars" || name === "roster" || allianceTags.length < 2;
@@ -2567,9 +2934,10 @@ function wireEventsControls() {
       return;
     }
     els.eventsError.hidden = true;
-    analysisState.from = from;
-    analysisState.to = to;
+    // A touched pair is a custom range for this tab.
+    analysisState.ranges.events = { mode: "custom", days: 7, from: from, to: to };
     syncAnalysisUrl();
+    setRangeSelectValue("events");
     setPanelBusy("events", true);
     setEventsBusy(true);
     fetchEvents(from, to)
@@ -2581,6 +2949,20 @@ function wireEventsControls() {
         setEventsBusy(false);
       });
   }
+  function onRangeChange() {
+    var value = document.querySelector('[data-range-select="events"]').value;
+    if (value === "custom") {
+      var r = analysisState.ranges.events;
+      r.mode = "custom";
+      syncAnalysisUrl();
+      setRangeSelectValue("events");
+      return;
+    }
+    var days = Number(value);
+    analysisState.ranges.events = { mode: "days", days: days === 30 || days === 60 ? days : 7, from: null, to: null };
+    syncAnalysisUrl();
+    loadEvents();
+  }
   els.eventsFrom.addEventListener("change", onChange);
   els.eventsTo.addEventListener("change", onChange);
   els.eventsLimit.addEventListener("change", function () {
@@ -2589,6 +2971,8 @@ function wireEventsControls() {
     analysisState.eventsLimit = Number(els.eventsLimit.value);
     onChange();
   });
+  var rangeSelect = document.querySelector('[data-range-select="events"]');
+  if (rangeSelect) rangeSelect.addEventListener("change", onRangeChange);
 }
 
 function wireWarsControls() {
@@ -2607,9 +2991,9 @@ function wireWarsControls() {
       return; // keep the previous lists
     }
     els.warsError.hidden = true;
-    analysisState.warsFrom = from;
-    analysisState.warsTo = to;
+    analysisState.ranges.wars = { mode: "custom", days: 7, from: from, to: to };
     syncAnalysisUrl();
+    setRangeSelectValue("wars");
     setPanelBusy("wars", true);
     setWarsBusy(true);
     fetchWars(from, to)
@@ -2621,8 +3005,24 @@ function wireWarsControls() {
         setWarsBusy(false);
       });
   }
+  function onRangeChange() {
+    var value = document.querySelector('[data-range-select="wars"]').value;
+    if (value === "custom") {
+      var r = analysisState.ranges.wars;
+      r.mode = "custom";
+      syncAnalysisUrl();
+      setRangeSelectValue("wars");
+      return;
+    }
+    var days = Number(value);
+    analysisState.ranges.wars = { mode: "days", days: days === 30 || days === 60 ? days : 7, from: null, to: null };
+    syncAnalysisUrl();
+    loadWars();
+  }
   els.warsFrom.addEventListener("change", onChange);
   els.warsTo.addEventListener("change", onChange);
+  var rangeSelect = document.querySelector('[data-range-select="wars"]');
+  if (rangeSelect) rangeSelect.addEventListener("change", onRangeChange);
 }
 
 function wireAnalysis() {
@@ -2636,10 +3036,14 @@ function wireAnalysis() {
   wireAllianceSwitch();
   wireVillagesSearch();
   wireExportButtons();
-  wireDaysSelect();
   wireCompareControls();
   wireWatchControls();
   wireRosterControls();
+  // One range controller per historical tab — never a shared global window.
+  RANGE_TABS.forEach(function (tab) {
+    wireRangeControls(tab);
+    wirePairSelects(tab);
+  });
   // Regions is the default tab — its payload is fetched at init.
   activateTab(document.getElementById("tab-regions"));
 }
@@ -2676,7 +3080,7 @@ function renderAllianceFilter() {
 
 // The filtered tabs load with the new filter on their next activation.
 function markAllianceDirty() {
-  ["regions", "events", "changes", "players"].forEach(function (name) {
+  ["regions", "events", "changes", "players", "compare", "watch"].forEach(function (name) {
     analysisState.dirtyTabs[name] = true;
   });
 }
@@ -2720,7 +3124,6 @@ export function setAllianceTags(tags) {
 //: refresh); resolves immediately when Intelligence is not active or the tab
 //: was never activated.
 export function refreshActiveAnalysis() {
-  console.log("RAA-DEBUG", state.dashboardState.activeView, activeTabName, Boolean(tabLoaders[activeTabName]), Boolean(activatedTabs[activeTabName]));
   if (state.dashboardState.activeView !== "intelligence") {
     return Promise.resolve();
   }

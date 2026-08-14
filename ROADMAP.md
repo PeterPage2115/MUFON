@@ -34,9 +34,9 @@ aktualizuj ten plik, gdy decyzja się zmienia. Pełny kontekst techniczny:
 Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następnymi" zadaniami.
 
 - **Dane**: parser i składowanie snapshotów `map.sql` (SQLite/WAL), delta engine, backfill z Postgres, retencja bez auto-pruningu, backup/restore (`python -m travian.backup`).
-- **Raport Discord**: KPI, Regiony, Standings (3 karty), `/raport`, `/wioski`, `/regiony`; alerty terminalnych porażek przez `ALERT_CHANNEL_ID` (env-only, dedupe per UTC dzień).
-- **Dashboard — Intelligence**: zakładki `Regions`, `Alliances`, `Players` (pop/growth/VP), `Events` (limit + total), `Wars` (macierz kto-komu, `metrics.conquests_between`), `Changes` (gap-aware), `Villages` (wyszukiwarka + historia); wykresy vendored Chart.js, eksporty CSV, filtr alliance (Combined = suma `ALLIANCE_TAGS` lub pojedynczy tag).
-- **Dashboard — Overview**: Status (freshness, ostatnie udane fetch/report, błędy), Job log (UTC), scheduler sync (zmiana settings przestawia realne triggery APScheduler).
+- **Raport Discord**: KPI, Regiony, Standings (3 karty), `/raport`, `/wioski`, `/regiony`; alerty terminalnych porażek przez `ALERT_CHANNEL_ID` (env-only, dedupe per UTC dzień). Regions renderuje się w **kompaktowym układzie mobilnym** (dwie krótkie linie na region, twardy limit 36 znaków na linię — bez poziomego scrolla na Discord mobile); raport dzienny ma limit **top-10** dla regionów i standings (`REPORT_REGIONS` filtruje regiony raportu, nieznane nazwy = warning + fallback top-10).
+- **Dashboard — Intelligence**: zakładki `Regions`, `Alliances`, `Players` (pop/growth/VP), `Events` (limit + total), `Wars` (macierz kto-komu, `metrics.conquests_between`), `Changes` (gap-aware), `Villages` (wyszukiwarka + historia); wykresy vendored Chart.js, eksporty CSV, filtr alliance (Combined = suma `ALLIANCE_TAGS` lub pojedynczy tag). Każda zakładka historyczna ma **własny zakres** (`7|30|60|Custom`, klucze URL `range_<tab>`/`from_<tab>`/`to_<tab>`, preferencja `mufon.dashboard.view.v2`); tabele historyczne pokazują **najnowsze obserwacje pierwsze** (dane Chart.js pozostają ASC); wars rozróżnia **conquest od zmiany sojuszu** (`same_player`/`AllianceChangeEvent` — ta sama osoba zmieniająca sojusz nigdy nie jest „conquered").
+- **Dashboard — Overview**: Status (freshness, ostatnie udane fetch/report, błędy), Job log (UTC), scheduler sync (zmiana settings przestawia realne triggery APScheduler); Overview jest command center bez powielania tile'ów operational (freshness/last-success żyją tylko w Status).
 - **Dashboard — Operations**: Actions (Fetch now / Send report now, rate limit), Settings (walidacja, sekrety nigdy w DB).
 - **Auth**: token mode (Bearer, constant-time, domyślny), Discord OAuth opt-in (HttpOnly cookie, RBAC member/admin, rate limit akcji), `none` tylko loopback; public pozostają `/`, `/static/*`, `/healthz`, `/readyz`, `/api/meta`, `/api/auth/*`.
 - **Operacyjne**: `/healthz` (liveness) vs `/readyz` (readiness), `/api/meta` z `build_sha`, CI quality → build-push GHCR → smoke → secret-scan, deploy/rollback po `IMAGE_TAG=<sha>`.
@@ -44,10 +44,14 @@ Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następ
 
 ### Potwierdzone luki (kolejność naprawy w §4–§7)
 
-- P0 trust/UX: brak tekstowej alternatywy wykresów, `.connection-state` zawsze „Local service", błędy tylko toastem (bez banneru/Retry), trzy background pollery (logi 15 s, status 60 s, analiza 60 s), `DASHBOARD_AUTH_MODE=none` bez guardu na nie-loopback bindzie, member bez bezpiecznego sygnału zdrowia jobów.
-- P0 funkcjonalne: `renderAllianceFilter` nie odtwarza przycisków po zmianie `ALLIANCE_TAGS`; `settingsFromForm` czyta kolor z inputa `type=color` zamiast `REPORT_EMBED_COLOR_TEXT`; pusty `TRACKED_ALLIANCES` ukrywa picker standings.
-- P1 Intelligence: `Events` limit 1000 bez offsetu, Village explorer limit 50 bez total/paginacji, brak wspólnego `from/to` w analizach, brak eksportów Players/Standings/Deltas, `/api/logs` bez filtrów, Regions ładuje pełne wiersze snapshotów.
-- P2 Watch/team: brak znormalizowanego watch feed i rosteru (osobny slice §7).
+- Brak otwartych luk P0/P1 — wszystkie pozycje z §4–§6 są wdrożone i objęte
+  testami (pytest + browser smoke).
+- Pozostałe prace są operacyjne (wdrożenie nowego obrazu serwera +
+  weryfikacja OAuth) oraz wyszczególnione w §8 jako świadomie poza planem.
+- Freshness/alerts i Watch/Roster **nie dostają drugiej implementacji**:
+  istniejące mechanizmy (`compute_freshness`, failure alerts, `analysis_watch`,
+  `analysis_roster`) są jedynymi ścieżkami — nowe zachowania wyłącznie je
+  rozszerzają.
 
 ## 4. P0 — Trust & UX (bieżąca praca; kolejność: kontrakty → stany → wygląd → funkcje)
 
@@ -66,7 +70,7 @@ Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następ
 - `GET /api/analysis/players/{id}/history` — agregacja po stabilnym `player_id`; 404 dla nieznanego, `present_in_latest` dla historycznego.
 - `GET /api/analysis/regions/{region}/villages?date=&alliance=&limit=200` — lista wiosek regionu z `side: tracked|other`, najnowsza data domyślnie.
 - Eksporty CSV Players / Standings / Deltas (klient-side, disabled przy pustym payloadzie); Events/Wars zachowują jawny limit — skrócony eksport nigdy nie jest nazywany „full".
-- Wspólny context bar Intelligence: `7|30|60`, alliance, baseline/current pair; stan w URL query + lokalnej preferencji (nie z tokenem); niepoprawne wartości → bezpieczne defaulty bez request loop.
+- Zakresy per zakładka (zamiast wspólnego context bara): każda zakładka historyczna (`regions`, `alliances`, `changes`, `events`, `wars`, `compare`, `watch`) ma własny `7|30|60|Custom` (custom = para From/To z `GET /api/analysis/dates`); `7` = ostatnie 7 dostępnych dat snapshotów; `from >= to` czyści widok i pokazuje błąd bez requestu; stan w URL (`range_<tab>`/`from_<tab>`/`to_<tab>`) + lokalna preferencja `mufon.dashboard.view.v2`; niepoprawne wartości → bezpieczny default 7 bez request loop.
 - Wydajność: agregacje w SQL (`GROUP BY snapshot_date, region, alliance_tag`), próg p95 Regions/Overview ≤ 1,0 s na seedzie 60k×7; przekroczenie = SQL aggregation/cache per `(db_path, snapshot_date, days, alliance)` w tej samej fazie.
 
 ## 6. P1 — Operations (po P0; kontrakty równoległe z §5)
@@ -79,9 +83,10 @@ Dane, widoki i mechanizmy **wdrożone i objęte testami** — nie są „następ
 
 ## 7. P2 — Watch & roster (jeden kontrolowany slice po P0/P1)
 
-- [x] `GET /api/analysis/watch?from=&to=&alliance=&limit=200` — znormalizowany `items[]` (`kind`: village_gained/lost/conquest/deleted, `severity`: info/warning, daty, village_id, tagi, population, message); reuse `village_events` + `conquests_between`, zero nowych alertów, zero Discord sends; mniej niż 2 snapshoty = 200 empty.
-- Zakładka `Watch`: filtry severity/kind, liczniki, linki do Village/Region/Player detail; stany no-data/gap jawne; kolor nigdy jedynym sygnałem.
+- [x] `GET /api/analysis/watch?from=&to=&alliance=&limit=200` — znormalizowany `items[]` (`kind`: village_gained/lost/conquest/deleted/alliance_change, `severity`: info/warning, daty, village_id, tagi, population, message); reuse `village_events` + `conquests_between` + `alliance_changes_between`, zero nowych alertów, zero Discord sends; mniej niż 2 snapshoty = 200 empty.
+- Zakładka `Watch`: filtry severity/kind (w tym `alliance_change`), liczniki, linki do Village/Region/Player detail; stany no-data/gap jawne; kolor nigdy jedynym sygnałem.
 - [x] `GET /api/analysis/roster?date=&alliance=&limit=200` — SQL aggregate po `player_id` (`player_id`, `player_name`, `alliance_tag`, `villages`, `population`, `vp`, `growth`); klik gracza → player history; brak listy wiosek w roster row.
+- [x] **Follow-up (dashboard-report-ux)**: raport dzienny ograniczony do top-10 regionów i standings z opcjonalnym `REPORT_REGIONS` (exact snapshot names, max 10, empty = top-10; nieznane nazwy → warning joba + fallback); `GET /api/analysis/standings` zwraca `available_tags` jako top-10 wg populacji na końcu zakresu + `available_total`/`available_truncated`; **uczciwe rozróżnienie conquest od zmiany sojuszu**: `VillageEvent.same_player` + `metrics.alliance_changes_between` (`player_id` bez zmiany = `alliance_change`, nigdy conquest/village_lost; wars/macierz liczy tylko realne przejęcia).
 - Po tym slice'u nie zaczynamy interaktywnej mapy ani oficjalnych statusów regionów — snapshot map data nie daje `locked/contested/secured`; następny kierunek wymaga osobnego kontraktu.
 
 ## 8. Świadomie NIE w planie (YAGNI) + Framework decision gate

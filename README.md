@@ -30,12 +30,14 @@ Product decisions, priorities and acceptance criteria live in
   stored snapshots, never from the live server.
 - **Daily report**: posted by the scheduler (or manually via the dashboard /
   `/raport`) as one Discord message with 3 embed cards — Summary KPI,
-  Regions (top-8 + movers) and Standings — covering the configured
-  alliances (the "combined" union of `ALLIANCE_TAGS`).
+  Regions (top-10 + movers, `REPORT_REGIONS`-selectable) and Standings
+  (top-10) — covering the configured alliances (the "combined" union of
+  `ALLIANCE_TAGS`).
 - **Dashboard** (`http://<host>:8099` on the LAN, see Deployment): status,
   settings, manual fetch/report, job log, and an Analysis section with
-  Regions / Alliances / Players / Events / Changes views, filterable per
-  alliance, with CSV export.
+  Regions / Alliances / Players / Events / Changes / Compare / Watch /
+  Roster / Villages views, filterable per alliance and per range, with CSV
+  export.
 
 ## Features
 
@@ -43,30 +45,34 @@ Product decisions, priorities and acceptance criteria live in
 
 - **Summary KPI card**: villages, players, total population, VP — with
   day-over-day deltas.
-- **Regions card**: top-8 regions by our share, with control % bar, Δ %
-  and the population still needed to reach 50% control; **movers**
-  (regions whose share changed the most) in the footer.
-- **Standings card**: population/VP per tracked alliance (allies + enemies)
-  with day-over-day deltas; our tags bolded.
+- **Regions card**: top-10 regions by our share (or exactly the
+  `REPORT_REGIONS` selection), with share %, Δ %, VP Δ and the population
+  still needed to reach 50% control; **movers** (regions whose share
+  changed the most) in the footer. The card uses a compact mobile-safe
+  layout — two short lines per region, no horizontal scroll on Discord
+  mobile.
+- **Standings card**: top-10 alliances by population (allies + enemies)
+  with day-over-day deltas; our tags bolded. Configured tags outside the
+  top-10 are not injected into the card.
 - **`/raport`** — posts the daily report to the invoking channel.
 - **`/wioski`** — full village events (gained + lost) for the latest day.
-- **`/regiony`** — full regions table with Δ %, not just the top-8.
+- **`/regiony`** — full regions table with Δ %, not just the top-10.
 - All three commands answer ephemerally; admin = `Manage Server`
   permission **or** the `ADMIN_ROLE_ID` role.
 
 ### Dashboard
 
 - **Views**: `Intelligence` (Regions, Alliances, Players, Events, Wars,
-  Changes, Compare, Watch, Roster, Villages — filterable per alliance
-  and range 7/30/60 days, with CSV export; player rows and region rows
-  open per-snapshot history / village drill-downs; Watch is a
-  dashboard-only feed of gains/losses/conquests/deletions that never
-  sends Discord), `Overview` (command center + Status + Job log),
-  `Operations` (Actions + Settings + run history, admin-only).
-- **Overview command center**: freshness, last successful fetch/report,
-  tracked KPI with day-over-day deltas, top regions, movement and quick
-  links — the same numbers the analysis tabs show, served by
-  `/api/analysis/overview`.
+  Changes, Compare, Watch, Roster, Villages — filterable per alliance;
+  every historical tab has its OWN range 7/30/60 days or a custom
+  From/To pair, with CSV export; player rows and region rows open
+  per-snapshot history / village drill-downs; Watch is a
+  dashboard-only feed of gains/losses/conquests/alliance-changes/
+  deletions that never sends Discord).
+- **Overview command center**: tracked KPI with day-over-day deltas, top
+  regions, movement and quick links — served by `/api/analysis/overview`.
+  Operational state (freshness, last successful fetch/report) lives ONLY
+  in the Status card, never duplicated here.
 - **Status / Job log**: snapshot overview, freshness (no-data/current/
   stale/gap), last successful fetch/report, schedule + alliance
   configuration (stored in SQLite, overrides env), and the job log with
@@ -127,6 +133,7 @@ default. Settings edited in the dashboard are stored in the DB and
 | `ALERT_CHANNEL_ID` | *(empty)* | Optional dedicated channel for failure alerts (snowflake) — env only, never in the DB. Empty = alerts disabled. One alert per failed fetch/report per UTC day. |
 | `ALLIANCE_TAGS` | *(empty)* | Comma-separated alliance tags, e.g. `UFO,PR-U`. Empty → daily report skipped with a warning. |
 | `TRACKED_ALLIANCES` | *(empty)* | Comma-separated tags of ALL alliances (allies + enemies) compared in the report's **Standings** card. OUR tags (`ALLIANCE_TAGS`) are bold; empty → no Standings card. |
+| `REPORT_REGIONS` | *(empty)* | Comma-separated region names shown in the report's **Regions** card (max 10; empty = top 10 by share). Names not found in the snapshot are skipped with a job warning; if none match, the card falls back to the top 10. |
 | `ADMIN_ROLE_ID` | *(empty)* | Role allowed to trigger `/raport` (empty = any member with Manage Server) and the dashboard admin role in OAuth mode. Dashboard admins in OAuth mode are `ADMIN_ROLE_ID` holders, the server owner, and Discord Administrator / Manage Server permission holders. |
 | `FETCH_HOUR` | `0` | Hour (24h) of the daily map.sql fetch. |
 | `FETCH_MINUTE` | `15` | Minute of the daily map.sql fetch. |
@@ -371,6 +378,10 @@ compute deltas against.
   The process exits before the dashboard starts, so `/healthz` never answers.
   Fix `.env`/settings and restart. Missing `ALLIANCE_TAGS` is **not** fatal:
   the daily report is skipped with a warning.
+- **The report's Regions card shows the top 10 instead of my selection**:
+  none of the `REPORT_REGIONS` names matched the snapshot — a job warning
+  lists the unknown names and the card falls back to the top 10 by share
+  (exact names only; a typo never erases the card).
 - **`401 unauthorized` on API calls**: token mode — wrong or missing
   `DASHBOARD_TOKEN` (the UI asks for it on first load); oauth mode — the
   session expired or the browser cleared storage (log in again).

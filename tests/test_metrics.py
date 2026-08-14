@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 
 from travian.metrics import (
+    alliance_changes_between,
     alliance_standings,
     compute_deltas,
     conquests_between,
@@ -316,6 +317,30 @@ class TestVillageEvents:
         assert event.new_owner_tag == "A8"
         assert event.new_owner_player == "P5"
         assert event.old_player == "P1"
+        assert event.same_player is False  # a different player took it
+
+    def test_lost_conquered_same_player_flag(self):
+        # The owner left the alliance (stable player_id): the flag tells the
+        # UI to render "Alliance changed to" instead of "conquered by".
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=8, alliance_tag="ZETA", player_id=1, player_name="P1")]
+
+        _, lost = village_events(prev, curr, {7})
+
+        assert len(lost) == 1
+        assert lost[0].event == "lost_conquered"
+        assert lost[0].same_player is True
+        assert lost[0].old_player == "P1"
+        assert lost[0].new_owner_player == "P1"
+
+    def test_gained_and_deleted_never_same_player(self):
+        prev = [_row(1, 7, 1), _row(2, 7, 1)]
+        curr = [_row(1, 7, 1), _row(3, 7, 2)]
+
+        gained, lost = village_events(prev, curr, {7})
+
+        assert gained[0].same_player is False
+        assert lost[0].same_player is False
 
     def test_same_alliance_player_change_not_an_event(self):
         prev = [_row(1, 7, 1)]
@@ -483,6 +508,17 @@ class TestConquestsBetween:
         assert conquests == []
         assert deleted == []
 
+    def test_same_player_transfer_is_not_conquest(self):
+        # The owner moved from one tracked alliance to another (stable
+        # player_id): an alliance change, NEVER a conquest.
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=8, alliance_tag="ZETA", player_id=1, player_name="P1")]
+
+        conquests, deleted = conquests_between(prev, curr, {7, 8})
+
+        assert conquests == []
+        assert deleted == []
+
     def test_same_alliance_change_ignored(self):
         # Tag rename + player change within the same alliance_id → no event.
         prev = [_row(1, 7, 1)]
@@ -560,6 +596,115 @@ class TestConquestsBetween:
             ("A9", "A7", 2),
         ]
         assert [(e.from_tag, e.village_id) for e in deleted] == [("A7", 5), ("A9", 4)]
+
+
+class TestAllianceChangesBetween:
+    """Same-player alliance switches: the owner moved, the village was not
+    taken. A village counts when it exists in both snapshots, the stable
+    ``player_id`` is unchanged, the alliance changed and at least one side
+    is tracked."""
+
+    def test_same_player_tracked_to_tracked(self):
+        prev = [_row(1, 7, 1, population=150, region="North")]
+        curr = [
+            make_village_row(
+                village_id=1,
+                alliance_id=8,
+                alliance_tag="ZETA",
+                player_id=1,
+                player_name="P1",
+                region="North",
+                population=160,
+            )
+        ]
+
+        changes = alliance_changes_between(prev, curr, {7, 8})
+
+        assert len(changes) == 1
+        event = changes[0]
+        assert event.village_id == 1
+        assert event.from_tag == "A7"
+        assert event.from_player == "P1"
+        assert event.to_tag == "ZETA"
+        assert event.to_player == "P1"
+        assert event.region == "North"
+        assert event.population == 160  # current snapshot
+
+    def test_ownership_change_ignored(self):
+        # Different player_id: a real conquest — the wars matrix owns it.
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=8, alliance_tag="ZETA", player_id=5, player_name="P5")]
+
+        changes = alliance_changes_between(prev, curr, {7, 8})
+
+        assert changes == []
+
+    def test_untracked_sides_ignored(self):
+        prev = [_row(1, 999, 3)]
+        curr = [make_village_row(village_id=1, alliance_id=888, alliance_tag="GHOST", player_id=3)]
+
+        changes = alliance_changes_between(prev, curr, {7})
+
+        assert changes == []
+
+    def test_one_tracked_side_counts(self):
+        # Tracked → untracked with the same player still matters to the
+        # tracked side (the owner left our comparison pool).
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=888, alliance_tag="GHOST", player_id=1)]
+
+        changes = alliance_changes_between(prev, curr, {7})
+
+        assert len(changes) == 1
+        assert changes[0].from_tag == "A7"
+        assert changes[0].to_tag == "GHOST"
+
+    def test_same_alliance_ignored(self):
+        prev = [_row(1, 7, 1)]
+        curr = [make_village_row(village_id=1, alliance_id=7, alliance_tag="WOLVERINE", player_id=1)]
+
+        changes = alliance_changes_between(prev, curr, {7})
+
+        assert changes == []
+
+    def test_new_and_deleted_villages_ignored(self):
+        prev = [_row(1, 7, 1)]
+        curr = [_row(1, 7, 1), _row(2, 8, 2)]
+
+        changes = alliance_changes_between(prev, curr, {7, 8})
+
+        assert changes == []
+
+    def test_none_prev_returns_empty(self):
+        curr = [_row(1, 7, 1)]
+
+        changes = alliance_changes_between(None, curr, {7})
+
+        assert changes == []
+
+    def test_deterministic_order(self):
+        prev = [
+            _row(1, 9, 1),  # B->A switch (x=1)
+            _row(2, 9, 1),  # B->A switch (x=2)
+            _row(3, 7, 2),  # A->B switch
+            _row(4, 9, 1),  # B stable
+            _row(5, 7, 1),  # A stable
+        ]
+        curr = [
+            make_village_row(village_id=1, alliance_id=7, alliance_tag="A7", player_id=1),
+            make_village_row(village_id=2, alliance_id=7, alliance_tag="A7", player_id=1),
+            make_village_row(village_id=3, alliance_id=9, alliance_tag="A9", player_id=2),
+            _row(4, 9, 1),
+            _row(5, 7, 1),
+        ]
+
+        changes = alliance_changes_between(prev, curr, {7, 9})
+
+        assert [(e.from_tag, e.to_tag, e.village_id) for e in changes] == [
+            ("A7", "A9", 3),
+            ("A9", "A7", 1),
+            ("A9", "A7", 2),
+        ]
 
 
 class TestRegionStats:

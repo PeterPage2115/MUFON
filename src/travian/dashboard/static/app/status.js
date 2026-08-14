@@ -249,10 +249,10 @@ export function loadStatus() {
 
 /* --- Overview command center (Faza 3) ---------------------------------------- */
 //
-// Role-aware landing content: freshness + last successful runs + tracked KPI
-// with honest deltas + top regions + movement + quick links. The payload
-// comes from /api/analysis/overview; last-success timestamps from the
-// status payload (job_health/last_successful_* — safe for members).
+// Role-aware landing content: tracked KPI with honest deltas + top regions +
+// movement + quick links. The payload comes from /api/analysis/overview.
+// Freshness and last-success timestamps live ONLY in the Status card — the
+// overview never duplicates operational state.
 
 function overviewEl(selector) {
   return document.querySelector(selector);
@@ -273,27 +273,14 @@ function setDeltaNote(el, delta, unit) {
   else el.classList.add("faint");
 }
 
-function renderOverview(payload, status) {
+function renderOverview(payload) {
   var grid = overviewEl("[data-overview-grid]");
   var empty = overviewEl("[data-overview-empty]");
   if (!grid) return;
 
   var summary = payload.summary || {};
   var current = summary.current || null;
-  var freshness = payload.freshness || {};
   var movement = payload.movement || {};
-
-  setText(overviewEl("[data-overview-freshness]"), freshnessLabel(freshness));
-  var note = overviewEl("[data-overview-freshness-note]");
-  if (note) {
-    var noteText = "from snapshots";
-    if (freshness.state === "no_data") noteText = "no snapshots stored";
-    else if (freshness.snapshot_date) noteText = "as of " + freshness.snapshot_date;
-    setText(note, noteText);
-  }
-
-  setText(overviewEl("[data-overview-last-fetch]"), formatTimestamp(status.last_successful_fetch));
-  setText(overviewEl("[data-overview-last-report]"), formatTimestamp(status.last_successful_report));
 
   var kpis = [
     ["villages", "villages"],
@@ -365,15 +352,16 @@ function renderOverview(payload, status) {
     links.appendChild(a);
   });
 
-  setText(overviewEl("[data-overview-asof]"), payload.latest_date ? "as of " + payload.latest_date : "");
+  setText(overviewEl("[data-overview-asof]"), payload.latest_date ? "Latest snapshot: " + payload.latest_date : "");
   if (empty) empty.hidden = true;
   grid.hidden = false;
 }
 
 export function loadOverview() {
-  return Promise.all([api.status(), api.analysis("overview", { days: 30 })])
-    .then(function (results) {
-      renderOverview(results[1], results[0]);
+  return api
+    .analysis("overview", { days: 30 })
+    .then(function (payload) {
+      renderOverview(payload);
     })
     .catch(function () {
       var grid = overviewEl("[data-overview-grid]");

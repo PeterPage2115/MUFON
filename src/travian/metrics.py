@@ -19,8 +19,15 @@ days produces no spurious gained/lost events. Documented decisions:
   therefore NOT an event.
 - **``lost_conquered``**: was ours in prev, still exists in curr, and curr
   owner's alliance is NOT in ``alliance_ids``. A same-alliance player change is
-  NOT an event (a v1.1 roster could report it).
+  NOT an event (a v1.1 roster could report it). The event carries
+  ``same_player`` (prev/curr ``player_id`` equality): a same-player alliance
+  switch is rendered as "alliance changed", never "conquered".
 - **``lost_deleted``**: was ours in prev, absent from curr entirely.
+- **Conquests vs alliance changes** (``conquests_between`` /
+  ``alliance_changes_between``): a tracked→tracked transition counts as a
+  CONQUEST only when the stable ``player_id`` changed; a same-player switch
+  (at least one side tracked) is an ``AllianceChangeEvent`` — the owner
+  moved, the village was not taken, and it never enters the Wars matrix.
 - **``prev_rows=None``** = no previous snapshot: deltas are ``None`` and there
   are no events (nothing to compare against). ``prev_rows=[]`` = a snapshot
   exists but has no such alliance (alliance founded yesterday): deltas are
@@ -55,6 +62,7 @@ import logging
 import sqlite3
 
 from travian.models import (
+    AllianceChangeEvent,
     AllianceStat,
     ConquestEvent,
     DeletedVillageEvent,
@@ -307,6 +315,7 @@ def village_events(
                     new_owner_player=curr_row.player_name,
                     old_player=prev_row.player_name,
                     region=curr_row.region,
+                    same_player=prev_row.player_id == curr_row.player_id,
                 )
             )
 
@@ -323,13 +332,17 @@ def conquests_between(
     """(conquests, deleted) events between two snapshots — tracked universe.
 
     Only ownership transitions where BOTH the old and the new alliance ids are
-    in ``tracked_ids`` and differ count as conquests. A tracked village gone
-    from the map counts as deleted. New villages, same-alliance changes, and
-    transitions involving an untracked alliance are ignored (the Events tab
-    covers those). ``prev_rows=None`` yields no events. Conquest events carry
-    the CURRENT row's region/population; deleted events carry the PREVIOUS
-    row's. Sort order: conquests by (from_tag, to_tag, x, y, village_id);
-    deleted by (from_tag, x, y, village_id) — stable, deterministic.
+    in ``tracked_ids`` and differ count as conquests — AND the stable
+    ``player_id`` must have changed (a same-player alliance switch is an
+    ``AllianceChangeEvent`` via ``alliance_changes_between``, never a
+    conquest; the owner moved, the village was not taken). A tracked village
+    gone from the map counts as deleted. New villages, same-alliance changes,
+    and transitions involving an untracked alliance are ignored (the Events
+    tab covers those). ``prev_rows=None`` yields no events. Conquest events
+    carry the CURRENT row's region/population; deleted events carry the
+    PREVIOUS row's. Sort order: conquests by (from_tag, to_tag, x, y,
+    village_id); deleted by (from_tag, x, y, village_id) — stable,
+    deterministic.
     """
     if prev_rows is None:
         return [], []
@@ -355,7 +368,11 @@ def conquests_between(
                     population=prev_row.population,
                 )
             )
-        elif curr_row.alliance_id in tracked_ids and curr_row.alliance_id != prev_row.alliance_id:
+        elif (
+            curr_row.alliance_id in tracked_ids
+            and curr_row.alliance_id != prev_row.alliance_id
+            and curr_row.player_id != prev_row.player_id
+        ):
             conquests.append(
                 ConquestEvent(
                     village_id=village_id,
@@ -374,6 +391,56 @@ def conquests_between(
     conquests.sort(key=lambda e: (e.from_tag, e.to_tag, e.x, e.y, e.village_id))
     deleted.sort(key=lambda e: (e.from_tag, e.x, e.y, e.village_id))
     return conquests, deleted
+
+
+def alliance_changes_between(
+    prev_rows: list[VillageRow] | None,
+    curr_rows: list[VillageRow],
+    tracked_ids: set[int],
+) -> list[AllianceChangeEvent]:
+    """Same-player alliance switches between two snapshots — tracked universe.
+
+    A village counts when it exists in BOTH snapshots, the stable
+    ``player_id`` is unchanged, the ``alliance_id`` changed and at least one
+    side is in ``tracked_ids`` (the other side may be untracked — the switch
+    still matters to the tracked side). New villages, same-alliance changes
+    and real ownership changes (different ``player_id`` → conquest) are
+    ignored. ``prev_rows=None`` yields no events. Events carry the CURRENT
+    row's region/population. Sort: (from_tag, to_tag, x, y, village_id) —
+    stable, deterministic.
+    """
+    if prev_rows is None:
+        return []
+    prev_by_id = {row.village_id: row for row in prev_rows}
+    curr_by_id = {row.village_id: row for row in curr_rows}
+
+    changes: list[AllianceChangeEvent] = []
+    for village_id, prev_row in prev_by_id.items():
+        curr_row = curr_by_id.get(village_id)
+        if curr_row is None:
+            continue
+        if curr_row.alliance_id == prev_row.alliance_id:
+            continue
+        if curr_row.player_id != prev_row.player_id:
+            continue
+        if prev_row.alliance_id not in tracked_ids and curr_row.alliance_id not in tracked_ids:
+            continue
+        changes.append(
+            AllianceChangeEvent(
+                village_id=village_id,
+                village_name=curr_row.name,
+                x=curr_row.x,
+                y=curr_row.y,
+                from_tag=prev_row.alliance_tag,
+                from_player=prev_row.player_name,
+                to_tag=curr_row.alliance_tag,
+                to_player=curr_row.player_name,
+                region=curr_row.region,
+                population=curr_row.population,
+            )
+        )
+    changes.sort(key=lambda e: (e.from_tag, e.to_tag, e.x, e.y, e.village_id))
+    return changes
 
 
 def region_alliance_totals(curr_rows: list[VillageRow]) -> dict[str, list[tuple[str, int]]]:

@@ -36,15 +36,21 @@ Endpoints:
 - ``GET /api/logs?n=50[&job=fetch|report|config|alert][&level=info|warning|error]``
   — newest-first ``job_log`` rows (n clamped 1..500; unknown filter values →
   422; filters applied in SQL).
-- ``GET /api/analysis/regions?days=30`` — region share series over the
-  window plus the latest-pair control table (``current`` rows carry the
-  server-computed ``active``/``controlled``/``to50_needed`` fields).
-- ``GET /api/analysis/standings?days=30[&tag=<t>]`` — population/VP series
-  per alliance (rows carry ``ours`` for the UI highlight). Without ``tag``:
-  the resolved ``TRACKED_ALLIANCES`` (legacy behavior); with repeated
-  ``tag=<t>``: exactly those tags (1..8, deduped, unknown → 422). Every
-  response adds ``available_tags`` (all current snapshot tags, alphabetical)
-  and ``default_tags`` (resolved ``TRACKED_ALLIANCES`` in config order).
+- ``GET /api/analysis/regions?days=30[&from=&to=]`` — region share series over
+  the window plus the latest-pair control table (``current`` rows carry the
+  server-computed ``active``/``controlled``/``to50_needed`` fields). The
+  window is the preset ``days`` (last N snapshot dates) OR an explicit
+  ``from``/``to`` pair with the same validation as Compare; payloads carry
+  ``range_from``/``range_to``/``current_date``/``previous_date`` and the
+  table is computed at the RANGE END.
+- ``GET /api/analysis/standings?days=30[&from=&to=][&tag=<t>]`` —
+  population/VP series per alliance (rows carry ``ours`` for the UI
+  highlight). Without ``tag``: the resolved ``TRACKED_ALLIANCES`` (legacy
+  behavior); with repeated ``tag=<t>``: exactly those tags (1..10, deduped,
+  unknown → 422). Every response adds ``available_tags`` (TOP 10 tags by
+  population at the range end), ``available_total``/``available_truncated``
+  and ``default_tags`` (resolved ``TRACKED_ALLIANCES`` trimmed to the
+  top-10, config order).
 - ``GET /api/analysis/dates`` — all snapshot dates ascending (Events tab
   selectors).
 - ``GET /api/analysis/events?from=&to=`` — gained/lost village events
@@ -54,10 +60,12 @@ Endpoints:
   between two dates, TRACKED_ALLIANCES universe (both sides of a conquest
   must be tracked; explicit dates must exist and ``from < to``; fewer than
   two dates → ``from``/``to`` null + empty results).
-- ``GET /api/analysis/deltas?days=30`` — headline history with day-over-day
-  deltas (``None`` on the oldest date).
+- ``GET /api/analysis/deltas?days=30[&from=&to=]`` — headline history with
+  day-over-day deltas (``None`` on the oldest date); same window contract
+  and range fields as regions/standings.
 - ``GET /api/analysis/players?alliance=<tag>`` — latest-pair top players:
-  population / growth / new-villages rankings (10 each).
+  population / growth / new-villages rankings (10 each), with the pair
+  named explicitly via ``snapshot_date``/``previous_date``.
 - ``GET /api/analysis/villages?q=&limit=50`` — village explorer search over
   the LATEST snapshot (whole map, no alliance filter): ``x|y``/``x,y`` as
   exact coordinates, otherwise a literal case-insensitive substring search
@@ -144,12 +152,19 @@ from travian import analysis, store
 from travian.build_info import get_build_info
 from travian.dashboard import auth
 from travian.metrics import (
+    alliance_changes_between,
     conquests_between,
     player_stats_from_aggregates,
     region_stats_from_aggregates,
     village_events,
 )
-from travian.models import ConquestEvent, DeletedVillageEvent, RegionDay, VillageEvent
+from travian.models import (
+    AllianceChangeEvent,
+    ConquestEvent,
+    DeletedVillageEvent,
+    RegionDay,
+    VillageEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +178,7 @@ ALLOWED_SETTINGS_KEYS: Final = frozenset(
     {
         "ALLIANCE_TAGS",
         "TRACKED_ALLIANCES",
+        "REPORT_REGIONS",
         "CHANNEL_ID",
         "FETCH_HOUR",
         "FETCH_MINUTE",
@@ -252,6 +268,7 @@ class SettingsPayload(TypedDict):
 
     ALLIANCE_TAGS: list[str]
     TRACKED_ALLIANCES: list[str]
+    REPORT_REGIONS: list[str]
     CHANNEL_ID: int | None
     FETCH_HOUR: int
     FETCH_MINUTE: int
@@ -297,6 +314,9 @@ class ConfigProtocol(Protocol):
 
     @property
     def tracked_alliances(self) -> list[str]: ...
+
+    @property
+    def report_regions(self) -> list[str]: ...
 
     @property
     def fetch_hour(self) -> int: ...
@@ -605,6 +625,45 @@ def _player_gains(conn: sqlite3.Connection, prev_date: str | None, curr_date: st
     return gains
 
 
+def _analysis_range(
+    all_dates: list[str], days: int, from_: str | None, to: str | None
+) -> tuple[list[str], str | None, str | None, str | None, str | None]:
+    """Resolve a history-tab window: preset ``days`` or an explicit pair.
+
+    Preset: the last ``days`` snapshot dates (all when fewer exist). Explicit
+    ``from``/``to``: both must be provided, must exist in ``all_dates`` and
+    satisfy ``from < to`` — the SAME validation contract as Compare (422
+    naming the problem). Returns ``(dates, range_from, range_to,
+    current_date, previous_date)`` — the window is always ascending and
+    ``current``/``previous`` are its last two dates.
+    """
+    if from_ is None and to is None:
+        dates = all_dates[-days:]
+        range_from = dates[0] if dates else None
+        range_to = dates[-1] if dates else None
+    else:
+        if from_ is None or to is None:
+            raise HTTPException(status_code=422, detail="'from' and 'to' must be provided together")
+        if from_ not in all_dates:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown 'from' date {from_!r} — valid dates: {', '.join(all_dates)}",
+            )
+        if to not in all_dates:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown 'to' date {to!r} — valid dates: {', '.join(all_dates)}",
+            )
+        if from_ >= to:
+            raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
+        dates = all_dates[all_dates.index(from_) : all_dates.index(to) + 1]
+        range_from = from_
+        range_to = to
+    current_date = dates[-1] if dates else None
+    previous_date = dates[-2] if len(dates) >= 2 else None
+    return dates, range_from, range_to, current_date, previous_date
+
+
 # --- snapshot-keyed analysis cache (Faza 3 performance contract) -----------------
 #
 # The Regions-tab payload is cached per (db_path, latest snapshot identity,
@@ -622,29 +681,38 @@ def _regions_payload_cached(
     days: int,
     alliance: str,
     alliance_tags: tuple[str, ...],
+    range_from: str,
+    range_to: str,
 ) -> dict[str, object]:
     """The full Regions-tab payload (series + current + top alliances).
 
     ``alliance_tags`` (sorted, already in the key) replaces the merged-config
     read: the caller resolves the tags fresh, so settings saves invalidate
-    the entry via the key.
+    the entry via the key. ``range_from``/``range_to`` ("" when the preset
+    days window is used) put the custom pair in the key — the window's data
+    is immutable per snapshot identity, so the entry can never go stale.
     """
     # ``latest_created_at`` is the snapshot identity half of the cache key —
     # deliberately not read: its only job is to invalidate the entry.
     _ = latest_created_at
     conn = store.connect(db_path)
     try:
-        dates = store.list_dates(conn)[-days:]
+        all_dates = store.list_dates(conn)
+        if range_from and range_to:
+            dates = all_dates[all_dates.index(range_from) : all_dates.index(range_to) + 1]
+        else:
+            dates = all_dates[-days:]
+        range_end = dates[-1] if dates else latest_date
         # Same resolution semantics as _resolve_alliance_ids, fed by the key.
         if alliance == "combined":
-            ids = _resolve_ids(conn, latest_date, list(alliance_tags))
+            ids = _resolve_ids(conn, range_end, list(alliance_tags))
         else:
             if alliance not in alliance_tags:
                 raise HTTPException(
                     status_code=422,
                     detail=f"unknown alliance {alliance!r} — valid: {', '.join(alliance_tags)}",
                 )
-            ids = set(store.alliance_ids_by_tag(conn, latest_date).get(alliance, []))
+            ids = set(store.alliance_ids_by_tag(conn, range_end).get(alliance, []))
         day_rows = store.region_days(conn, dates[0], dates[-1], ids)
         by_region: dict[str, list[RegionDay]] = {}
         for day in day_rows:
@@ -663,7 +731,7 @@ def _regions_payload_cached(
                 for (_, share), d in zip(share_series[region], days_list, strict=True)
             ]
         prev_date = dates[-2] if len(dates) >= 2 else None
-        curr_agg = store.region_aggregates(conn, latest_date, ids)
+        curr_agg = store.region_aggregates(conn, range_end, ids)
         prev_agg = store.region_aggregates(conn, prev_date, ids) if prev_date is not None else None
         stats = region_stats_from_aggregates(curr_agg, prev_agg)
         current: list[dict[str, object]] = []
@@ -675,9 +743,18 @@ def _regions_payload_cached(
             current.append(row)
         top_alliances = {
             region: [{"tag": tag, "population": population} for tag, population in pairs]
-            for region, pairs in store.region_alliance_totals_sql(conn, latest_date).items()
+            for region, pairs in store.region_alliance_totals_sql(conn, range_end).items()
         }
-        return {"dates": dates, "series": series, "current": current, "top_alliances": top_alliances}
+        return {
+            "dates": dates,
+            "series": series,
+            "current": current,
+            "top_alliances": top_alliances,
+            "range_from": dates[0] if dates else None,
+            "range_to": dates[-1] if dates else None,
+            "current_date": range_end,
+            "previous_date": prev_date,
+        }
     finally:
         conn.close()
 
@@ -710,7 +787,9 @@ def _event_dict(event: VillageEvent) -> dict[str, object]:
     """One village event in the events-browser payload shape.
 
     ``village_id`` lets the UI open the village history unambiguously, even
-    with repeated names and for ``lost_deleted`` villages.
+    with repeated names and for ``lost_deleted`` villages. ``same_player``
+    distinguishes an alliance switch (the owner moved) from a real conquest
+    — the UI renders ``Alliance changed to <tag>`` for it.
     """
     return {
         "village_id": event.village_id,
@@ -721,6 +800,7 @@ def _event_dict(event: VillageEvent) -> dict[str, object]:
         "event": event.event,
         "owner_tag": event.new_owner_tag,
         "owner_player": event.new_owner_player,
+        "same_player": event.same_player,
     }
 
 
@@ -758,6 +838,7 @@ def _settings_payload(cfg: ConfigProtocol) -> SettingsPayload:
     return SettingsPayload(
         ALLIANCE_TAGS=cfg.alliance_tags,
         TRACKED_ALLIANCES=cfg.tracked_alliances,
+        REPORT_REGIONS=cfg.report_regions,
         CHANNEL_ID=cfg.channel_id,
         FETCH_HOUR=cfg.fetch_hour,
         FETCH_MINUTE=cfg.fetch_minute,
@@ -906,6 +987,16 @@ def _validate_payload(payload: dict[str, object]) -> dict[str, store.JsonValue]:
             case "TRACKED_ALLIANCES":
                 # Empty is allowed: it just hides the Standings field.
                 validated[key] = cast(store.JsonValue, _normalize_tags("TRACKED_ALLIANCES", value))
+            case "REPORT_REGIONS":
+                # Empty is allowed: the daily report falls back to the top-10
+                # by share. Max 10 names (the report's compact list cap).
+                regions = _normalize_tags(key, value)
+                if len(regions) > 10:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"{key} supports at most 10 regions, got {len(regions)}",
+                    )
+                validated[key] = cast(store.JsonValue, regions)
             case "CHANNEL_ID":
                 validated[key] = _int_setting(key, value)
             case "FETCH_HOUR" | "REPORT_HOUR":
@@ -1368,6 +1459,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     async def analysis_regions(
         days: Annotated[int, Query(ge=2, le=60)] = 30,
         alliance: str | None = None,
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
     ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -1375,7 +1468,18 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"dates": [], "series": {}, "current": [], "top_alliances": {}}
+                    return {
+                        "dates": [],
+                        "series": {},
+                        "current": [],
+                        "top_alliances": {},
+                        "range_from": None,
+                        "range_to": None,
+                        "current_date": None,
+                        "previous_date": None,
+                    }
+                all_dates = store.list_dates(conn)
+                _, range_from, range_to, _, _ = _analysis_range(all_dates, days, from_, to)
                 return _regions_payload_cached(
                     db_path,
                     latest.snapshot_date,
@@ -1383,6 +1487,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                     days,
                     alliance or "combined",
                     tuple(sorted(cfg.alliance_tags)),
+                    range_from or "",
+                    range_to or "",
                 )
             finally:
                 conn.close()
@@ -1392,6 +1498,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     async def analysis_standings(
         days: Annotated[int, Query(ge=2, le=60)] = 30,
         tag: Annotated[list[str] | None, Query()] = None,
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
     ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -1399,16 +1507,43 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"dates": [], "series": [], "available_tags": [], "default_tags": []}
-                by_tag = store.alliance_ids_by_tag(conn, latest.snapshot_date)
-                available_tags = sorted(by_tag)
+                    return {
+                        "dates": [],
+                        "series": [],
+                        "available_tags": [],
+                        "available_total": 0,
+                        "available_truncated": 0,
+                        "default_tags": [],
+                        "range_from": None,
+                        "range_to": None,
+                        "current_date": None,
+                        "previous_date": None,
+                    }
+                all_dates = store.list_dates(conn)
+                dates, range_from, range_to, current_date, previous_date = _analysis_range(
+                    all_dates, days, from_, to
+                )
+                by_tag = store.alliance_ids_by_tag(conn, dates[-1])
+                # The picker catalog is the TOP 10 tags by population at the
+                # end of the selected range — tags outside it are not
+                # silently injected into the chart.
+                all_ids = {alliance_id for ids in by_tag.values() for alliance_id in ids}
+                day_rows = store.alliance_days(conn, dates[-1], dates[-1], all_ids)
+                pop_by_id = {row.alliance_id: row.population for row in day_rows}
+                ranked_tags = sorted(
+                    by_tag,
+                    key=lambda t: (-sum(pop_by_id.get(alliance_id, 0) for alliance_id in by_tag[t]), t),
+                )
+                available_tags = ranked_tags[:10]
+                available_total = len(by_tag)
+                available_truncated = max(0, available_total - 10)
+                available_set = set(available_tags)
                 default_tags: list[str] = []
                 for configured in cfg.tracked_alliances:
-                    if configured in by_tag and configured not in default_tags:
+                    if configured in by_tag and configured in available_set and configured not in default_tags:
                         default_tags.append(configured)
-                dates = store.list_dates(conn)[-days:]
                 if tag is None:
-                    ids = _resolve_ids(conn, latest.snapshot_date, cfg.tracked_alliances)
+                    ids = _resolve_ids(conn, dates[-1], cfg.tracked_alliances)
                 else:
                     unique: list[str] = []
                     for value in tag:
@@ -1416,8 +1551,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                             unique.append(value)
                     if not unique:
                         raise HTTPException(status_code=422, detail="standings requires at least one tag")
-                    if len(unique) > 8:
-                        raise HTTPException(status_code=422, detail="standings supports at most 8 tags")
+                    if len(unique) > 10:
+                        raise HTTPException(status_code=422, detail="standings supports at most 10 tags")
                     for value in unique:
                         if value not in by_tag:
                             raise HTTPException(
@@ -1427,13 +1562,19 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                     ids = {alliance_id for value in unique for alliance_id in by_tag[value]}
                 series: list[dict[str, object]] = []
                 if ids:
-                    day_rows = store.alliance_days(conn, dates[0], dates[-1], ids)
-                    series = analysis.standings_series(day_rows, set(cfg.alliance_tags))
+                    window_rows = store.alliance_days(conn, dates[0], dates[-1], ids)
+                    series = analysis.standings_series(window_rows, set(cfg.alliance_tags))
                 return {
                     "dates": dates,
                     "series": series,
                     "available_tags": available_tags,
+                    "available_total": available_total,
+                    "available_truncated": available_truncated,
                     "default_tags": default_tags,
+                    "range_from": range_from,
+                    "range_to": range_to,
+                    "current_date": current_date,
+                    "previous_date": previous_date,
                 }
             finally:
                 conn.close()
@@ -1932,8 +2073,12 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 curr_rows = store.load_villages(conn, to_date)
                 gained, lost = village_events(prev_rows, curr_rows, ids)
                 conquests, tracked_deleted = conquests_between(prev_rows, curr_rows, tracked_ids)
+                alliance_changes: list[AllianceChangeEvent] = alliance_changes_between(
+                    prev_rows, curr_rows, tracked_ids
+                )
                 conquered_ids = {event.village_id for event in conquests}
                 tracked_deleted_ids = {event.village_id for event in tracked_deleted}
+                alliance_change_ids = {event.village_id for event in alliance_changes}
 
                 items: list[dict[str, object]] = []
                 for event in gained:
@@ -1950,6 +2095,24 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                             "to_tag": _village_tag(conn, to_date, event.village_id),
                             "population": _village_population(conn, to_date, event.village_id),
                             "message": f"{event.village_name} gained by {event.new_owner_player or 'unknown'}",
+                        }
+                    )
+                for event in alliance_changes:
+                    # A same-player alliance switch: the direction lives in
+                    # the tags field only — the message never repeats it.
+                    items.append(
+                        {
+                            "kind": "alliance_change",
+                            "severity": "info",
+                            "from": from_date,
+                            "to": to_date,
+                            "village_id": event.village_id,
+                            "village_name": event.village_name,
+                            "region": event.region,
+                            "from_tag": event.from_tag,
+                            "to_tag": event.to_tag,
+                            "population": event.population,
+                            "message": f"{event.village_name} alliance changed",
                         }
                     )
                 for event in tracked_deleted:
@@ -1989,9 +2152,14 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                                 "message": f"{event.village_name} deleted from the map",
                             }
                         )
-                    elif event.village_id not in conquered_ids:
-                        # A tracked→tracked transition is the wars conquest;
-                        # everything else leaving OUR alliance is a plain loss.
+                    elif (
+                        event.village_id not in conquered_ids
+                        and event.village_id not in alliance_change_ids
+                    ):
+                        # A tracked→tracked real conquest is the wars conquest;
+                        # a same-player tracked switch is the alliance_change
+                        # item; everything else leaving OUR alliance is a
+                        # plain loss — each village appears exactly once.
                         items.append(
                             {
                                 "kind": "village_lost",
@@ -2022,7 +2190,9 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                             "from_tag": event.from_tag,
                             "to_tag": event.to_tag,
                             "population": event.population,
-                            "message": f"{event.village_name} conquered {event.from_tag} \u2192 {event.to_tag}",
+                            # The direction is the tags field's job — the
+                            # message states the fact, never repeats it.
+                            "message": f"{event.village_name} conquered",
                         }
                     )
                 # Deterministic order: severity first (warnings on top), then
@@ -2114,7 +2284,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         """Latest-pair top players: population / growth / new villages / VP (10 each).
 
         Same pair semantics as the regions table's ``current`` block (latest
-        snapshot vs the previous one); no snapshot → four empty lists.
+        snapshot vs the previous one); ``snapshot_date``/``previous_date``
+        name that pair explicitly; no snapshot → four empty lists.
         """
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -2122,7 +2293,14 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"population": [], "growth": [], "new_villages": [], "vp": []}
+                    return {
+                        "population": [],
+                        "growth": [],
+                        "new_villages": [],
+                        "vp": [],
+                        "snapshot_date": None,
+                        "previous_date": None,
+                    }
                 dates = store.list_dates(conn)
                 prev_date = dates[-2] if len(dates) >= 2 else None
                 ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
@@ -2135,6 +2313,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                     "growth": [stat.model_dump() for stat in rankings["growth"]],
                     "new_villages": [stat.model_dump() for stat in rankings["new_villages"]],
                     "vp": [stat.model_dump() for stat in rankings["vp"]],
+                    "snapshot_date": latest.snapshot_date,
+                    "previous_date": prev_date,
                 }
             finally:
                 conn.close()
@@ -2143,6 +2323,8 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     async def analysis_deltas(
         days: Annotated[int, Query(ge=2, le=60)] = 30,
         alliance: str | None = None,
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
     ) -> dict[str, object]:
         def read() -> dict[str, object]:
             conn = store.connect(db_path)
@@ -2150,11 +2332,28 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 cfg = deps.get_config()
                 latest = store.load_latest(conn)
                 if latest is None:
-                    return {"dates": [], "rows": []}
-                dates = store.list_dates(conn)[-days:]
-                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
+                    return {
+                        "dates": [],
+                        "rows": [],
+                        "range_from": None,
+                        "range_to": None,
+                        "current_date": None,
+                        "previous_date": None,
+                    }
+                all_dates = store.list_dates(conn)
+                dates, range_from, range_to, current_date, previous_date = _analysis_range(
+                    all_dates, days, from_, to
+                )
+                ids = _resolve_alliance_ids(conn, dates[-1], cfg, alliance)
                 day_rows = store.summary_days(conn, dates[0], dates[-1], ids)
-                return {"dates": dates, "rows": analysis.summary_history(day_rows)}
+                return {
+                    "dates": dates,
+                    "rows": analysis.summary_history(day_rows),
+                    "range_from": range_from,
+                    "range_to": range_to,
+                    "current_date": current_date,
+                    "previous_date": previous_date,
+                }
             finally:
                 conn.close()
 

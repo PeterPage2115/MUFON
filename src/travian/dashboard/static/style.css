@@ -2317,17 +2317,18 @@ tr.is-inactive td {
     padding-inline: var(--space-3);
   }
 
-  /* Both tab bars scroll locally on phones instead of widening the
-     document (the view bar too, not just the six analysis tabs). */
+  /* Both tab bars WRAP on phones instead of scrolling horizontally: every
+     label stays visible without a horizontal tab strip (the document never
+     widens, tables keep their own local scroller). */
   .tab-bar--views,
   .tab-bar--analysis {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    flex-wrap: wrap;
   }
 
   .tab-bar--views .tab-bar__tab,
   .tab-bar--analysis .tab-bar__tab {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    white-space: nowrap;
   }
 
   .analysis-controls {

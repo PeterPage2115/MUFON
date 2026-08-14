@@ -154,7 +154,9 @@ def _seed_wars_db(db: Path) -> None:
         "2026-08-08",
         [
             _row(1, x=1, population=110, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
-            _row(2, x=2, population=210, player_id=2000, player_name="ENEMY-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            # Real ownership changes (different players) — a same-player
+            # switch would be an alliance change, never a wars conquest.
+            _row(2, x=2, population=210, player_id=2001, player_name="NOVA-P1", alliance_id=NOVA_ID, alliance_tag="NOVA"),
             _row(3, x=3, population=310, player_id=2003, player_name="ENEMY-P3", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
             _row(6, x=6, population=610, player_id=9006, player_name="GHOST-P6", alliance_id=999, alliance_tag="GHOST"),
             _row(7, x=7, population=700, player_id=1007, player_name="NOVA-P7", alliance_id=NOVA_ID, alliance_tag="NOVA"),
@@ -222,6 +224,34 @@ def browser_app_no_tracked(tmp_path: Path) -> Generator[tuple[str, Browser], Non
 
 
 @pytest.fixture()
+def browser_app_logs(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard with a NON-EMPTY job log (fetch/report/config rows)
+    — the MAX_LOGS rendering regression scenario."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_logs_db)
+
+
+@pytest.fixture()
+def browser_app_dates3(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over THREE snapshot dates (2026-08-06/07/08) —
+    the newest-first history ordering scenario."""
+    yield from _browser_app_with_auth(tmp_path, auth_mode="none", token="", seed=_seed_dates3_db)
+
+
+@pytest.fixture()
+def browser_app_watch_change(tmp_path: Path) -> Generator[tuple[str, Browser], None, None]:
+    """Auth-free dashboard over a same-player alliance switch (village 3) +
+    a real conquest (village 2) — the conquest-vs-alliance-change scenario.
+    ALLIANCE_TAGS is NOVA-only so the Events tab sees the switch as a loss."""
+    yield from _browser_app_with_auth(
+        tmp_path,
+        auth_mode="none",
+        token="",
+        seed=_seed_watch_change_db,
+        env_overrides={"ALLIANCE_TAGS": "NOVA"},
+    )
+
+
+@pytest.fixture()
 def browser_app_oauth_member(tmp_path: Path, monkeypatch) -> Generator[tuple[str, Browser], None, None]:
     """OAuth-mode dashboard where the logged-in user is a plain member.
 
@@ -244,6 +274,58 @@ def _seed_empty_db(db: Path) -> None:
     """Schema only, no snapshots — the empty/no-data contract."""
     conn = store.connect(db)
     store.init_schema(conn)
+    conn.close()
+
+
+def _seed_logs_db(db: Path) -> None:
+    """The browser seed plus a NON-EMPTY job log (3 rows)."""
+    _seed_browser_db(db)
+    conn = store.connect(db)
+    store.append_log(conn, "fetch", "info", "snapshot saved for 2026-08-08 (442 villages)")
+    store.append_log(conn, "report", "info", "report sent to channel 111111111111111111 (snapshot 2026-08-08)")
+    store.append_log(conn, "config", "warning", "unresolved alliance tags: []")
+    conn.close()
+
+
+def _seed_dates3_db(db: Path) -> None:
+    """Three snapshot dates with a single growing NOVA village — enough
+    history for the newest-first ordering assertions."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    for day, pop in (("2026-08-06", 100), ("2026-08-07", 110), ("2026-08-08", 120)):
+        store.save_snapshot(
+            conn,
+            day,
+            [_row(1, x=1, population=pop, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA")],
+        )
+    conn.close()
+
+
+def _seed_watch_change_db(db: Path) -> None:
+    """Same-player alliance switch (village 3: NOVA-P3 → ENEMY, SAME player)
+    + a real conquest (village 2: ENEMY-P0 → NOVA-P1, DIFFERENT player) +
+    a stable village (1). The switch must appear exactly once, as an
+    alliance change — never conquest, never village_lost."""
+    conn = store.connect(db)
+    store.init_schema(conn)
+    store.save_snapshot(
+        conn,
+        "2026-08-07",
+        [
+            _row(1, x=1, population=100, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(2, x=2, population=200, player_id=2000, player_name="ENEMY-P0", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
+            _row(3, x=3, population=300, player_id=1003, player_name="NOVA-P3", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+        ],
+    )
+    store.save_snapshot(
+        conn,
+        "2026-08-08",
+        [
+            _row(1, x=1, population=110, player_id=1000, player_name="NOVA-P0", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(2, x=2, population=210, player_id=2001, player_name="NOVA-P1", alliance_id=NOVA_ID, alliance_tag="NOVA"),
+            _row(3, x=3, population=310, player_id=1003, player_name="NOVA-P3", alliance_id=ENEMY_ID, alliance_tag="ENEMY"),
+        ],
+    )
     conn.close()
 
 
@@ -816,6 +898,18 @@ def test_operations_admin_flow_with_token(browser_app_token: tuple[str, Browser]
         "() => document.getElementById('fetch-action').getAttribute('aria-busy') === 'false'"
     )
     assert page.get_attribute("#fetch-action", "aria-busy") == "false"
+    # The button is fully idle: enabled, no loading class, and the SAME
+    # action can run again (the log refresh can never strand it).
+    assert page.get_attribute("#fetch-action", "disabled") is None
+    assert page.locator("#fetch-action.is-loading").count() == 0
+    assert page.text_content("#fetch-action .button-label").strip() == "Fetch now"
+    page.click("#fetch-action")
+    page.wait_for_function(
+        "() => { const fb = document.querySelector('#action-feedback span:last-child'); return fb && fb.textContent.includes('Result: completed'); }"
+    )
+    page.wait_for_function(
+        "() => document.getElementById('fetch-action').getAttribute('aria-busy') === 'false'"
+    )
     assert errors == []
     page.close()
 
@@ -933,6 +1027,16 @@ def test_mobile_375_no_document_scroll_and_full_regions_table(browser_app: tuple
         "() => document.documentElement.scrollWidth <= window.innerWidth + 1"
     )
     assert no_overflow
+    # Both tab bars WRAP on phones: no horizontal strip, every label
+    # reachable (the old overflow-x strip is gone).
+    bars = page.evaluate(
+        "() => Array.from(document.querySelectorAll('.tab-bar--views, .tab-bar--analysis')).map((el) => el.scrollWidth <= el.clientWidth + 1)"
+    )
+    assert bars and all(bars), bars
+    analysis_labels = page.evaluate(
+        "() => Array.from(document.querySelectorAll('#analysis-tabs .tab-bar__tab')).map((t) => t.textContent.trim())"
+    )
+    assert analysis_labels == ["Regions", "Alliances", "Players", "Events", "Wars", "Changes", "Compare", "Watch", "Roster", "Villages"]
     # The table keeps every column; the wrap scrolls locally instead.
     assert page.locator("[data-regions-body] tr").count() == 1
     first_row_cells = page.locator("[data-regions-body] tr").first.locator("td")
@@ -996,8 +1100,8 @@ def test_chart_data_table_textual_fallback(browser_app: tuple[str, Browser]) -> 
     assert "Date" in head and "Share" in head and "Our pop" in head and "Total pop" in head
     body = page.text_content("#chart-data-regions tbody")
     assert "2026-08-08" in body and "%" in body
-    # The data-as-of caption names the server-provided latest date.
-    assert "as of 2026-08-08" in page.text_content('[data-as-of="regions"]')
+    # The chart caption names the SELECTED RANGE, not a single "latest".
+    assert "Selected range: 2026-08-07 → 2026-08-08" in page.text_content('[data-as-of="regions"]')
 
     # Village chart table (history payload) — Village 1 exists on both days;
     # its owner NOVA-P0 is a unique player-name match (population-ordered
@@ -1226,8 +1330,8 @@ def test_events_from_equals_to_hides_stale_list(browser_app: tuple[str, Browser]
     # Both selects to the same date → error + hidden grid.
     page.select_option("#analysis-events-from", "2026-08-08")
     page.select_option("#analysis-events-to", "2026-08-08")
-    assert page.evaluate("() => document.querySelector('.analysis-controls__error').hidden === false")
-    assert "From must be earlier than To." in page.text_content(".analysis-controls__error")
+    assert page.evaluate("() => document.getElementById('analysis-events-error').hidden === false")
+    assert "From must be earlier than To." in page.text_content("#analysis-events-error")
     assert page.evaluate("() => document.querySelector('.events-grid').hidden === true")
     page.close()
 
@@ -1299,8 +1403,9 @@ def test_no_background_polling_after_initial_load(browser_app: tuple[str, Browse
 
 
 def test_overview_command_center_renders(browser_app: tuple[str, Browser]) -> None:
-    """Admin landing shows the command center: freshness, tracked KPIs with
-    honest deltas, movement, top regions and quick links."""
+    """Admin landing shows the command center: tracked KPIs with honest
+    deltas, movement, top regions and quick links — WITHOUT duplicating the
+    Status card's freshness/last-success tiles."""
     url, browser = browser_app
     page = browser.new_page()
     page.set_default_timeout(15000)
@@ -1311,12 +1416,17 @@ def test_overview_command_center_renders(browser_app: tuple[str, Browser]) -> No
     # Tracked KPIs from the seeded pair (villages 442: 2 base + 440 gained).
     assert page.text_content("[data-overview-villages]").strip() == "442"
     assert page.text_content("[data-overview-villages-delta]").strip() == "+440"
-    # Freshness + last successful runs come from the safe status surface.
-    assert "Stale" in page.text_content("[data-overview-freshness]")
-    assert page.text_content("[data-overview-last-fetch]").strip() == "Never"
+    # Operational tiles live ONLY in Status: the overview never re-renders
+    # them (freshness / last successful fetch / report).
+    assert page.locator("[data-overview-freshness]").count() == 0
+    assert page.locator("[data-overview-last-fetch]").count() == 0
+    assert page.locator("[data-overview-last-report]").count() == 0
+    assert page.locator('[data-status-value="freshness"]').count() == 1
     # Movement + top regions.
     assert "440 gained" in page.text_content("[data-overview-movement]")
     assert "Testland" in page.text_content("[data-overview-regions]")
+    # The overview names its snapshot explicitly ("Latest snapshot:").
+    assert "Latest snapshot: 2026-08-08" in page.text_content("[data-overview-asof]")
     # Quick links: analysis views + Operations (admin).
     links = page.text_content("[data-overview-links]")
     assert "Regions" in links and "Compare periods" in links and "Operations" in links
@@ -1332,47 +1442,59 @@ def test_overview_command_center_empty_db(browser_app_empty: tuple[str, Browser]
     page.wait_for_function(
         "() => { const el = document.querySelector('[data-overview-grid]'); return el && el.hidden === false; }"
     )
-    assert page.text_content("[data-overview-freshness]").strip() == "No data"
     assert page.text_content("[data-overview-villages]").strip() == "—"
     assert "No regions yet." in page.text_content("[data-overview-regions]")
     page.close()
 
 
-def test_url_state_days_tab_and_alliance(browser_app: tuple[str, Browser]) -> None:
-    """URL state drives the Intelligence context: ?tab=players&days=7 activates
-    the tab and the range; invalid values fall back to safe defaults."""
+def test_url_state_range_tab_and_alliance(browser_app: tuple[str, Browser]) -> None:
+    """URL state drives the Intelligence context: ?tab=changes&range_changes=30
+    activates the tab and ITS range; each tab keeps its own range keys."""
     url, browser = browser_app
     page = browser.new_page()
     page.set_default_timeout(15000)
-    page.goto(url + "?view=intelligence&tab=players&days=7", wait_until="domcontentloaded")
+    page.goto(url + "?view=intelligence&tab=changes&range_changes=30", wait_until="domcontentloaded")
     page.wait_for_function(
-        "() => document.getElementById('panel-players').getAttribute('aria-busy') === 'false'"
+        "() => document.getElementById('panel-changes').getAttribute('aria-busy') === 'false'"
     )
-    assert page.get_attribute("#tab-players", "aria-selected") == "true"
-    assert page.input_value("#analysis-days") == "7"
-    assert page.get_attribute("#dashboard-panel-intelligence", "hidden") is None
-    # The range caption reflects the chosen window.
-    assert "Last 7 days" in page.text_content("[data-analysis-range]")
+    assert page.get_attribute("#tab-changes", "aria-selected") == "true"
+    assert page.input_value("#range-changes") == "30"
+    assert page.input_value("#range-regions") == "7"  # untouched tab keeps its default
+    assert "range_changes=30" in page.url
+    assert "range_regions" not in page.url  # default 7 is not written
 
-    # Changing the range reloads the active tab and updates the URL.
-    page.select_option("#analysis-days", "60")
-    page.wait_for_function(
-        "() => document.getElementById('panel-players').getAttribute('aria-busy') === 'false'"
-    )
-    assert "days=60" in page.url
-    page.close()
+    # The changes range reports its window in the toolbar.
+    assert "Selected range: 2026-08-07" in page.text_content("[data-changes-toolbar]")
 
-
-def test_url_state_invalid_days_falls_back(browser_app: tuple[str, Browser]) -> None:
-    """An invalid days value is rejected to the 30-day default (no request loop)."""
-    url, browser = browser_app
-    page = browser.new_page()
-    page.set_default_timeout(15000)
-    page.goto(url + "?view=intelligence&days=99", wait_until="domcontentloaded")
+    # Changing the REGIONS range never touches the CHANGES range.
+    page.click("#tab-regions")
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
-    assert page.input_value("#analysis-days") == "30"
+    page.select_option("#range-regions", "60")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    assert "range_regions=60" in page.url
+    assert "range_changes=30" in page.url
+    page.click("#tab-changes")
+    assert page.input_value("#range-changes") == "30"
+    page.close()
+
+
+def test_url_state_invalid_range_falls_back(browser_app: tuple[str, Browser]) -> None:
+    """An invalid per-tab range value is rejected to the 7-day default
+    (no request loop, no broken pair)."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence&range_regions=99&range_changes=custom", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.input_value("#range-regions") == "7"
+    # Incomplete custom (no from/to) also lands on the safe default.
+    assert page.input_value("#range-changes") == "7"
     page.close()
 
 
@@ -1467,14 +1589,14 @@ def test_players_standings_and_compare_exports(browser_app: tuple[str, Browser])
     page.wait_for_function(
         "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
     )
-    # Players export enabled once the payload exists.
+    # Players export names the LATEST snapshot pair explicitly.
     page.click("#tab-players")
     page.wait_for_function(
         "() => !document.querySelector('[data-export=\"players\"]').disabled"
     )
     with page.expect_download() as download_info:
         page.click('[data-export="players"]')
-    assert "players-latest.csv" in download_info.value.suggested_filename
+    assert "players-2026-08-08.csv" in download_info.value.suggested_filename
 
     # Standings export.
     page.click("#tab-alliances")
@@ -1710,4 +1832,204 @@ def test_roster_export(browser_app: tuple[str, Browser]) -> None:
     with page.expect_download() as download_info:
         page.click('[data-export="roster"]')
     assert "roster-2026-08-08-combined.csv" in download_info.value.suggested_filename
+    page.close()
+
+
+# --- dashboard-report-ux slice -------------------------------------------------
+
+
+def test_version_header_from_meta(browser_app: tuple[str, Browser]) -> None:
+    """The header shows the installed VERSION (v<version>); /api/meta keeps
+    both version and build_sha for deployment verification."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.querySelector('[data-header-build]').textContent.startsWith('v')"
+    )
+    meta = httpx.get(url + "/api/meta").json()
+    assert set(meta) == {"version", "build_sha"}
+    assert page.text_content("[data-header-build]").strip() == "v" + meta["version"]
+    page.close()
+
+
+def test_log_refresh_with_entries(browser_app_logs: tuple[str, Browser]) -> None:
+    """A NON-EMPTY job log renders on the Overview and survives a manual
+    Refresh without page errors (the MAX_LOGS ReferenceError regression:
+    the old code stranded on undefined MAX_LOGS)."""
+    url, browser = browser_app_logs
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('job-log'); return el && el.getAttribute('aria-busy') === 'false'; }"
+    )
+    assert "snapshot saved for 2026-08-08" in page.text_content("#job-log")
+    assert page.text_content("#log-count").strip() == "3 entries"
+    assert errors == []
+
+    # Manual Refresh re-renders the same entries and settles to idle.
+    page.click("#refresh-dashboard")
+    page.wait_for_function(
+        "() => document.getElementById('refresh-dashboard').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.get_attribute("#job-log", "aria-busy") == "false"
+    assert "snapshot saved for 2026-08-08" in page.text_content("#job-log")
+    assert page.text_content("#log-count").strip() == "3 entries"
+    assert errors == []
+    page.close()
+
+
+def test_per_tab_ranges_independent_and_custom(browser_app: tuple[str, Browser]) -> None:
+    """Each historical tab owns exactly one range: regions 30 stays 30 while
+    changes stays 7; a custom events pair writes ONLY its own URL keys and
+    never touches Compare; the first load defaults every tab to 7."""
+    url, browser = browser_app
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # First load: 7 everywhere, no range keys in the URL.
+    assert page.input_value("#range-regions") == "7"
+    assert page.input_value("#range-events") == "7"
+    assert "range_" not in page.url
+
+    # Regions 30 → its own URL key; the toolbar names the latest pair and
+    # the chart caption the selected range (no duplicate "latest" copy).
+    page.select_option("#range-regions", "30")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    assert "range_regions=30" in page.url
+    assert "Latest snapshot: 2026-08-08 vs previous snapshot" in page.text_content("[data-regions-toolbar]")
+    assert "Selected range: 2026-08-07 → 2026-08-08" in page.text_content('[data-as-of="regions"]')
+
+    # Changes stays 7 — the regions choice never leaks across tabs.
+    page.click("#tab-changes")
+    page.wait_for_function(
+        "() => document.getElementById('panel-changes').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.input_value("#range-changes") == "7"
+    page.click("#tab-regions")
+    assert page.input_value("#range-regions") == "30"
+
+    # Events custom pair: only its own URL keys appear.
+    page.click("#tab-events")
+    page.wait_for_function(
+        "() => document.getElementById('panel-events').getAttribute('aria-busy') === 'false'"
+    )
+    page.select_option("#range-events", "custom")
+    page.wait_for_function("() => window.location.search.includes('range_events=custom')")
+    assert "from_events=2026-08-07" in page.url
+    assert "to_events=2026-08-08" in page.url
+    assert "from_compare" not in page.url
+
+    # Compare keeps its own 7-day default.
+    page.click("#tab-compare")
+    page.wait_for_function(
+        "() => document.getElementById('panel-compare').getAttribute('aria-busy') === 'false'"
+    )
+    assert page.input_value("#range-compare") == "7"
+    assert "from_compare" not in page.url
+    page.close()
+
+
+def test_history_tables_newest_first(browser_app_dates3: tuple[str, Browser]) -> None:
+    """Newest observations render FIRST in the history tables (Changes,
+    chart data tables, village history) while the Chart.js payloads stay
+    ASC — the table order never contradicts the trend axis."""
+    url, browser = browser_app_dates3
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Changes table: newest first, oldest last.
+    page.click("#tab-changes")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-changes-body] tr'); return el && el.textContent.startsWith('2026-08-'); }"
+    )
+    rows = page.locator("[data-changes-body] tr")
+    assert rows.nth(0).text_content().startswith("2026-08-08")
+    assert rows.nth(2).text_content().startswith("2026-08-06")
+
+    # Regions chart data table: newest first; the chart labels stay ASC.
+    page.click("#tab-regions")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+    page.click("#chart-data-regions summary")
+    body_rows = page.locator("#chart-data-regions tbody tr")
+    assert "2026-08-08" in body_rows.nth(0).text_content()
+    assert "2026-08-06" in body_rows.nth(2).text_content()
+    labels = page.evaluate(
+        "() => Chart.getChart(document.getElementById('analysis-chart-regions')).data.labels"
+    )
+    assert labels == ["2026-08-06", "2026-08-07", "2026-08-08"]
+
+    # Village history table: newest first (Village 1 exists all three days).
+    page.click("#tab-villages")
+    page.fill("#village-search-input", "Village 1")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-villages-table]'); return el && !el.hidden; }"
+    )
+    page.click('[aria-label="Open history for Village 1"]')
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-village-history-table]'); return el && !el.hidden; }"
+    )
+    hrows = page.locator("[data-village-history-body] tr")
+    assert hrows.nth(0).text_content().startswith("2026-08-08")
+    assert hrows.nth(2).text_content().startswith("2026-08-06")
+    page.close()
+
+
+def test_watch_alliance_change_not_conquest(browser_app_watch_change: tuple[str, Browser]) -> None:
+    """A same-player alliance switch appears EXACTLY once in Watch as
+    alliance_change (info); the Events tab says "Alliance changed to",
+    never "conquered"; the real conquest keeps its own copy and no item
+    repeats the direction in its message."""
+    url, browser = browser_app_watch_change
+    page = browser.new_page()
+    page.set_default_timeout(15000)
+    errors = _collect_page_errors(page)
+    page.goto(url + "?view=intelligence", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => document.getElementById('panel-regions').getAttribute('aria-busy') === 'false'"
+    )
+
+    # Events: village 3 lost with the SAME player → alliance-change copy.
+    page.click("#tab-events")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-events-lost] li'); return el; }"
+    )
+    lost = page.text_content("[data-events-lost]")
+    assert "Alliance changed to ENEMY" in lost
+    assert "Village 3" in lost
+    assert "conquered" not in lost
+
+    # Watch: exactly one alliance_change item; village 3 is never a
+    # village_lost; messages never repeat the tags direction.
+    page.click("#tab-watch")
+    page.wait_for_function(
+        "() => { const el = document.querySelector('[data-watch-list] li'); return el; }"
+    )
+    kinds = page.evaluate(
+        "() => Array.from(document.querySelectorAll('.watch-item__kind')).map((el) => el.textContent)"
+    )
+    assert kinds.count("alliance_change") == 1
+    assert "village_lost" not in kinds
+    messages = page.evaluate(
+        "() => Array.from(document.querySelectorAll('.watch-item__message')).map((el) => el.textContent)"
+    )
+    assert "Village 3 alliance changed" in messages
+    assert "Village 2 conquered" in messages
+    assert all("\u2192" not in m for m in messages)
+    assert errors == []
     page.close()

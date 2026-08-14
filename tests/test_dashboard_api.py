@@ -465,6 +465,7 @@ class TestGetSettings:
         assert payload["ADMIN_ROLE_ID"] is None
         assert payload["REPORT_EMBED_COLOR"] == 0x2ECC71
         assert payload["TRACKED_ALLIANCES"] == []  # env fallback empty
+        assert payload["REPORT_REGIONS"] == []  # env fallback empty
         assert "DISCORD_TOKEN" not in payload  # secrets never leave the API
 
     def test_tracked_alliances_in_payload(self, tmp_path: Path) -> None:
@@ -606,6 +607,41 @@ class TestPutSettings:
         with TestClient(_app(db, _env())) as client:
             assert client.put("/api/settings", json={"TRACKED_ALLIANCES": "UFO"}).status_code == 422
             assert client.put("/api/settings", json={"TRACKED_ALLIANCES": [1, 2]}).status_code == 422
+
+    def test_report_regions_saved_stripped_deduped(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"REPORT_REGIONS": [" Dacia ", "Dacia", "Teutones", "Borders"]})
+        assert resp.status_code == 200
+        assert resp.json()["REPORT_REGIONS"] == ["Dacia", "Teutones", "Borders"]
+        assert _db_settings(db)["REPORT_REGIONS"] == ["Dacia", "Teutones", "Borders"]
+
+    def test_report_regions_empty_allowed(self, tmp_path: Path) -> None:
+        """Empty REPORT_REGIONS is legal: the daily report falls back to the
+        top-10 regions by share."""
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"REPORT_REGIONS": []})
+        assert resp.status_code == 200
+        assert resp.json()["REPORT_REGIONS"] == []
+
+    def test_report_regions_at_most_10(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            resp = client.put("/api/settings", json={"REPORT_REGIONS": [f"R{i:02d}" for i in range(11)]})
+        assert resp.status_code == 422
+        assert "at most 10 regions" in resp.json()["detail"]
+        assert _db_settings(db) == {}  # nothing written
+
+    def test_report_regions_must_be_list_of_strings(self, tmp_path: Path) -> None:
+        db = tmp_path / "p.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.put("/api/settings", json={"REPORT_REGIONS": "Dacia"}).status_code == 422
+            assert client.put("/api/settings", json={"REPORT_REGIONS": [1, 2]}).status_code == 422
 
     def test_bad_color_422(self, tmp_path: Path) -> None:
         db = tmp_path / "p.db"
@@ -942,7 +978,22 @@ class TestAnalysisRegions:
                 "series": {},
                 "current": [],
                 "top_alliances": {},
+                "range_from": None,
+                "range_to": None,
+                "current_date": None,
+                "previous_date": None,
             }
+
+    def test_payload_carries_explicit_range_dates(self, tmp_path: Path) -> None:
+        db = tmp_path / "ar.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/regions?days=2").json()
+
+        assert payload["range_from"] == "2026-08-08"
+        assert payload["range_to"] == "2026-08-09"
+        assert payload["current_date"] == "2026-08-09"
+        assert payload["previous_date"] == "2026-08-08"
 
     def test_alliance_filter_per_tag(self, tmp_path: Path) -> None:
         db = tmp_path / "ar.db"
@@ -1025,8 +1076,16 @@ class TestAnalysisStandings:
             payload = client.get("/api/analysis/standings?days=7").json()
 
         assert payload["dates"] == ["2026-08-07", "2026-08-08", "2026-08-09"]
-        assert payload["available_tags"] == ["ENEMY", "NOVA"]  # alphabetical, alliance_id != 0
+        # available_tags = TOP 10 by population at the range end (desc),
+        # never a plain alphabetical catalog.
+        assert payload["available_tags"] == ["NOVA", "ENEMY"]
+        assert payload["available_total"] == 2
+        assert payload["available_truncated"] == 0
         assert payload["default_tags"] == ["NOVA", "ENEMY"]  # config order
+        assert payload["range_from"] == "2026-08-07"
+        assert payload["range_to"] == "2026-08-09"
+        assert payload["current_date"] == "2026-08-09"
+        assert payload["previous_date"] == "2026-08-08"
         assert [row["tag"] for row in payload["series"]] == ["NOVA", "ENEMY"]  # latest-pop desc
         nova, enemy = payload["series"]
         assert nova["ours"] is True
@@ -1043,7 +1102,7 @@ class TestAnalysisStandings:
             payload = client.get("/api/analysis/standings?days=7&tag=NOVA").json()
 
         assert [row["tag"] for row in payload["series"]] == ["NOVA"]
-        assert payload["available_tags"] == ["ENEMY", "NOVA"]  # catalog stays whole-map
+        assert payload["available_tags"] == ["NOVA", "ENEMY"]  # catalog is range-end top-10
         assert payload["default_tags"] == ["NOVA", "ENEMY"]
 
     def test_tag_dedupe_preserves_first_occurrence(self, tmp_path: Path) -> None:
@@ -1057,15 +1116,15 @@ class TestAnalysisStandings:
         # 5704, so series order stays NOVA-first by the standings sort).
         assert [row["tag"] for row in payload["series"]] == ["NOVA", "ENEMY"]
 
-    def test_nine_tags_422(self, tmp_path: Path) -> None:
+    def test_eleven_tags_422(self, tmp_path: Path) -> None:
         db = tmp_path / "as.db"
         _seed_analysis_db(db)
-        params = [("tag", f"TAG{i}") for i in range(9)]
+        params = [("tag", f"TAG{i}") for i in range(11)]
         with TestClient(_app(db, _env())) as client:
             res = client.get("/api/analysis/standings", params=params)
 
         assert res.status_code == 422
-        assert "at most 8 tags" in res.json()["detail"]
+        assert "at most 10 tags" in res.json()["detail"]
 
     def test_unknown_tag_422(self, tmp_path: Path) -> None:
         db = tmp_path / "as.db"
@@ -1087,8 +1146,14 @@ class TestAnalysisStandings:
         assert payload == {
             "dates": ["2026-08-07", "2026-08-08", "2026-08-09"],
             "series": [],
-            "available_tags": ["ENEMY", "NOVA"],
+            "available_tags": ["NOVA", "ENEMY"],
+            "available_total": 2,
+            "available_truncated": 0,
             "default_tags": [],
+            "range_from": "2026-08-07",
+            "range_to": "2026-08-09",
+            "current_date": "2026-08-09",
+            "previous_date": "2026-08-08",
         }
 
     def test_empty_db_empty_payload(self, tmp_path: Path) -> None:
@@ -1099,8 +1164,40 @@ class TestAnalysisStandings:
                 "dates": [],
                 "series": [],
                 "available_tags": [],
+                "available_total": 0,
+                "available_truncated": 0,
                 "default_tags": [],
+                "range_from": None,
+                "range_to": None,
+                "current_date": None,
+                "previous_date": None,
             }
+
+    def test_available_tags_top10_by_latest_population(self, tmp_path: Path) -> None:
+        """30+ tags on the map: the picker catalog is exactly the top 10 by
+        population at the range end, with honest total/truncated counts."""
+        db = tmp_path / "as.db"
+        conn = store.connect(db)
+        store.init_schema(conn)
+        store.save_snapshot(
+            conn,
+            "2026-08-07",
+            [_row(1, population=100)],
+        )
+        rows = [_row(1, population=110)]
+        for i in range(30):
+            rows.append(_row(100 + i, alliance_id=100 + i, alliance_tag=f"T{i:02d}", population=100 + i))
+        store.save_snapshot(conn, "2026-08-08", rows)
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/standings?days=7").json()
+
+        assert payload["available_total"] == 31  # 30 seeded tags + NOVA
+        assert payload["available_truncated"] == 21
+        assert payload["available_tags"] == [f"T{i:02d}" for i in range(29, 19, -1)]
+        # default_tags are the configured tracked tags INSIDE the top-10
+        # (TRACKED_ALLIANCES here is empty → no defaults).
+        assert payload["default_tags"] == []
 
 
 class TestAnalysisDates:
@@ -1117,6 +1214,71 @@ class TestAnalysisDates:
         _seed_db(db, snapshot=False)
         with TestClient(_app(db, _env())) as client:
             assert client.get("/api/analysis/dates").json() == {"dates": []}
+
+
+class TestAnalysisRangeWindows:
+    """Per-tab history ranges: preset days OR an explicit from/to pair with
+    the SAME validation contract as Compare — regions/standings/deltas."""
+
+    def test_regions_custom_pair_returns_exact_window(self, tmp_path: Path) -> None:
+        db = tmp_path / "rw.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/regions?from=2026-08-07&to=2026-08-08").json()
+
+        assert payload["dates"] == ["2026-08-07", "2026-08-08"]
+        assert payload["range_from"] == "2026-08-07"
+        assert payload["range_to"] == "2026-08-08"
+        assert payload["current_date"] == "2026-08-08"
+        assert payload["previous_date"] == "2026-08-07"
+        # The current table is computed at the RANGE END vs the previous
+        # date IN the range (08-08 Testland: rows 1,2,4 → 5502).
+        testland = next(row for row in payload["current"] if row["region"] == "Testland")
+        assert testland["our_pop"] == 2501 + 2501 + 500
+        assert [p["date"] for p in payload["series"]["Testland"]] == ["2026-08-07", "2026-08-08"]
+
+    def test_standings_custom_pair(self, tmp_path: Path) -> None:
+        db = tmp_path / "rw.db"
+        _seed_analysis_db(db)
+        env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            payload = client.get("/api/analysis/standings?from=2026-08-08&to=2026-08-09").json()
+
+        assert payload["dates"] == ["2026-08-08", "2026-08-09"]
+        assert payload["range_from"] == "2026-08-08"
+        assert payload["range_to"] == "2026-08-09"
+        assert payload["current_date"] == "2026-08-09"
+        # available_tags ranked at the RANGE END (08-09: NOVA 5704 > ENEMY 2950).
+        assert payload["available_tags"] == ["NOVA", "ENEMY"]
+        assert [p[1] for p in payload["series"][0]["points"]] == [5602, 5704]
+
+    def test_deltas_custom_pair(self, tmp_path: Path) -> None:
+        db = tmp_path / "rw.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            payload = client.get("/api/analysis/deltas?from=2026-08-07&to=2026-08-08").json()
+
+        assert payload["dates"] == ["2026-08-07", "2026-08-08"]
+        assert payload["range_from"] == "2026-08-07"
+        assert payload["range_to"] == "2026-08-08"
+        assert payload["current_date"] == "2026-08-08"
+        assert payload["previous_date"] == "2026-08-07"
+        assert payload["rows"][1]["villages"] == 4  # village 4 gained on 08-08
+
+    def test_invalid_pairs_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "rw.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            for path in ("regions", "standings", "deltas"):
+                res = client.get(f"/api/analysis/{path}?from=2026-08-09&to=2026-08-09")
+                assert res.status_code == 422, path
+                assert "must be earlier than" in res.json()["detail"]
+                res = client.get(f"/api/analysis/{path}?from=2026-08-01&to=2026-08-09")
+                assert res.status_code == 422, path
+                assert "valid dates" in res.json()["detail"]
+                res = client.get(f"/api/analysis/{path}?from=2026-08-08")
+                assert res.status_code == 422, path
+                assert "provided together" in res.json()["detail"]
 
 
 class TestAnalysisEvents:
@@ -1239,6 +1401,40 @@ class TestAnalysisEvents:
         assert [e["village_name"] for e in payload["gained"]] == ["Village 5", "Village 6"]
         assert [e["village_name"] for e in payload["lost"]] == ["Village 2", "Village 3"]
 
+    def test_same_player_lost_event_flag(self, tmp_path: Path) -> None:
+        db = tmp_path / "ae.db"
+        conn = store.connect(db)
+        store.init_schema(conn)
+        store.save_snapshot(conn, "2026-08-07", [_row(1, population=100), _row(2, population=50)])
+        store.save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                _row(2, population=50),  # NOVA stays resolvable on the latest day
+                _row(1, population=110, player_id=1001, player_name="Same P", alliance_id=8, alliance_tag="ENEMY"),
+            ],
+        )
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            same = client.get("/api/analysis/events").json()
+        assert same["lost"][0]["event"] == "lost_conquered"
+        assert same["lost"][0]["same_player"] is True
+
+        # A different-player takeover is NOT an alliance change.
+        conn = store.connect(db)
+        store.save_snapshot(
+            conn,
+            "2026-08-08",
+            [
+                _row(2, population=50),
+                _row(1, population=110, player_id=9999, player_name="New P", alliance_id=8, alliance_tag="ENEMY"),
+            ],
+        )
+        conn.close()
+        with TestClient(_app(db, _env())) as client:
+            taken = client.get("/api/analysis/events").json()
+        assert taken["lost"][0]["same_player"] is False
+
     def test_limit_bounds_422(self, tmp_path: Path) -> None:
         db = tmp_path / "ae.db"
         _seed_analysis_db(db)
@@ -1275,8 +1471,11 @@ class TestAnalysisWars:
             "2026-08-08",
             [
                 _row(1, population=110),
-                _row(2, population=210, alliance_id=7, alliance_tag="NOVA"),
-                _row(3, population=310, alliance_id=8, alliance_tag="ENEMY"),
+                # Real ownership changes (different player ids) — a
+                # same-player switch would be an alliance change, not a
+                # conquest (metrics contract).
+                _row(2, population=210, alliance_id=7, alliance_tag="NOVA", player_id=2000, player_name="New Owner"),
+                _row(3, population=310, alliance_id=8, alliance_tag="ENEMY", player_id=2003, player_name="Enemy P3"),
                 _row(6, population=610, alliance_id=999, alliance_tag="GHOST"),
                 _row(7, population=700),  # new NOVA village (ignored)
             ],
@@ -1304,7 +1503,7 @@ class TestAnalysisWars:
         assert entry["from_tag"] == "ENEMY"
         assert entry["to_tag"] == "NOVA"
         assert entry["from_player"] == "Player 2"
-        assert entry["to_player"] == "Player 2"  # same player id keeps owner
+        assert entry["to_player"] == "New Owner"  # real ownership change
         assert payload["pairs"][1]["entries"][0]["village_name"] == "Village 3"
         assert [d["village_name"] for d in payload["deleted"]] == ["Village 4"]
         assert payload["deleted"][0]["from_tag"] == "ENEMY"
@@ -1399,7 +1598,14 @@ class TestAnalysisDeltas:
         db = tmp_path / "dl.db"
         _seed_db(db, snapshot=False)
         with TestClient(_app(db, _env())) as client:
-            assert client.get("/api/analysis/deltas?days=7").json() == {"dates": [], "rows": []}
+            assert client.get("/api/analysis/deltas?days=7").json() == {
+                "dates": [],
+                "rows": [],
+                "range_from": None,
+                "range_to": None,
+                "current_date": None,
+                "previous_date": None,
+            }
 
     def test_alliance_filter(self, tmp_path: Path) -> None:
         db = tmp_path / "dl.db"
@@ -1547,7 +1753,9 @@ class TestAnalysisPlayers:
         with TestClient(_app(db, _env())) as client:
             payload = client.get("/api/analysis/players").json()
 
-        assert set(payload) == {"population", "growth", "new_villages", "vp"}
+        assert set(payload) == {"population", "growth", "new_villages", "vp", "snapshot_date", "previous_date"}
+        assert payload["snapshot_date"] == "2026-08-09"
+        assert payload["previous_date"] == "2026-08-08"
         # Latest day (08-09): NOVA players 1001 (rows 1,2), 1007, 1005 — plus
         # 1004, whose village exists only on 08-08 and who left the alliance
         # (the universe is curr-ours ∪ prev-ours; ranks with population 0).
@@ -1604,6 +1812,8 @@ class TestAnalysisPlayers:
                 "growth": [],
                 "new_villages": [],
                 "vp": [],
+                "snapshot_date": None,
+                "previous_date": None,
             }
 
 
@@ -2741,23 +2951,34 @@ class TestAnalysisWatch:
         assert body["items"][-1]["kind"] == "village_gained"
         assert body["total"] == 2
 
-    def test_conquests_and_losses_with_wars_seed(self, tmp_path: Path) -> None:
+    def test_conquests_losses_and_alliance_changes_with_wars_seed(self, tmp_path: Path) -> None:
         db = tmp_path / "watch.db"
         _seed_wars_plain(db)
         env = _env(TRACKED_ALLIANCES="NOVA,ENEMY")
         with TestClient(_app(db, env)) as client:
             body = client.get("/api/analysis/watch").json()
         kinds = {item["kind"] for item in body["items"]}
-        # Seed: village 2 ENEMY→NOVA, village 3 NOVA→ENEMY (conquests),
-        # village 4 deleted, village 7 gained — village 3's loss is ALSO a
-        # conquest (deduped out of village_lost).
-        assert kinds == {"conquest", "deleted", "village_gained"}
+        # Seed: village 2 ENEMY→NOVA and village 3 NOVA→ENEMY are REAL
+        # conquests (different players), village 5 is a SAME-PLAYER switch
+        # (alliance_change, never conquest/lost), village 4 deleted, village
+        # 7 gained — each village appears exactly once.
+        assert kinds == {"conquest", "deleted", "village_gained", "alliance_change"}
         conquest = {i["village_id"]: i for i in body["items"] if i["kind"] == "conquest"}
         assert set(conquest) == {2, 3}
         assert conquest[3]["from_tag"] == "NOVA"
         assert conquest[3]["to_tag"] == "ENEMY"
         assert "conquered" in conquest[3]["message"]
-        assert body["total"] == 4
+        assert "→" not in conquest[3]["message"]  # direction lives in tags only
+        change = {i["village_id"]: i for i in body["items"] if i["kind"] == "alliance_change"}
+        assert set(change) == {5}
+        assert change[5]["from_tag"] == "NOVA"
+        assert change[5]["to_tag"] == "ENEMY"
+        assert change[5]["severity"] == "info"
+        assert change[5]["message"] == "Village 5 alliance changed"
+        assert "→" not in change[5]["message"]
+        lost = {i["village_id"] for i in body["items"] if i["kind"] == "village_lost"}
+        assert lost == set()  # same-player loss never duplicates as village_lost
+        assert body["total"] == 5
 
     def test_validation_and_limits(self, tmp_path: Path) -> None:
         db = tmp_path / "watch.db"
@@ -2823,8 +3044,9 @@ class TestAnalysisRoster:
 
 
 def _seed_wars_plain(db: Path) -> None:
-    """Wars scenario (plain copy of the browser seed): transfers 2/3, one
-    deletion (village 4), one new NOVA village (7)."""
+    """Wars scenario (plain copy of the browser seed): transfers 2/3 (REAL
+    ownership changes — different players), one deletion (village 4), one
+    new NOVA village (7) and one SAME-PLAYER alliance switch (village 5)."""
     conn = store.connect(db)
     store.init_schema(conn)
     store.save_snapshot(
@@ -2835,6 +3057,7 @@ def _seed_wars_plain(db: Path) -> None:
             _row(2, population=200, player_id=2000, player_name="ENEMY-P0", alliance_id=8, alliance_tag="ENEMY"),
             _row(3, population=300, player_id=1003, player_name="NOVA-P3"),
             _row(4, population=400, player_id=2004, player_name="ENEMY-P4", alliance_id=8, alliance_tag="ENEMY"),
+            _row(5, population=500, player_id=1005, player_name="NOVA-P5"),
         ],
     )
     store.save_snapshot(
@@ -2842,8 +3065,9 @@ def _seed_wars_plain(db: Path) -> None:
         "2026-08-08",
         [
             _row(1, population=110),
-            _row(2, population=210, player_id=2000, player_name="ENEMY-P0"),  # conquered by NOVA
+            _row(2, population=210, player_id=2001, player_name="NOVA-P1", alliance_id=7, alliance_tag="NOVA"),
             _row(3, population=310, player_id=2003, player_name="ENEMY-P3", alliance_id=8, alliance_tag="ENEMY"),
+            _row(5, population=510, player_id=1005, player_name="NOVA-P5", alliance_id=8, alliance_tag="ENEMY"),
             _row(7, population=700, player_id=1007, player_name="NOVA-P7"),
         ],
     )

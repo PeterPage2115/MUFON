@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from travian import store, strings
 from travian.bot import main as bot_main
 from travian.map_sql import MapSqlFetchError
-from travian.models import VillageRow
+from travian.models import RegionStat, VillageRow
 from travian.strings import NO_DATA_YET
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "map_sql_sample.txt"
@@ -480,6 +480,43 @@ class TestLoadMergedConfig:
         finally:
             conn.close()
 
+    def test_report_regions_default_empty(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {})
+        finally:
+            conn.close()
+        assert cfg.report_regions == []
+
+    def test_report_regions_env_parsed(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            cfg = bot_main.load_merged_config(conn, {"REPORT_REGIONS": "Dacia, Teutones,,Dacia, Borders"})
+        finally:
+            conn.close()
+        assert cfg.report_regions == ["Dacia", "Teutones", "Borders"]
+
+    def test_report_regions_db_overrides_env(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        store.set_settings(conn, {"REPORT_REGIONS": ["DB1", "DB2"]})
+        try:
+            cfg = bot_main.load_merged_config(conn, {"REPORT_REGIONS": "ENV1"})
+        finally:
+            conn.close()
+        assert cfg.report_regions == ["DB1", "DB2"]
+
+    def test_report_regions_bad_type_raises(self) -> None:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        try:
+            with pytest.raises(TypeError, match="REPORT_REGIONS"):
+                bot_main.load_merged_config(conn, {"REPORT_REGIONS": 5})
+        finally:
+            conn.close()
+
 
 # --- _build_report_data ----------------------------------------------------------
 
@@ -510,6 +547,151 @@ class TestBuildReportData:
         data = bot_main._build_report_data(cfg, "2026-08-08", curr, None, {7})
 
         assert data.standings == []
+
+
+class TestReportRegionNames:
+    """REPORT_REGIONS resolution: exact snapshot names, capped at 10;
+    unknown names warn once; an all-unknown selection falls back to None
+    (top-10 by share) so a typo can never erase the Regions card."""
+
+    @staticmethod
+    def _region_stat(name: str) -> RegionStat:
+        return RegionStat(
+            region=name,
+            our_villages=1,
+            our_pop=100,
+            region_total_pop=500,
+            share=0.2,
+            delta=1,
+        )
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = store.connect(":memory:")
+        store.init_schema(conn)
+        return conn
+
+    def test_empty_config_returns_none(self) -> None:
+        conn = self._conn()
+        try:
+            assert bot_main._report_region_names([], [], conn) is None
+        finally:
+            conn.close()
+
+    def test_matching_names_kept(self) -> None:
+        conn = self._conn()
+        try:
+            names = bot_main._report_region_names(
+                ["Alpha", "Beta"], [self._region_stat("Alpha"), self._region_stat("Beta")], conn
+            )
+        finally:
+            conn.close()
+        assert names == ["Alpha", "Beta"]
+
+    def test_capped_at_10(self) -> None:
+        conn = self._conn()
+        try:
+            names = bot_main._report_region_names(
+                [f"R{i:02d}" for i in range(14)], [self._region_stat(f"R{i:02d}") for i in range(14)], conn
+            )
+        finally:
+            conn.close()
+        assert names == [f"R{i:02d}" for i in range(10)]
+
+    def test_unknown_names_warn_and_are_dropped(self) -> None:
+        conn = self._conn()
+        try:
+            names = bot_main._report_region_names(
+                ["Alpha", "Nope", "Beta"], [self._region_stat("Alpha"), self._region_stat("Beta")], conn
+            )
+            logs = store.recent_logs(conn, 10)
+        finally:
+            conn.close()
+        assert names == ["Alpha", "Beta"]
+        assert any(
+            entry["job"] == "report"
+            and entry["level"] == "warning"
+            and "REPORT_REGIONS not found in snapshot: Nope" in entry["message"]
+            for entry in logs
+        )
+
+    def test_all_unknown_falls_back_to_none(self) -> None:
+        conn = self._conn()
+        try:
+            names = bot_main._report_region_names(["Nope", "Gone"], [self._region_stat("Alpha")], conn)
+            logs = store.recent_logs(conn, 10)
+        finally:
+            conn.close()
+        assert names is None  # caller falls back to the top-10
+        assert any(entry["job"] == "report" and entry["level"] == "warning" for entry in logs)
+
+
+class TestReportRegionsInReport:
+    """The daily report consumes REPORT_REGIONS: the Regions embed shows
+    only the selected names; an all-unknown selection falls back to the
+    top-10 with a job warning."""
+
+    def _seed(self, conn: sqlite3.Connection) -> None:
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100, region="Testland")])
+        _seed(conn, today, [_row(1, population=110, region="Testland"), _row(2, population=50, region="Borders")])
+
+    def test_daily_report_filters_regions(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA", REPORT_REGIONS="Borders")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        self._seed(conn)
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
+        sent = channel.sent[0]
+        regions = next(e for e in sent if e.title == strings.EMBED_TITLE_REGIONS)
+        description = regions.description or ""
+        assert "Borders" in description
+        assert "Testland" not in description
+
+    def test_unknown_report_regions_fall_back_with_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA", REPORT_REGIONS="Nope")
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        self._seed(conn)
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
+        sent = channel.sent[0]
+        regions = next(e for e in sent if e.title == strings.EMBED_TITLE_REGIONS)
+        assert "Testland" in (regions.description or "")  # top-10 fallback
+        logs = _logs(_db_path(tmp_path))
+        assert any(
+            entry["job"] == "report"
+            and entry["level"] == "warning"
+            and "REPORT_REGIONS not found" in entry["message"]
+            for entry in logs
+        )
+
+    def test_standings_capped_at_10_in_daily_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_bot_env(monkeypatch, tmp_path, ALLIANCE_TAGS="NOVA", TRACKED_ALLIANCES=",".join(f"T{i:02d}" for i in range(20)))
+        conn = store.connect(_db_path(tmp_path))
+        store.init_schema(conn)
+        today = date.fromisoformat(_fetch_date())
+        _seed(conn, today - timedelta(days=1), [_row(1, population=100)])
+        tracked = [
+            _row(10 + i, alliance_tag=f"T{i:02d}", alliance_id=100 + i, population=100 + i) for i in range(20)
+        ]
+        _seed(conn, today, [_row(1, population=110)] + tracked)
+        conn.close()
+        channel = _install_bot({CHANNEL_ID: FakeChannel()})
+        asyncio.run(bot_main.run_report(CHANNEL_ID, require_today=True))
+        sent = channel.sent[0]
+        standings = next(e for e in sent if e.title == strings.EMBED_TITLE_STANDINGS)
+        # Top-10 by current population: T19..T10; the tail collapses.
+        description = standings.description or ""
+        assert "T19" in description
+        assert "T09" not in description
+        assert "…and 10 more alliances" in description
 
 
 # --- run_fetch ----------------------------------------------------------------

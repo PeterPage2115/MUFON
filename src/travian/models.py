@@ -104,6 +104,12 @@ class VillageEvent(BaseModel):
     from the snapshot where it still exists; ``None`` only when the source
     region was NULL. For ``gained`` events ``new_owner_player`` is the founder
     (the village appeared this day, so its current owner founded it).
+
+    ``same_player`` is True for ``lost_conquered`` transitions where the
+    stable ``player_id`` did NOT change — the owner left one alliance for
+    another instead of being conquered, so the UI renders ``Alliance changed
+    to <tag>`` instead of ``conquered by`` (set by ``metrics.village_events``;
+    always False for ``gained``/``lost_deleted``).
     """
 
     village_id: int
@@ -115,14 +121,39 @@ class VillageEvent(BaseModel):
     new_owner_player: str | None
     old_player: str | None
     region: str | None = None
+    same_player: bool = False
 
 
 class ConquestEvent(BaseModel):
     """A village that switched from one tracked alliance to another tracked alliance.
 
     Produced by ``metrics.conquests_between``: both the old and the new
-    alliance must be in the tracked universe and differ. ``region`` and
-    ``population`` come from the current snapshot (the village still exists).
+    alliance must be in the tracked universe and differ, AND the stable
+    ``player_id`` must have changed (a same-player alliance switch is an
+    ``AllianceChangeEvent``, not a conquest). ``region`` and ``population``
+    come from the current snapshot (the village still exists).
+    """
+
+    village_id: int
+    village_name: str
+    x: int
+    y: int
+    from_tag: str
+    from_player: str
+    to_tag: str
+    to_player: str
+    region: str | None = None
+    population: int
+
+
+class AllianceChangeEvent(BaseModel):
+    """A village whose owner kept the stable ``player_id`` but switched alliance.
+
+    Produced by ``metrics.alliance_changes_between``: the village exists in
+    both snapshots, ``player_id`` is unchanged, the alliance changed and at
+    least one side is in the tracked universe. This is an alliance switch,
+    never a conquest — the owner moved, the village was not taken.
+    ``region`` and ``population`` come from the current snapshot.
     """
 
     village_id: int

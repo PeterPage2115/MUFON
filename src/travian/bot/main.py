@@ -152,7 +152,7 @@ from travian.metrics import (
     resolve_alliance_ids,
     village_events,
 )
-from travian.models import ReportData, VillageRow
+from travian.models import RegionStat, ReportData, VillageRow
 from travian.strings import NO_DATA_YET
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,7 @@ class MergedConfig:
     alert_channel_id: int | None = None
     alliance_tags: list[str] = field(default_factory=list)
     tracked_alliances: list[str] = field(default_factory=list)
+    report_regions: list[str] = field(default_factory=list)
     fetch_hour: int = DEFAULT_FETCH_HOUR
     fetch_minute: int = DEFAULT_FETCH_MINUTE
     fetch_tz: str = DEFAULT_FETCH_TZ
@@ -280,6 +281,7 @@ def load_merged_config(conn: sqlite3.Connection, env: Mapping[str, str]) -> Merg
         channel_id=None if channel_raw is None else _as_int("CHANNEL_ID", channel_raw),
         alliance_tags=_as_tags("ALLIANCE_TAGS", _pick(env, db, "ALLIANCE_TAGS")),
         tracked_alliances=_as_tags("TRACKED_ALLIANCES", _pick(env, db, "TRACKED_ALLIANCES")),
+        report_regions=_as_tags("REPORT_REGIONS", _pick(env, db, "REPORT_REGIONS")),
         fetch_hour=_as_int("FETCH_HOUR", _pick(env, db, "FETCH_HOUR", DEFAULT_FETCH_HOUR)),
         fetch_minute=_as_int("FETCH_MINUTE", _pick(env, db, "FETCH_MINUTE", DEFAULT_FETCH_MINUTE)),
         fetch_tz=_as_str("FETCH_TZ", _pick(env, db, "FETCH_TZ", DEFAULT_FETCH_TZ)),
@@ -715,13 +717,16 @@ def _report_phase(require_today: bool) -> _ReportPhase:
             store.append_log(conn, "report", "warning", "no alliance configured, skipping report")
             return _ReportPhase(action="no_alliance", embeds=[])
         data = _build_report_data(cfg, latest.snapshot_date, curr_rows, prev_rows, resolved)
+        region_names = _report_region_names(cfg.report_regions, data.regions, conn)
         embeds = build_report_embed(
             data,
             _resolved_tags(cfg.alliance_tags, unresolved),
             latest.snapshot_date,
             color=cfg.report_embed_color,
             sections=DAILY_SECTIONS,
-            region_limit=8,
+            region_limit=10,
+            region_names=region_names,
+            standings_limit=10,
         )
         return _ReportPhase(action="send", embeds=embeds, snapshot_date=latest.snapshot_date)
     except Exception as exc:  # noqa: BLE001 — plan: job failures are logged to job_log, never crash the loop
@@ -907,6 +912,29 @@ def _resolved_tags(tags: list[str], unresolved: list[str]) -> list[str]:
     """The configured tags that actually resolved (embed description input)."""
     normalized = [tag.strip() for tag in tags if tag.strip()]
     return [tag for tag in normalized if tag not in unresolved]
+
+
+def _report_region_names(
+    configured: list[str], regions: list[RegionStat], conn: sqlite3.Connection
+) -> list[str] | None:
+    """The configured ``REPORT_REGIONS`` names present in *regions* (max 10).
+
+    Names not found in the snapshot are SKIPPED and logged ONCE as a report
+    warning (a typo must be visible in the job log); when NOTHING matches,
+    returns ``None`` so the report falls back to the top-10 by share — a bad
+    selection can never erase the Regions card. Exact snapshot names only.
+    """
+    names = [name for name in configured if name.strip()][:10]
+    if not names:
+        return None
+    present = {r.region for r in regions}
+    matched = [name for name in names if name in present]
+    unknown = [name for name in names if name not in present]
+    if unknown:
+        store.append_log(conn, "report", "warning", f"REPORT_REGIONS not found in snapshot: {', '.join(unknown)}")
+    if not matched:
+        return None
+    return matched
 
 
 def _section_embeds(sections: AbstractSet[str], region_limit: int | None) -> list[discord.Embed]:

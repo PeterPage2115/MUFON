@@ -25,11 +25,16 @@ var logEls = state.logEls;
 var actionInFlight = state.actionInFlight;
 
 var SETTINGS_KEYS = [
-  "ALLIANCE_TAGS", "TRACKED_ALLIANCES", "CHANNEL_ID", "ADMIN_ROLE_ID",
+  "ALLIANCE_TAGS", "TRACKED_ALLIANCES", "REPORT_REGIONS", "CHANNEL_ID", "ADMIN_ROLE_ID",
   "FETCH_HOUR", "FETCH_MINUTE", "FETCH_TZ",
   "REPORT_HOUR", "REPORT_MINUTE", "REPORT_TZ",
   "REPORT_EMBED_COLOR",
 ];
+
+//: Job-log cap: the list keeps at most this many rendered entries — the
+//: same 50 as api.js's LOG_LIMIT and the /api/logs default (was an
+//: undefined ReferenceError that stranded the fetch/report buttons).
+var MAX_LOGS = 50;
 
 /* --- settings form ------------------------------------------------------------ */
 
@@ -106,6 +111,21 @@ function validateSettings(values) {
   });
   // Empty is allowed: it just hides the Standings field.
 
+  var regions = (values.REPORT_REGIONS || "")
+    .split(/[\n,]+/)
+    .map(function (t) {
+      return t.trim();
+    })
+    .filter(Boolean);
+  var regionsUnique = [];
+  regions.forEach(function (r) {
+    if (regionsUnique.indexOf(r) === -1) regionsUnique.push(r);
+  });
+  // Empty is allowed: the daily report falls back to the top 10 by share.
+  if (regionsUnique.length > 10) {
+    errors.REPORT_REGIONS = "At most 10 regions can be listed.";
+  }
+
   ["FETCH_HOUR", "REPORT_HOUR"].forEach(function (key) {
     var v = values[key] === "" ? NaN : Number(values[key]);
     if (isNaN(v) || v < 0 || v > 23) errors[key] = "Hour must be between 0 and 23.";
@@ -142,7 +162,7 @@ function validateSettings(values) {
     errors.REPORT_EMBED_COLOR = "Color must be six hex digits, e.g. #D1A84A.";
   }
 
-  return { errors: errors, tags: unique, trackedTags: trackedUnique };
+  return { errors: errors, tags: unique, trackedTags: trackedUnique, regionNames: regionsUnique };
 }
 
 // The API accepts only JSON ints (dashboard/app.py `_int_setting`). Send a
@@ -158,10 +178,11 @@ function intSetting(value) {
   return Number.isSafeInteger(num) ? num : digits;
 }
 
-function payloadFromValues(values, tags, trackedTags) {
+function payloadFromValues(values, tags, trackedTags, regionNames) {
   return {
     ALLIANCE_TAGS: tags,
     TRACKED_ALLIANCES: trackedTags,
+    REPORT_REGIONS: regionNames,
     CHANNEL_ID: intSetting(values.CHANNEL_ID),
     FETCH_HOUR: Number(values.FETCH_HOUR),
     FETCH_MINUTE: Number(values.FETCH_MINUTE),
@@ -185,6 +206,11 @@ function renderSettingsForm(settings) {
   var trackedEl = els.settingsForm.querySelector('[data-setting-key="TRACKED_ALLIANCES"]');
   if (trackedEl && !trackedEl.dataset.userEdited) {
     trackedEl.value = (settings.TRACKED_ALLIANCES || []).join("\n");
+  }
+
+  var regionsEl = els.settingsForm.querySelector('[data-setting-key="REPORT_REGIONS"]');
+  if (regionsEl && !regionsEl.dataset.userEdited) {
+    regionsEl.value = (settings.REPORT_REGIONS || []).join("\n");
   }
 
   var channelEl = els.settingsForm.querySelector('[data-setting-key="CHANNEL_ID"]');
@@ -246,7 +272,7 @@ function submitSettings(event) {
     return;
   }
 
-  var payload = payloadFromValues(values, checked.tags, checked.trackedTags);
+  var payload = payloadFromValues(values, checked.tags, checked.trackedTags, checked.regionNames);
   var saved = false;
   setBusy(els.saveButton, true, "Saving…");
 
@@ -422,7 +448,9 @@ function runAction(kind) {
       if (results[0]) renderStatus(results[0]);
       if (results[1]) renderLogs(results[1]);
     })
-    .then(function () {
+    .finally(function () {
+      // Cleanup runs UNCONDITIONALLY — a failed action, status or log
+      // refresh can never strand the buttons in their busy state.
       actionInFlight = false;
       setBusy(button, false);
     });

@@ -36,7 +36,7 @@
           </div>
           <span class="meta-divider" aria-hidden="true"></span>
           <div class="snapshot-meta">
-            <span class="meta-label">Build</span>
+            <span class="meta-label">Version</span>
             <strong data-header-build>—</strong>
           </div>
           <span class="connection-state" data-connection-state role="status" aria-live="polite">
@@ -85,14 +85,7 @@
                 <h2 id="analysis-title">Analysis</h2>
               </div>
               <div class="analysis-header-side">
-                <span class="card-caption" data-analysis-range hidden>Last 30 days</span>
-                <label class="overline" for="analysis-days">Range</label>
-                <select id="analysis-days" class="analysis-select" aria-label="Analysis range in days">
-                  <option value="7">7 days</option>
-                  <option value="30" selected>30 days</option>
-                  <option value="60">60 days</option>
-                </select>
-                <div class="segmented" id="analysis-alliance-filter" role="group" aria-label="Alliance filter" hidden></div>
+                <div class="segmented" id="analysis-alliance-filter" role="group" aria-label="Scope" hidden></div>
               </div>
             </header>
 
@@ -111,8 +104,28 @@
 
             <section class="analysis-panel" id="panel-regions" role="tabpanel" aria-labelledby="tab-regions">
               <div class="analysis-toolbar">
-                <p class="overline">Latest snapshot vs previous</p>
+                <p class="overline" data-regions-toolbar>Latest snapshot vs previous</p>
                 <button class="button button--outline button--small" type="button" data-export="regions" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls" data-range-controls="regions">
+                <div class="analysis-control">
+                  <label class="overline" for="range-regions">Range</label>
+                  <select id="range-regions" class="analysis-select" data-range-select="regions" aria-label="Regions range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control" data-range-pair="regions" hidden>
+                  <label class="overline" for="range-regions-from">From</label>
+                  <select id="range-regions-from" class="analysis-select" data-range-from="regions" aria-label="Regions range from"></select>
+                </div>
+                <div class="analysis-control" data-range-pair="regions" hidden>
+                  <label class="overline" for="range-regions-to">To</label>
+                  <select id="range-regions-to" class="analysis-select" data-range-to="regions" aria-label="Regions range to"></select>
+                </div>
+                <p class="analysis-controls__error" id="range-regions-error" role="alert" hidden></p>
               </div>
               <div class="analysis-layout--regions">
                 <div class="data-table__wrap">
@@ -175,6 +188,26 @@
             </section>
 
             <section class="analysis-panel" id="panel-alliances" role="tabpanel" aria-labelledby="tab-alliances" hidden>
+              <div class="analysis-controls" data-range-controls="alliances">
+                <div class="analysis-control">
+                  <label class="overline" for="range-alliances">Range</label>
+                  <select id="range-alliances" class="analysis-select" data-range-select="alliances" aria-label="Alliances range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control" data-range-pair="alliances" hidden>
+                  <label class="overline" for="range-alliances-from">From</label>
+                  <select id="range-alliances-from" class="analysis-select" data-range-from="alliances" aria-label="Alliances range from"></select>
+                </div>
+                <div class="analysis-control" data-range-pair="alliances" hidden>
+                  <label class="overline" for="range-alliances-to">To</label>
+                  <select id="range-alliances-to" class="analysis-select" data-range-to="alliances" aria-label="Alliances range to"></select>
+                </div>
+                <p class="analysis-controls__error" id="range-alliances-error" role="alert" hidden></p>
+              </div>
               <div class="chart-card">
                 <div class="chart-card__head">
                   <p class="overline">Tracked alliances</p>
@@ -186,6 +219,7 @@
                   </div>
                 </div>
                 <div class="standings-picker">
+                  <p class="field-help" id="analysis-standings-catalog-note">Top 10 by latest population</p>
                   <div class="standings-picker__controls">
                     <input id="analysis-standings-search" class="analysis-select" type="search"
                       autocomplete="off" spellcheck="false" placeholder="Search alliances…"
@@ -207,7 +241,7 @@
 
             <section class="analysis-panel" id="panel-players" role="tabpanel" aria-labelledby="tab-players" hidden>
               <div class="analysis-toolbar">
-                <p class="overline">Latest snapshot vs previous</p>
+                <p class="overline" data-players-toolbar>Latest snapshot vs previous</p>
                 <button class="button button--outline button--small" type="button" data-export="players" disabled>Export CSV</button>
               </div>
               <div class="players-grid">
@@ -304,12 +338,21 @@
               </div>
               <div class="analysis-controls">
                 <div class="analysis-control">
+                  <label class="overline" for="range-events">Range</label>
+                  <select id="range-events" class="analysis-select" data-range-select="events" aria-label="Events range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control">
                   <label class="overline" for="analysis-events-from">From</label>
-                  <select id="analysis-events-from" class="analysis-select"></select>
+                  <select id="analysis-events-from" class="analysis-select" data-range-from="events"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-events-to">To</label>
-                  <select id="analysis-events-to" class="analysis-select"></select>
+                  <select id="analysis-events-to" class="analysis-select" data-range-to="events"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-events-limit">Rows per list</label>
@@ -319,7 +362,7 @@
                     <option value="1000">1000</option>
                   </select>
                 </div>
-                <p class="analysis-controls__error" role="alert" hidden></p>
+                <p class="analysis-controls__error" id="analysis-events-error" role="alert" hidden></p>
               </div>
               <p class="field-help" id="analysis-events-export-note" hidden>
                 CSV exports the rows currently shown — a truncated list (shown / total) needs
@@ -351,12 +394,21 @@
               </div>
               <div class="analysis-controls">
                 <div class="analysis-control">
+                  <label class="overline" for="range-wars">Range</label>
+                  <select id="range-wars" class="analysis-select" data-range-select="wars" aria-label="Wars range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control">
                   <label class="overline" for="analysis-wars-from">From</label>
-                  <select id="analysis-wars-from" class="analysis-select"></select>
+                  <select id="analysis-wars-from" class="analysis-select" data-range-from="wars"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-wars-to">To</label>
-                  <select id="analysis-wars-to" class="analysis-select"></select>
+                  <select id="analysis-wars-to" class="analysis-select" data-range-to="wars"></select>
                 </div>
                 <p class="analysis-controls__error" id="analysis-wars-error" role="alert" hidden></p>
               </div>
@@ -387,8 +439,28 @@
 
             <section class="analysis-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
               <div class="analysis-toolbar">
-                <p class="overline">Daily headline history</p>
+                <p class="overline" data-changes-toolbar>Daily headline history</p>
                 <button class="button button--outline button--small" type="button" data-export="changes" disabled>Export CSV</button>
+              </div>
+              <div class="analysis-controls" data-range-controls="changes">
+                <div class="analysis-control">
+                  <label class="overline" for="range-changes">Range</label>
+                  <select id="range-changes" class="analysis-select" data-range-select="changes" aria-label="Changes range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control" data-range-pair="changes" hidden>
+                  <label class="overline" for="range-changes-from">From</label>
+                  <select id="range-changes-from" class="analysis-select" data-range-from="changes" aria-label="Changes range from"></select>
+                </div>
+                <div class="analysis-control" data-range-pair="changes" hidden>
+                  <label class="overline" for="range-changes-to">To</label>
+                  <select id="range-changes-to" class="analysis-select" data-range-to="changes" aria-label="Changes range to"></select>
+                </div>
+                <p class="analysis-controls__error" id="range-changes-error" role="alert" hidden></p>
               </div>
               <div class="data-table__wrap">
                 <table class="data-table" aria-label="Daily change history">
@@ -417,12 +489,21 @@
               </div>
               <div class="analysis-controls">
                 <div class="analysis-control">
+                  <label class="overline" for="range-compare">Range</label>
+                  <select id="range-compare" class="analysis-select" data-range-select="compare" aria-label="Compare range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control">
                   <label class="overline" for="analysis-compare-from">From</label>
-                  <select id="analysis-compare-from" class="analysis-select"></select>
+                  <select id="analysis-compare-from" class="analysis-select" data-range-from="compare"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-compare-to">To</label>
-                  <select id="analysis-compare-to" class="analysis-select"></select>
+                  <select id="analysis-compare-to" class="analysis-select" data-range-to="compare"></select>
                 </div>
                 <p class="analysis-controls__error" id="analysis-compare-error" role="alert" hidden></p>
               </div>
@@ -476,12 +557,21 @@
               </div>
               <div class="analysis-controls">
                 <div class="analysis-control">
+                  <label class="overline" for="range-watch">Range</label>
+                  <select id="range-watch" class="analysis-select" data-range-select="watch" aria-label="Watch range">
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="analysis-control">
                   <label class="overline" for="analysis-watch-from">From</label>
-                  <select id="analysis-watch-from" class="analysis-select"></select>
+                  <select id="analysis-watch-from" class="analysis-select" data-range-from="watch"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-watch-to">To</label>
-                  <select id="analysis-watch-to" class="analysis-select"></select>
+                  <select id="analysis-watch-to" class="analysis-select" data-range-to="watch"></select>
                 </div>
                 <div class="analysis-control">
                   <label class="overline" for="analysis-watch-severity">Severity</label>
@@ -498,6 +588,7 @@
                     <option value="village_gained">gained</option>
                     <option value="village_lost">lost</option>
                     <option value="conquest">conquest</option>
+                    <option value="alliance_change">alliance change</option>
                     <option value="deleted">deleted</option>
                   </select>
                 </div>
@@ -630,21 +721,6 @@
               <span class="card-caption" data-overview-asof></span>
             </header>
             <div class="overview-grid" data-overview-grid hidden>
-              <div class="overview-block">
-                <p class="overline">Data freshness</p>
-                <strong class="overview-value" data-overview-freshness>—</strong>
-                <span class="metric-note" data-overview-freshness-note></span>
-              </div>
-              <div class="overview-block">
-                <p class="overline">Last successful fetch</p>
-                <strong class="overview-value overview-value--mono" data-overview-last-fetch>—</strong>
-                <span class="metric-note">UTC</span>
-              </div>
-              <div class="overview-block">
-                <p class="overline">Last successful report</p>
-                <strong class="overview-value overview-value--mono" data-overview-last-report>—</strong>
-                <span class="metric-note">UTC</span>
-              </div>
               <div class="overview-block">
                 <p class="overline">Tracked villages</p>
                 <strong class="overview-value" data-overview-villages>—</strong>
@@ -858,17 +934,24 @@
             <form id="settings-form" novalidate>
               <div class="form-grid">
                 <div class="field field--wide" data-field="ALLIANCE_TAGS">
-                  <label for="ALLIANCE_TAGS">Alliance tags</label>
+                  <label for="ALLIANCE_TAGS">Our alliances (scope &amp; report)</label>
                   <textarea id="ALLIANCE_TAGS" name="ALLIANCE_TAGS" rows="2" autocomplete="off" aria-describedby="ALLIANCE_TAGS-help ALLIANCE_TAGS-error" data-setting-key="ALLIANCE_TAGS"></textarea>
-                  <p class="field-help" id="ALLIANCE_TAGS-help">Separate tags with commas or one tag per line.</p>
+                  <p class="field-help" id="ALLIANCE_TAGS-help">The alliances this dashboard tracks: KPI, region control, events and the daily report. Separate tags with commas or one tag per line.</p>
                   <p class="field-error" id="ALLIANCE_TAGS-error" role="alert"></p>
                 </div>
 
                 <div class="field field--wide" data-field="TRACKED_ALLIANCES">
-                  <label for="TRACKED_ALLIANCES">Tracked alliances (Standings)</label>
+                  <label for="TRACKED_ALLIANCES">Comparison alliances (Standings)</label>
                   <textarea id="TRACKED_ALLIANCES" name="TRACKED_ALLIANCES" rows="3" autocomplete="off" aria-describedby="TRACKED_ALLIANCES-help TRACKED_ALLIANCES-error" data-setting-key="TRACKED_ALLIANCES"></textarea>
-                  <p class="field-help" id="TRACKED_ALLIANCES-help">Alliances compared in the report's Standings field (ours are bold). Include allies and enemies; leave empty to hide the field.</p>
+                  <p class="field-help" id="TRACKED_ALLIANCES-help">An optional comparison pool for the Standings chart (ours are highlighted). Separate from the scope above — leave empty to hide the field.</p>
                   <p class="field-error" id="TRACKED_ALLIANCES-error" role="alert"></p>
+                </div>
+
+                <div class="field field--wide" data-field="REPORT_REGIONS">
+                  <label for="REPORT_REGIONS">Report regions <span class="optional">Optional</span></label>
+                  <textarea id="REPORT_REGIONS" name="REPORT_REGIONS" rows="2" autocomplete="off" aria-describedby="REPORT_REGIONS-help REPORT_REGIONS-error" data-setting-key="REPORT_REGIONS"></textarea>
+                  <p class="field-help" id="REPORT_REGIONS-help">Regions shown in the daily report's Regions card (max 10). Separate with commas or one per line; leave empty for the top 10 by share. Unknown names are skipped with a job warning.</p>
+                  <p class="field-error" id="REPORT_REGIONS-error" role="alert"></p>
                 </div>
 
                 <div class="field" data-field="CHANNEL_ID">

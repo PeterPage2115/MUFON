@@ -138,12 +138,14 @@ function wireDashboardViews() {
   });
 }
 
-// Public build provenance: best-effort, never blocks the dashboard.
+// Public build provenance: best-effort, never blocks the dashboard. The
+// header shows the installed VERSION (v<version>); /api/meta still carries
+// build_sha for deployment verification and the live smoke.
 function loadMeta() {
   return api
     .meta()
     .then(function (meta) {
-      setText(els.headerBuild, meta.build_sha || "—");
+      setText(els.headerBuild, meta.version ? "v" + meta.version : "—");
     })
     .catch(function () {
       setText(els.headerBuild, "—");

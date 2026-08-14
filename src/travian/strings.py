@@ -11,8 +11,12 @@ Wording decisions (locked by tests, documented in learnings):
   SIGN — typographically consistent with the em-dash separators).
 - truncation line "…and N more" (… = U+2026 HORIZONTAL ELLIPSIS).
 - separators are " — " (U+2014 em dash) and " · " (U+00B7 middle dot).
-- truncated names end with "…" (U+2026): regions at 12 chars, standings
-  tags at 7, village names at 24, player names at 18.
+- truncated names end with "…" (U+2026): regions at 10 chars (compact
+  mobile lines), standings tags at 7, village names at 24, player names at 18.
+- the Regions fence is the COMPACT mobile layout: every line is capped at 36
+  chars (region name 10, then share/pop/deltas as plain text — no fixed
+  columns, no control bar) so Discord mobile never creates a horizontal
+  scroll; the Standings fence stays fixed-width 39-char lines.
 - table headers are COMPUTED with the same cell widths as the data rows so
   the labels sit exactly over their columns — never hand-pad them.
 """
@@ -58,26 +62,28 @@ VILLAGE_FOUNDED_LINE = "**{name}** ({x}|{y}) — {region} — by {founder}"
 VILLAGE_FOUNDED_NO_REGION_LINE = "**{name}** ({x}|{y}) — by {founder}"
 LOST_CONQUERED_LINE = "**{name}** ({x}|{y}) — conquered by **{owner}**"  # region-absent fallback
 LOST_CONQUERED_REGION_LINE = "**{name}** ({x}|{y}) — {region} — conquered by **{owner}**"
+LOST_ALLIANCE_CHANGED_LINE = "**{name}** ({x}|{y}) — alliance changed to **{owner}**"  # region-absent fallback
+LOST_ALLIANCE_CHANGED_REGION_LINE = "**{name}** ({x}|{y}) — {region} — alliance changed to **{owner}**"
 LOST_DELETED_LINE = "**{name}** ({x}|{y}) — deleted"  # region-absent fallback
 LOST_DELETED_REGION_LINE = "**{name}** ({x}|{y}) — {region} — deleted"
 OWNER_UNKNOWN = "unknown"
 
-# --- Tables (Standings + Regions, monospace-aligned) --------------------------------
-# Column positions are load-bearing (see report_embed): standings tag col 0,
-# pop col 8, Δ pop col 16, VP col 24, Δ VP col 32 (39-char lines); region
-# name col 0, bar col 13, share col 20, pop col 27, Δ % col 35, VP Δ col 43,
-# to 50% col 51 (58-char lines). Headers are built with the SAME widths as the
-# data cells (numeric columns right-aligned) — do not "tidy".
+# --- Tables (Standings + Regions) ------------------------------------------------
+# Standings stays a fixed-width fence: tag col 0, pop col 8, Δ pop col 16,
+# VP col 24, Δ VP col 32 (39-char lines). Headers are built with the SAME
+# widths as the data cells (numeric columns right-aligned) — do not "tidy".
+# Regions uses the COMPACT mobile layout (no horizontal scroll on Discord
+# mobile): each region is two short lines, region names truncated to 10
+# chars and every fenced line hard-capped at 36 chars.
 STANDINGS_TABLE_HEADER = f"{'Tag':<7} {'Pop':>7} {'Δ Pop':>7} {'VP':>7} {'Δ VP':>7}"
 STANDINGS_TABLE_LINE = "{tag:<7} {pop:>7,} {pop_delta:>7} {vp:>7,} {vp_delta:>7}"
 STANDINGS_TABLE_DIVIDER = "─" * 39  # U+2500
 STANDINGS_OURS_MARK = "★"
 STANDINGS_OURS_FOOTNOTE = "_★ our alliances_"
-REGION_TABLE_HEADER = f"{'Region':<12} {'Control':<13} {'Pop':>7} {'Δ %':>7} {'VP Δ':>7} {'To 50%':>7}"
-REGION_TABLE_LINE = "{region:<12} {bar} {share:>6.1%} {pop:>7,} {share_delta:>7} {vp_delta:>7} {to50:>7}"
-REGION_TABLE_DIVIDER = "─" * 58  # U+2500
-REGION_BAR_FILL = "▓"
-REGION_BAR_EMPTY = "░"
+STANDINGS_MORE_LINE = "…and {n} more alliances"
+REGION_LINE = "{region} · {share} · {pop}"
+REGION_DELTA_LINE = "Δ {share_delta} · VP {vp_delta} · {to50}"
+REGION_TABLE_DIVIDER = "─" * 36  # U+2500 — short enough for the mobile cap
 REGION_CONTROLLED = "✓"
 REGION_INACTIVE_CELL = "—"  # To-50% cell for inactive regions (same glyph as DELTA_NONE, different column)
 REGION_TO50_NEEDED = "+{n:,}"

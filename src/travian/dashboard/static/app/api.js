@@ -159,8 +159,8 @@ export var api = {
 };
 
 // Kinds that honor the alliance filter (standings is a cross-alliance
-// comparison and never filters).
-var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players"];
+// comparison and never filters; wars is always the tracked universe).
+var ALLIANCE_FILTERED_KINDS = ["regions", "events", "deltas", "players", "compare", "watch"];
 
 api.analysis = function (kind, params) {
   var parts = [];
@@ -183,8 +183,13 @@ api.analysis = function (kind, params) {
   return request("GET", "/api/analysis/" + kind + qs);
 };
 
-api.standings = function (tags, days) {
-  var parts = [["days", days]];
+api.standings = function (tags, params) {
+  var parts = [];
+  if (params) {
+    parts = Object.keys(params).map(function (key) {
+      return [key, params[key]];
+    });
+  }
   (tags || []).forEach(function (tag) {
     parts.push(["tag", tag]);
   });
