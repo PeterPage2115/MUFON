@@ -301,7 +301,7 @@ code,
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .status-dot {
@@ -384,7 +384,12 @@ code,
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-2);
-  flex: none;
+  /* As a flex item of .page-intro the row must be able to shrink below its
+     max-content (the Refresh button + last-good-load) — otherwise it pushes
+     the document wider at tablet widths. */
+  min-width: 0;
+  flex: 1 1 auto;
+  justify-content: flex-end;
   font-size: 0.75rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
