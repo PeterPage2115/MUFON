@@ -56,6 +56,21 @@ class VillageHistoryPoint(BaseModel):
     population: int
 
 
+class PlayerHistoryPoint(BaseModel):
+    """One snapshot's aggregate for a player (the player-history detail).
+
+    Aggregated per stable ``player_id`` across snapshots — the player's own
+    identity (name/alliance) is the latest value on that date.
+    """
+
+    snapshot_date: str
+    player_name: str
+    alliance_tag: str | None = None
+    villages: int
+    population: int
+    vp: int
+
+
 class SnapshotDates(BaseModel):
     """Latest and previous snapshot dates (ISO ``YYYY-MM-DD``), if any."""
 

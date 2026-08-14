@@ -38,7 +38,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TypedDict, cast
 
-from travian.models import AllianceDay, RegionDay, SummaryDay, VillageHistoryPoint, VillageRow
+from travian.models import (
+    AllianceDay,
+    PlayerHistoryPoint,
+    RegionDay,
+    SummaryDay,
+    VillageHistoryPoint,
+    VillageRow,
+)
 
 #: Full coordinate query: ``x|y`` or ``x,y`` with optional padding and signs.
 _COORD_RE = re.compile(r"^(-?\d+)\s*[|,]\s*(-?\d+)$")
@@ -105,6 +112,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         ON villages (snapshot_date, region)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_villages_player
+        ON villages (player_id, snapshot_date)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -133,10 +144,15 @@ INSERT OR REPLACE INTO villages (
 
 @dataclass(frozen=True)
 class SnapshotRecord:
-    """One ``snapshots`` row: the day and which source wrote it."""
+    """One ``snapshots`` row: the day, its write time and which source wrote it.
+
+    ``created_at`` doubles as the snapshot's identity for the dashboard's
+    payload cache key (a re-fetch of the same day replaces the snapshot and
+    bumps the timestamp)."""
 
     snapshot_date: str
     source: str
+    created_at: str = ""
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -309,6 +325,284 @@ def village_history(conn: sqlite3.Connection, village_id: int, days: int) -> lis
     ]
 
 
+def player_history(conn: sqlite3.Connection, player_id: int, days: int) -> list[PlayerHistoryPoint]:
+    """Per-snapshot aggregates for one stable ``player_id``, ASC by date.
+
+    One point per snapshot date the player owned at least one village, over
+    the newest ``days`` snapshot dates (``idx_villages_player`` serves the
+    lookup). Name/alliance are the date's values (MAX over the player's rows
+    — a player maps to one name per snapshot in the map data).
+    """
+    dates = list_dates(conn)[-days:]
+    if not dates:
+        return []
+    placeholders = ",".join("?" * len(dates))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            "SELECT snapshot_date, MAX(player_name) AS player_name,"
+            + " MAX(alliance_tag) AS alliance_tag, COUNT(*) AS villages,"
+            + " SUM(population) AS population, SUM(victory_points) AS vp"
+            + " FROM villages WHERE player_id = ? AND snapshot_date IN (" + placeholders + ")"
+            + " GROUP BY snapshot_date ORDER BY snapshot_date",
+            [player_id, *dates],
+        ).fetchall(),
+    )
+    return [
+        PlayerHistoryPoint(
+            snapshot_date=_agg_str(row, "snapshot_date"),
+            player_name=_agg_str(row, "player_name"),
+            alliance_tag=(_agg_str(row, "alliance_tag") or None) if row["alliance_tag"] else None,
+            villages=_agg_int(row, "villages"),
+            population=_agg_int(row, "population"),
+            vp=_agg_int(row, "vp"),
+        )
+        for row in rows
+    ]
+
+
+def villages_in_region(
+    conn: sqlite3.Connection,
+    snapshot_date: str,
+    region: str,
+    limit: int,
+    *,
+    side_ids: set[int] | None = None,
+    filter_ids: set[int] | None = None,
+) -> list[tuple[VillageRow, str]]:
+    """Villages of one region on one date, population DESC, capped at ``limit``.
+
+    ``side`` is ``tracked`` when the village's alliance_id is in ``side_ids``
+    (the combined selection) and ``other`` otherwise; with ``filter_ids`` set
+    (a single-tag selection) only those ids are returned and every row is
+    ``tracked``. ``region`` NULL rows are excluded (region-less villages).
+    """
+    sql = "SELECT * FROM villages WHERE snapshot_date = ? AND region = ?"
+    params: list[object] = [snapshot_date, region]
+    if filter_ids is not None:
+        if not filter_ids:
+            return []
+        placeholders = ",".join("?" * len(filter_ids))
+        sql += " AND alliance_id IN (" + placeholders + ")"
+        params.extend(sorted(filter_ids))
+    sql += " ORDER BY population DESC, village_id ASC LIMIT ?"
+    params.append(limit)
+    rows = cast(list[_VillageColumns], conn.execute(sql, params).fetchall())
+    return [
+        (
+            _row_to_village(row),
+            "tracked" if side_ids is not None and row["alliance_id"] in side_ids else "other",
+        )
+        for row in rows
+    ]
+
+
+# --- SQL aggregation helpers (Faza 3 performance contract) ----------------------
+#
+# The dashboard's Regions/Overview/Compare endpoints must hold the 1.0 s p95
+# bar on the 60k×7 seed. Aggregates are computed in SQL (GROUP BY) instead of
+# materializing every village row into VillageRow objects; the pure merge
+# functions in metrics.py keep the exact report semantics.
+
+
+@dataclass(frozen=True)
+class RegionAggregate:
+    """Per-region aggregate of ONE date (SQL GROUP BY, no row materialization)."""
+
+    region: str
+    our_villages: int
+    our_pop: int
+    our_vp: int
+    total_villages: int
+    total_pop: int
+
+
+@dataclass(frozen=True)
+class PlayerAggregate:
+    """Per-player aggregate of ONE date (SQL GROUP BY, no row materialization)."""
+
+    player_id: int
+    player_name: str
+    villages: int
+    population: int
+    vp: int
+
+
+def _placeholders(n: int) -> str:
+    return ",".join("?" * n)
+
+
+def _region_key(row: Mapping[str, object]) -> str:
+    """The region group key: NULL region groups as "" (metrics convention)."""
+    value = row["region"]
+    return cast(str, value) if value is not None else ""
+
+
+def _agg_int(row: Mapping[str, object], key: str) -> int:
+    """Typed accessor for the SQL aggregate rows (int columns)."""
+    return cast(int, row[key])
+
+
+def _agg_str(row: Mapping[str, object], key: str) -> str:
+    """Typed accessor for the SQL aggregate rows (str columns)."""
+    return cast(str, row[key])
+
+
+def region_aggregates(
+    conn: sqlite3.Connection, date: str, alliance_ids: set[int]
+) -> dict[str, RegionAggregate]:
+    """``region → RegionAggregate`` for one date (NULL region groups as "").
+
+    ``alliance_ids`` may be empty → our_* fields are 0 (SQL ``IN ()`` is
+    invalid, so an empty set short-circuits to a totals-only query).
+    """
+    if not alliance_ids:
+        rows = cast(
+            list[Mapping[str, object]],
+            conn.execute(
+                "SELECT region, COUNT(*) AS total_villages, SUM(population) AS total_pop" + " FROM villages WHERE snapshot_date = ? GROUP BY region",
+                (date,),
+            ).fetchall(),
+        )
+        return {
+            _region_key(row): RegionAggregate(
+                region=_region_key(row),
+                our_villages=0,
+                our_pop=0,
+                our_vp=0,
+                total_villages=_agg_int(row, "total_villages"),
+                total_pop=_agg_int(row, "total_pop"),
+            )
+            for row in rows
+        }
+    placeholders = _placeholders(len(alliance_ids))
+    ids = tuple(sorted(alliance_ids))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            "SELECT region," + " SUM(CASE WHEN alliance_id IN (" + placeholders + ") THEN 1 ELSE 0 END) AS our_villages," + " SUM(CASE WHEN alliance_id IN (" + placeholders + ") THEN population ELSE 0 END) AS our_pop," + " SUM(CASE WHEN alliance_id IN (" + placeholders + ") THEN victory_points ELSE 0 END) AS our_vp," + " COUNT(*) AS total_villages, SUM(population) AS total_pop" + " FROM villages WHERE snapshot_date = ? GROUP BY region",
+            (*ids, *ids, *ids, date),
+        ).fetchall(),
+    )
+    return {
+        _region_key(row): RegionAggregate(
+            region=_region_key(row),
+            our_villages=_agg_int(row, "our_villages"),
+            our_pop=_agg_int(row, "our_pop"),
+            our_vp=_agg_int(row, "our_vp"),
+            total_villages=_agg_int(row, "total_villages"),
+            total_pop=_agg_int(row, "total_pop"),
+        )
+        for row in rows
+    }
+
+
+def player_aggregates(
+    conn: sqlite3.Connection, date: str, alliance_ids: set[int]
+) -> dict[int, PlayerAggregate]:
+    """``player_id → PlayerAggregate`` for one date (empty ids → {})."""
+    if not alliance_ids:
+        return {}
+    placeholders = _placeholders(len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            "SELECT player_id, MAX(player_name) AS player_name, COUNT(*) AS villages," + " SUM(population) AS population, SUM(victory_points) AS vp" + " FROM villages WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")" + " GROUP BY player_id",
+            (date, *sorted(alliance_ids)),
+        ).fetchall(),
+    )
+    return {
+        _agg_int(row, "player_id"): PlayerAggregate(
+            player_id=_agg_int(row, "player_id"),
+            player_name=_agg_str(row, "player_name"),
+            villages=_agg_int(row, "villages"),
+            population=_agg_int(row, "population"),
+            vp=_agg_int(row, "vp"),
+        )
+        for row in rows
+    }
+
+
+def alliance_totals(conn: sqlite3.Connection, date: str, alliance_ids: set[int]) -> tuple[int, int, int, int]:
+    """(villages, population, players, vp) for ``alliance_ids`` on one date."""
+    if not alliance_ids:
+        return (0, 0, 0, 0)
+    placeholders = _placeholders(len(alliance_ids))
+    row = cast(
+        Mapping[str, object] | None,
+        conn.execute(
+            "SELECT COUNT(*) AS villages, SUM(population) AS population," + " COUNT(DISTINCT player_id) AS players, SUM(victory_points) AS vp" + " FROM villages WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")",
+            (date, *sorted(alliance_ids)),
+        ).fetchone(),
+    )
+    if row is None or row["villages"] is None:
+        return (0, 0, 0, 0)
+    return (
+        _agg_int(row, "villages"),
+        _agg_int(row, "population"),
+        _agg_int(row, "players"),
+        _agg_int(row, "vp"),
+    )
+
+
+def village_ids(conn: sqlite3.Connection, date: str) -> set[int]:
+    """All village_ids of one date — an int-only scan (no row materialization)."""
+    rows = cast(list[Mapping[str, int]], conn.execute("SELECT village_id FROM villages WHERE snapshot_date = ?", (date,)).fetchall())
+    return {row["village_id"] for row in rows}
+
+
+def ours_village_ids(conn: sqlite3.Connection, date: str, alliance_ids: set[int]) -> set[int]:
+    """Village_ids of ``alliance_ids`` on one date (int-only scan)."""
+    if not alliance_ids:
+        return set()
+    placeholders = _placeholders(len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, int]],
+        conn.execute(
+            "SELECT village_id FROM villages WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")",
+            (date, *sorted(alliance_ids)),
+        ).fetchall(),
+    )
+    return {row["village_id"] for row in rows}
+
+
+def player_village_ids(conn: sqlite3.Connection, date: str, alliance_ids: set[int]) -> dict[int, set[int]]:
+    """``player_id → {village_id}`` for one date (int-only scan)."""
+    if not alliance_ids:
+        return {}
+    placeholders = _placeholders(len(alliance_ids))
+    rows = cast(
+        list[Mapping[str, int]],
+        conn.execute(
+            "SELECT player_id, village_id FROM villages" + " WHERE snapshot_date = ? AND alliance_id IN (" + placeholders + ")",
+            (date, *sorted(alliance_ids)),
+        ).fetchall(),
+    )
+    by_player: dict[int, set[int]] = {}
+    for row in rows:
+        by_player.setdefault(row["player_id"], set()).add(row["village_id"])
+    return by_player
+
+
+def region_alliance_totals_sql(conn: sqlite3.Connection, date: str) -> dict[str, list[tuple[str, int]]]:
+    """``region → top-5 [(tag, population), ...]`` — SQL GROUP BY per
+    ``(region, alliance_tag)`` instead of a Python scan over every row
+    (ROADMAP.md §5 performance contract; same shape as
+    ``metrics.region_alliance_totals``)."""
+    rows = cast(
+        list[Mapping[str, object]],
+        conn.execute(
+            "SELECT region, alliance_tag, SUM(population) AS population" + " FROM villages WHERE snapshot_date = ? GROUP BY region, alliance_tag" + " ORDER BY region, population DESC",
+            (date,),
+        ).fetchall(),
+    )
+    by_region: dict[str, list[tuple[str, int]]] = {}
+    for row in rows:
+        key = _region_key(row)
+        by_region.setdefault(key, []).append((_agg_str(row, "alliance_tag"), _agg_int(row, "population")))
+    return {region: pairs[:5] for region, pairs in by_region.items()}
+
+
 def list_dates(conn: sqlite3.Connection) -> list[str]:
     """All snapshot dates, ascending (ISO dates sort chronologically)."""
     rows = cast(
@@ -348,12 +642,14 @@ def load_latest(conn: sqlite3.Connection) -> SnapshotRecord | None:
     row = cast(
         Mapping[str, str] | None,
         conn.execute(
-            "SELECT snapshot_date, source FROM snapshots ORDER BY snapshot_date DESC LIMIT 1"
+            "SELECT snapshot_date, source, created_at FROM snapshots ORDER BY snapshot_date DESC LIMIT 1"
         ).fetchone(),
     )
     if row is None:
         return None
-    return SnapshotRecord(snapshot_date=row["snapshot_date"], source=row["source"])
+    return SnapshotRecord(
+        snapshot_date=row["snapshot_date"], source=row["source"], created_at=row["created_at"]
+    )
 
 
 def get_settings(conn: sqlite3.Connection) -> dict[str, JsonValue]:

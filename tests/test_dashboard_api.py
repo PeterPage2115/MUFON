@@ -249,6 +249,11 @@ def _seed_analysis_db(db: Path) -> None:
     conn.close()
 
 
+def _rows_for_single(pop: int = 100) -> list[VillageRow]:
+    """Two NOVA villages (default population) — a minimal single-snapshot map."""
+    return [_row(1, population=pop), _row(2, population=pop, player_id=1001, player_name="Player 1")]
+
+
 def _seed_logs(db: Path) -> None:
     conn = store.connect(db)
     for message in ["err0", "warn1", "info2", "err3", "err4"]:
@@ -2280,3 +2285,279 @@ class TestBootstrap:
             thread.server.should_exit = True  # type: ignore[attr-defined]  # uvicorn stop hook (test-only)
             thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+# --- Faza 3: overview / compare / player history / region villages ----------
+
+
+class TestAnalysisOverview:
+    def test_payload_with_pair(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/overview").json()
+
+        assert body["latest_date"] == "2026-08-09"
+        assert body["previous_date"] == "2026-08-08"
+        assert body["dates"] == ["2026-08-07", "2026-08-08", "2026-08-09"]
+        assert body["freshness"]["snapshot_date"] == "2026-08-09"
+        # Summary: current values + honest deltas from the pair. Note the
+        # seed gives villages 1+2 to the same player (1001 "Player 1").
+        assert body["summary"]["current"] == {
+            "villages": 4, "population": 5704, "players": 3, "vp": 40,
+        }
+        assert body["summary"]["previous"] == {
+            "villages": 4, "population": 5602, "players": 3, "vp": 40,
+        }
+        assert body["summary"]["delta"] == {
+            "villages": 0, "population": 102, "players": 0, "vp": 0,
+        }
+        assert body["summary"]["elapsed_days"] == 1
+        # Top regions: max 8, sorted by share desc; count is the full list.
+        assert [r["region"] for r in body["regions"]["top"]] == ["Testland", "Borders"]
+        assert body["regions"]["count"] == 2
+        assert body["regions"]["top"][0]["share"] > body["regions"]["top"][1]["share"]
+        # Players: three lists capped at 5.
+        assert len(body["players"]["population"]) <= 5
+        assert len(body["players"]["growth"]) <= 5
+        assert len(body["players"]["vp"]) <= 5
+        # Movement from the pair.
+        assert body["movement"] == {
+            "from": "2026-08-08", "to": "2026-08-09", "gained_total": 1, "lost_total": 1,
+        }
+
+    def test_no_data_and_single_snapshot(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            empty = client.get("/api/analysis/overview").json()
+        assert empty["latest_date"] is None
+        assert empty["previous_date"] is None
+        assert empty["summary"] == {}
+        assert empty["regions"] == {"top": [], "count": 0}
+        assert empty["movement"]["gained_total"] is None
+        assert empty["freshness"]["state"] == "no_data"
+
+        # One snapshot: current present, delta explicitly null — never a
+        # synthetic 0 pair.
+        conn = store.connect(db)
+        try:
+            store.save_snapshot(conn, "2026-08-09", _rows_for_single())
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            single = client.get("/api/analysis/overview").json()
+        assert single["previous_date"] is None
+        assert single["summary"]["current"]["villages"] == 2
+        assert single["summary"]["previous"] is None
+        assert single["summary"]["delta"] is None
+        assert single["summary"]["elapsed_days"] is None
+        assert single["movement"] == {
+            "from": None, "to": "2026-08-09", "gained_total": None, "lost_total": None,
+        }
+
+    def test_gap_pair_reports_elapsed_days(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_db(db, snapshot=False)
+        conn = store.connect(db)
+        try:
+            store.save_snapshot(conn, "2026-08-04", _rows_for_single(pop=100))
+            store.save_snapshot(conn, "2026-08-08", _rows_for_single(pop=110))
+        finally:
+            conn.close()
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/overview").json()
+        assert body["previous_date"] == "2026-08-04"
+        assert body["summary"]["elapsed_days"] == 4
+        assert body["summary"]["delta"]["population"] == 20  # 220 - 200
+        assert body["freshness"]["state"] == "gap"
+        assert body["freshness"]["gap_days"] == 3
+
+    def test_unknown_alliance_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/overview", params={"alliance": "NOPE"}).status_code == 422
+
+    def test_alliance_tag_scopes_payload(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            enemy = client.get("/api/analysis/overview", params={"alliance": "ENEMY"}).json()
+        # Enemy side: Testland id3 (2000) + Borders id6 (50) + Enemyland id8 (900).
+        assert enemy["summary"]["current"]["villages"] == 3
+        assert enemy["summary"]["current"]["population"] == 2000 + 50 + 900
+        assert enemy["regions"]["count"] == 3
+
+    def test_days_window(self, tmp_path: Path) -> None:
+        db = tmp_path / "ov.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/overview", params={"days": 2}).json()
+        assert body["dates"] == ["2026-08-08", "2026-08-09"]
+        assert client.get("/api/analysis/overview", params={"days": 1}).status_code == 422
+        assert client.get("/api/analysis/overview", params={"days": 61}).status_code == 422
+
+
+class TestAnalysisCompare:
+    def test_explicit_pair(self, tmp_path: Path) -> None:
+        db = tmp_path / "cp.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/compare", params={"from": "2026-08-07", "to": "2026-08-09"}).json()
+
+        assert body["from"] == "2026-08-07"
+        assert body["to"] == "2026-08-09"
+        assert body["elapsed_days"] == 2
+        assert body["summary"]["to"] == {"villages": 4, "population": 5704, "players": 3, "vp": 40}
+        assert body["summary"]["from"] == {"villages": 3, "population": 5100, "players": 2, "vp": 30}
+        assert body["summary"]["delta"] == {"villages": 1, "population": 604, "players": 1, "vp": 10}
+        by_region = {r["region"]: r for r in body["regions"]}
+        testland = by_region["Testland"]
+        assert testland["from_total_pop"] == 7000
+        assert testland["to_total_pop"] == 7604  # + gained village 7
+        # Village 5 sits in Borders — Testland's from-side our_pop is 5000.
+        assert testland["from_pop"] == 5000
+        assert testland["to_pop"] == 5604
+        assert testland["pop_delta"] == 604
+        assert round(testland["from_share"], 4) == round(5000 / 7000, 4)
+        assert round(testland["to_share"], 4) == round(5604 / 7604, 4)
+        assert round(testland["share_delta"], 4) == round(5604 / 7604 - 5000 / 7000, 4)
+        # Village 4 existed only on 08-08 — it is not part of the 07→09 pair.
+        assert body["movement"] == {"gained_total": 1, "lost_total": 0}
+
+    def test_missing_pair_defaults_to_latest(self, tmp_path: Path) -> None:
+        db = tmp_path / "cp.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/compare").json()
+        assert body["from"] == "2026-08-08"
+        assert body["to"] == "2026-08-09"
+
+    def test_fewer_than_two_dates_empty(self, tmp_path: Path) -> None:
+        db = tmp_path / "cp.db"
+        _seed_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/compare").json()
+        assert body == {
+            "from": None, "to": None, "elapsed_days": None,
+            "summary": {"from": None, "to": None, "delta": None},
+            "regions": [], "movement": {"gained_total": None, "lost_total": None},
+        }
+
+    def test_date_validation_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "cp.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/compare", params={"from": "2026-08-09", "to": "2026-08-09"}).status_code == 422
+            assert client.get("/api/analysis/compare", params={"from": "2026-08-10", "to": "2026-08-09"}).status_code == 422
+            res = client.get("/api/analysis/compare", params={"from": "2026-08-01", "to": "2026-08-09"})
+            assert res.status_code == 422
+            assert "valid dates" in res.json()["detail"]
+            # One side given without the other → 422.
+            assert client.get("/api/analysis/compare", params={"from": "2026-08-08"}).status_code == 422
+
+    def test_alliance_filter(self, tmp_path: Path) -> None:
+        db = tmp_path / "cp.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            body = client.get(
+                "/api/analysis/compare", params={"from": "2026-08-07", "to": "2026-08-09", "alliance": "ENEMY"}
+            ).json()
+        assert body["summary"]["to"]["population"] == 2950  # 2000 + 50 + 900
+        assert client.get(
+            "/api/analysis/compare", params={"from": "2026-08-07", "to": "2026-08-09", "alliance": "NOPE"}
+        ).status_code == 422
+
+
+class TestPlayerHistory:
+    def test_history_aggregates_and_present(self, tmp_path: Path) -> None:
+        db = tmp_path / "ph.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/players/1001/history").json()
+        assert body["player_id"] == 1001
+        assert body["present_in_latest"] is True
+        assert [p["snapshot_date"] for p in body["history"]] == ["2026-08-07", "2026-08-08", "2026-08-09"]
+        # Player 1001 owns villages 1+2 in the seed (same player, "Player 1").
+        assert body["history"][0] == {
+            "snapshot_date": "2026-08-07",
+            "player_name": "Player 1",
+            "alliance_tag": "NOVA",
+            "villages": 2,
+            "population": 5000,
+            "vp": 20,
+        }
+        assert body["history"][-1]["population"] == 5004
+
+    def test_history_only_player_present_in_latest_false(self, tmp_path: Path) -> None:
+        db = tmp_path / "ph.db"
+        _seed_analysis_db(db)  # village 4 (player 1004) exists on 08-08 only
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/players/1004/history").json()
+        assert body["present_in_latest"] is False
+        assert len(body["history"]) == 1
+        assert body["history"][0]["snapshot_date"] == "2026-08-08"
+
+    def test_unknown_player_404(self, tmp_path: Path) -> None:
+        db = tmp_path / "ph.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/players/999999/history").status_code == 404
+
+    def test_days_window_clamps(self, tmp_path: Path) -> None:
+        db = tmp_path / "ph.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/players/1001/history", params={"days": 2}).json()
+        assert [p["snapshot_date"] for p in body["history"]] == ["2026-08-08", "2026-08-09"]
+        assert client.get("/api/analysis/players/1001/history", params={"days": 1}).status_code == 422
+
+
+class TestRegionVillages:
+    def test_combined_side_annotation(self, tmp_path: Path) -> None:
+        db = tmp_path / "rv.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/regions/Testland/villages").json()
+        assert body["snapshot_date"] == "2026-08-09"
+        assert body["region"] == "Testland"
+        by_id = {r["village_id"]: r for r in body["results"]}
+        assert set(by_id) == {1, 2, 3, 7}
+        assert by_id[1]["side"] == "tracked"  # NOVA
+        assert by_id[3]["side"] == "other"  # ENEMY
+        assert by_id[7]["side"] == "tracked"  # gained NOVA village
+        # Population DESC ordering.
+        pops = [r["population"] for r in body["results"]]
+        assert pops == sorted(pops, reverse=True)
+
+    def test_single_tag_filter(self, tmp_path: Path) -> None:
+        db = tmp_path / "rv.db"
+        _seed_analysis_db(db)
+        env = _env(ALLIANCE_TAGS="NOVA,ENEMY")
+        with TestClient(_app(db, env)) as client:
+            body = client.get("/api/analysis/regions/Testland/villages", params={"alliance": "NOVA"}).json()
+        assert {r["village_id"] for r in body["results"]} == {1, 2, 7}
+        assert all(r["side"] == "tracked" for r in body["results"])
+
+    def test_unknown_region_empty_and_date_422(self, tmp_path: Path) -> None:
+        db = tmp_path / "rv.db"
+        _seed_analysis_db(db)
+        with TestClient(_app(db, _env())) as client:
+            empty = client.get("/api/analysis/regions/Nope/villages").json()
+        assert empty["total"] == 0
+        assert empty["results"] == []
+        with TestClient(_app(db, _env())) as client:
+            assert client.get("/api/analysis/regions/Testland/villages", params={"date": "2026-08-01"}).status_code == 422
+            assert client.get("/api/analysis/regions/Testland/villages", params={"limit": 1}).json()["total"] == 1
+            assert client.get("/api/analysis/regions/Testland/villages", params={"limit": 201}).status_code == 422
+
+    def test_empty_db(self, tmp_path: Path) -> None:
+        db = tmp_path / "rv.db"
+        _seed_db(db, snapshot=False)
+        with TestClient(_app(db, _env())) as client:
+            body = client.get("/api/analysis/regions/Testland/villages").json()
+        assert body["snapshot_date"] is None
+        assert body["results"] == []

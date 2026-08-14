@@ -23,7 +23,6 @@ from travian.models import (
     VillageRow,
 )
 from travian.store import (
-    SnapshotRecord,
     alliance_days,
     alliance_ids_by_tag,
     append_log,
@@ -171,13 +170,20 @@ def test_save_snapshot_third_fetch_adds_new_village(conn: sqlite3.Connection) ->
 def test_save_snapshot_records_source_when_default(conn: sqlite3.Connection) -> None:
     save_snapshot(conn, "2026-08-09", [])
 
-    assert load_latest(conn) == SnapshotRecord(snapshot_date="2026-08-09", source="map.sql")
+    latest = load_latest(conn)
+    assert latest is not None
+    assert latest.snapshot_date == "2026-08-09"
+    assert latest.source == "map.sql"
+    assert latest.created_at  # cache-key identity, always present
 
 
 def test_save_snapshot_records_source_when_custom(conn: sqlite3.Connection) -> None:
     save_snapshot(conn, "2026-08-09", [], source="backfill")
 
-    assert load_latest(conn) == SnapshotRecord(snapshot_date="2026-08-09", source="backfill")
+    latest = load_latest(conn)
+    assert latest is not None
+    assert latest.snapshot_date == "2026-08-09"
+    assert latest.source == "backfill"
 
 
 def test_save_snapshot_records_date_when_no_rows(conn: sqlite3.Connection) -> None:
@@ -209,7 +215,11 @@ def test_load_latest_returns_newest_when_multiple_dates(conn: sqlite3.Connection
     for date in ("2026-08-07", "2026-08-09", "2026-08-08"):
         save_snapshot(conn, date, [])
 
-    assert load_latest(conn) == SnapshotRecord(snapshot_date="2026-08-09", source="map.sql")
+    latest = load_latest(conn)
+    assert latest is not None
+    assert latest.snapshot_date == "2026-08-09"
+    assert latest.source == "map.sql"
+    assert latest.created_at  # cache-key identity, always present
 
 
 def test_load_latest_none_when_no_snapshots(conn: sqlite3.Connection) -> None:

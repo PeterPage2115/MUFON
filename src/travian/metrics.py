@@ -64,7 +64,7 @@ from travian.models import (
     VillageEvent,
     VillageRow,
 )
-from travian.store import append_log
+from travian.store import PlayerAggregate, RegionAggregate, append_log
 
 logger = logging.getLogger(__name__)
 
@@ -547,5 +547,114 @@ def top_players(
     else:
         by_growth = sorted(stats, key=lambda s: (-(s.growth or 0), -s.population, s.player_name))[:n]
         by_gains = sorted(stats, key=lambda s: (-gains[s.player_id], -s.population, s.player_name))[:n]
+        by_vp = sorted(stats, key=lambda s: (-s.vp, -s.population, s.player_name))[:n]
+    return {"population": by_pop, "growth": by_growth, "new_villages": by_gains, "vp": by_vp}
+
+
+# --- SQL-aggregate merge functions (dashboard performance contract) -------------
+#
+# The dashboard endpoints feed these with ``store.RegionAggregate`` /
+# ``store.PlayerAggregate`` dicts (SQL GROUP BY) instead of full row lists.
+# The semantics are identical to region_stats / top_players above — the
+# report embeds keep using the row-based versions.
+
+
+def region_stats_from_aggregates(
+    curr: dict[str, RegionAggregate],
+    prev: dict[str, RegionAggregate] | None,
+) -> list[RegionStat]:
+    """``region_stats`` semantics fed by SQL aggregates (no row materialization).
+
+    Regions of interest = any region in curr OR prev; deltas None only when
+    ``prev`` is None; a region absent from prev yields curr − 0. Sort: share
+    desc, region asc.
+    """
+    stats: list[RegionStat] = []
+    all_regions = set(curr) | (set(prev) if prev is not None else set[str]())
+
+    def _has_ours(agg_map: dict[str, RegionAggregate] | None, region: str) -> bool:
+        agg = agg_map.get(region) if agg_map is not None else None
+        return agg is not None and agg.our_villages > 0
+
+    # Regions of interest = any region where WE have a village in curr OR
+    # prev (enemy-only regions are not listed — same rule as region_stats).
+    regions = {region for region in all_regions if _has_ours(curr, region) or _has_ours(prev, region)}
+    for region in regions:
+        c = curr.get(region)
+        p = prev.get(region) if prev is not None else None
+        our_pop = c.our_pop if c is not None else 0
+        region_total_pop = c.total_pop if c is not None else 0
+        share = our_pop / region_total_pop if region_total_pop else 0.0
+        our_vp = c.our_vp if c is not None else 0
+        if prev is None:
+            delta: int | None = None
+            vp_delta: int | None = None
+            share_delta: float | None = None
+        else:
+            prev_our_pop = p.our_pop if p is not None else 0
+            prev_our_vp = p.our_vp if p is not None else 0
+            prev_total = p.total_pop if p is not None else 0
+            prev_share = prev_our_pop / prev_total if prev_total else 0.0
+            delta = our_pop - prev_our_pop
+            vp_delta = our_vp - prev_our_vp
+            share_delta = share - prev_share
+        stats.append(
+            RegionStat(
+                region=region,
+                our_villages=c.our_villages if c is not None else 0,
+                our_pop=our_pop,
+                region_total_pop=region_total_pop,
+                share=share,
+                delta=delta,
+                our_vp=our_vp,
+                vp_delta=vp_delta,
+                share_delta=share_delta,
+            )
+        )
+    stats.sort(key=lambda s: (-s.share, s.region))
+    return stats
+
+
+def player_stats_from_aggregates(
+    curr: dict[int, PlayerAggregate],
+    prev: dict[int, PlayerAggregate] | None,
+    gains: dict[int, int],
+    n: int = 5,
+) -> dict[str, list[PlayerStat]]:
+    """``top_players`` semantics fed by SQL aggregates + id-set gains.
+
+    ``gains`` maps player_id → strict-gained village count (computed by the
+    caller from ``village_ids``/``ours_village_ids``); the player universe is
+    curr ∪ prev; growth None only when ``prev`` is None. Same tie-breaks and
+    ranking order as ``top_players``.
+    """
+    player_ids = set(curr) | (set(prev) if prev is not None else set[int]())
+    stats: list[PlayerStat] = []
+    for player in player_ids:
+        c = curr.get(player)
+        p = prev.get(player) if prev is not None else None
+        stats.append(
+            PlayerStat(
+                player_id=player,
+                player_name=c.player_name if c is not None else (p.player_name if p is not None else ""),
+                population=c.population if c is not None else 0,
+                villages=c.villages if c is not None else 0,
+                growth=(
+                    None
+                    if prev is None
+                    else (c.population if c is not None else 0) - (p.population if p is not None else 0)
+                ),
+                vp=c.vp if c is not None else 0,
+                gains=gains.get(player, 0),
+            )
+        )
+    by_pop = sorted(stats, key=lambda s: (-s.population, s.player_name))[:n]
+    if prev is None:
+        by_growth = by_pop
+        by_gains = by_pop
+        by_vp = by_pop
+    else:
+        by_growth = sorted(stats, key=lambda s: (-(s.growth or 0), -s.population, s.player_name))[:n]
+        by_gains = sorted(stats, key=lambda s: (-gains.get(s.player_id, 0), -s.population, s.player_name))[:n]
         by_vp = sorted(stats, key=lambda s: (-s.vp, -s.population, s.player_name))[:n]
     return {"population": by_pop, "growth": by_growth, "new_villages": by_gains, "vp": by_vp}

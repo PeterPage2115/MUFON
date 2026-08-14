@@ -129,7 +129,8 @@ import sqlite3
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Final, Literal, Protocol, TypedDict, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -143,9 +144,8 @@ from travian.build_info import get_build_info
 from travian.dashboard import auth
 from travian.metrics import (
     conquests_between,
-    region_alliance_totals,
-    region_stats,
-    top_players,
+    player_stats_from_aggregates,
+    region_stats_from_aggregates,
     village_events,
 )
 from travian.models import ConquestEvent, DeletedVillageEvent, RegionDay, VillageEvent
@@ -566,6 +566,115 @@ def _resolve_alliance_ids(
         status_code=422,
         detail=f"unknown alliance {alliance!r} — valid: {', '.join(cfg.alliance_tags)}",
     )
+
+
+def _movement_totals(
+    conn: sqlite3.Connection, prev_date: str | None, curr_date: str, ids: set[int]
+) -> tuple[int | None, int | None]:
+    """(gained_total, lost_total) counts between two dates — id sets only.
+
+    Same semantics as ``metrics.village_events``: gained = curr-ours villages
+    absent from prev (ANY owner); lost = prev-ours villages absent from curr
+    (conquered + deleted). ``prev_date`` None → (None, None).
+    """
+    if prev_date is None:
+        return None, None
+    prev_any = store.village_ids(conn, prev_date)
+    curr_any = store.village_ids(conn, curr_date)
+    curr_ours = store.ours_village_ids(conn, curr_date, ids)
+    prev_ours = store.ours_village_ids(conn, prev_date, ids)
+    return len(curr_ours - prev_any), len(prev_ours - curr_any)
+
+
+def _player_gains(conn: sqlite3.Connection, prev_date: str | None, curr_date: str, ids: set[int]) -> dict[int, int]:
+    """``player_id → strict-gained village count`` (village absent from prev
+    with ANY owner — the ``top_players`` gains definition)."""
+    if prev_date is None:
+        return {}
+    prev_any = store.village_ids(conn, prev_date)
+    gains: dict[int, int] = {}
+    for player, villages in store.player_village_ids(conn, curr_date, ids).items():
+        gained = len(villages - prev_any)
+        if gained:
+            gains[player] = gained
+    return gains
+
+
+# --- snapshot-keyed analysis cache (Faza 3 performance contract) -----------------
+#
+# The Regions-tab payload is cached per (db_path, latest snapshot identity,
+# days, alliance, config tags). Snapshots are immutable per (date,
+# created_at): a re-fetch of the same day replaces the snapshot and bumps
+# created_at, and settings saves change the tags tuple — so the key can
+# never serve stale data. The connection is opened inside the builder; the
+# cache never holds one.
+
+@lru_cache(maxsize=128)
+def _regions_payload_cached(
+    db_path: str,
+    latest_date: str,
+    latest_created_at: str,
+    days: int,
+    alliance: str,
+    alliance_tags: tuple[str, ...],
+) -> dict[str, object]:
+    """The full Regions-tab payload (series + current + top alliances).
+
+    ``alliance_tags`` (sorted, already in the key) replaces the merged-config
+    read: the caller resolves the tags fresh, so settings saves invalidate
+    the entry via the key.
+    """
+    # ``latest_created_at`` is the snapshot identity half of the cache key —
+    # deliberately not read: its only job is to invalidate the entry.
+    _ = latest_created_at
+    conn = store.connect(db_path)
+    try:
+        dates = store.list_dates(conn)[-days:]
+        # Same resolution semantics as _resolve_alliance_ids, fed by the key.
+        if alliance == "combined":
+            ids = _resolve_ids(conn, latest_date, list(alliance_tags))
+        else:
+            if alliance not in alliance_tags:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unknown alliance {alliance!r} — valid: {', '.join(alliance_tags)}",
+                )
+            ids = set(store.alliance_ids_by_tag(conn, latest_date).get(alliance, []))
+        day_rows = store.region_days(conn, dates[0], dates[-1], ids)
+        by_region: dict[str, list[RegionDay]] = {}
+        for day in day_rows:
+            by_region.setdefault(day.region, []).append(day)
+        share_series = analysis.region_share_series(day_rows)
+        series: dict[str, list[dict[str, object]]] = {}
+        for region in sorted(share_series):
+            days_list = by_region[region]
+            # Regions with no our-population over the window are dropped
+            # (flat 0.0% enemy-only lines); regions we left keep their
+            # declining line.
+            if not any(d.our_pop > 0 for d in days_list):
+                continue
+            series[region] = [
+                {"date": d.date, "share": share, "our_pop": d.our_pop, "total_pop": d.total_pop}
+                for (_, share), d in zip(share_series[region], days_list, strict=True)
+            ]
+        prev_date = dates[-2] if len(dates) >= 2 else None
+        curr_agg = store.region_aggregates(conn, latest_date, ids)
+        prev_agg = store.region_aggregates(conn, prev_date, ids) if prev_date is not None else None
+        stats = region_stats_from_aggregates(curr_agg, prev_agg)
+        current: list[dict[str, object]] = []
+        for stat in stats:
+            row = stat.model_dump()
+            row["active"] = analysis.region_active(stat)
+            row["controlled"] = analysis.region_controlled(stat)
+            row["to50_needed"] = analysis.to50_needed(stat)
+            current.append(row)
+        top_alliances = {
+            region: [{"tag": tag, "population": population} for tag, population in pairs]
+            for region, pairs in store.region_alliance_totals_sql(conn, latest_date).items()
+        }
+        return {"dates": dates, "series": series, "current": current, "top_alliances": top_alliances}
+    finally:
+        conn.close()
 
 
 def _event_dict(event: VillageEvent) -> dict[str, object]:
@@ -1173,46 +1282,14 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 latest = store.load_latest(conn)
                 if latest is None:
                     return {"dates": [], "series": {}, "current": [], "top_alliances": {}}
-                dates = store.list_dates(conn)[-days:]
-                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
-                day_rows = store.region_days(conn, dates[0], dates[-1], ids)
-                by_region: dict[str, list[RegionDay]] = {}
-                for day in day_rows:
-                    by_region.setdefault(day.region, []).append(day)
-                share_series = analysis.region_share_series(day_rows)
-                series: dict[str, list[dict[str, object]]] = {}
-                for region in sorted(share_series):
-                    days_list = by_region[region]
-                    # Regions with no our-population over the window are
-                    # dropped (flat 0.0% enemy-only lines); regions we left
-                    # keep their declining line.
-                    if not any(d.our_pop > 0 for d in days_list):
-                        continue
-                    series[region] = [
-                        {"date": d.date, "share": share, "our_pop": d.our_pop, "total_pop": d.total_pop}
-                        for (_, share), d in zip(share_series[region], days_list, strict=True)
-                    ]
-                # current = the latest-pair table (identical numbers to the
-                # report's Regions embed) plus the server-computed control
-                # fields — the UI formats, never re-implements the rules.
-                prev_date = dates[-2] if len(dates) >= 2 else None
-                curr_rows = store.load_villages(conn, latest.snapshot_date)
-                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
-                stats = region_stats(prev_rows, curr_rows, ids)
-                current: list[dict[str, object]] = []
-                for stat in stats:
-                    row = stat.model_dump()
-                    row["active"] = analysis.region_active(stat)
-                    row["controlled"] = analysis.region_controlled(stat)
-                    row["to50_needed"] = analysis.to50_needed(stat)
-                    current.append(row)
-                # Top-5 alliances per region over ALL villages of the latest
-                # snapshot (region context, not the filtered subset).
-                top_alliances = {
-                    region: [{"tag": tag, "population": population} for tag, population in pairs]
-                    for region, pairs in region_alliance_totals(curr_rows).items()
-                }
-                return {"dates": dates, "series": series, "current": current, "top_alliances": top_alliances}
+                return _regions_payload_cached(
+                    db_path,
+                    latest.snapshot_date,
+                    latest.created_at,
+                    days,
+                    alliance or "combined",
+                    tuple(sorted(cfg.alliance_tags)),
+                )
             finally:
                 conn.close()
 
@@ -1400,6 +1477,317 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
         return await asyncio.to_thread(read)
 
+    async def analysis_overview(
+        days: Annotated[int, Query(ge=2, le=60)] = 30,
+        alliance: str | None = None,
+    ) -> dict[str, object]:
+        """Command-center overview: freshness, headline summary (current /
+        previous / delta), top-8 regions by share, top-5 players and the
+        movement totals — all reused from the existing metrics/store surfaces
+        (ROADMAP.md §5). Zero snapshots → 200 null/empty; one snapshot never
+        fakes a delta of 0."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                dates = all_dates[-days:]
+                empty: dict[str, object] = {
+                    "dates": [],
+                    "latest_date": None,
+                    "previous_date": None,
+                    "freshness": compute_freshness(all_dates, datetime.now(UTC), cfg.fetch_tz),
+                    "summary": {},
+                    "regions": {"top": [], "count": 0},
+                    "players": {"population": [], "growth": [], "vp": []},
+                    "movement": {"from": None, "to": None, "gained_total": None, "lost_total": None},
+                }
+                latest = store.load_latest(conn)
+                if latest is None:
+                    return empty
+                prev_date = dates[-2] if len(dates) >= 2 else None
+                ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
+
+                # Headline summary: curr values + honest deltas (never a
+                # synthetic 0 pair when only one snapshot exists) — SQL
+                # aggregates, no materialized rows.
+                summary: dict[str, object] = {}
+                curr = store.alliance_totals(conn, latest.snapshot_date, ids)
+                prev = store.alliance_totals(conn, prev_date, ids) if prev_date is not None else None
+                summary["current"] = {
+                    "villages": curr[0],
+                    "population": curr[1],
+                    "players": curr[2],
+                    "vp": curr[3],
+                }
+                if prev is not None:
+                    assert prev_date is not None  # prev exists only with a pair
+                    summary["previous"] = {
+                        "villages": prev[0],
+                        "population": prev[1],
+                        "players": prev[2],
+                        "vp": prev[3],
+                    }
+                    summary["delta"] = {
+                        "villages": curr[0] - prev[0],
+                        "population": curr[1] - prev[1],
+                        "players": curr[2] - prev[2],
+                        "vp": curr[3] - prev[3],
+                    }
+                    summary["elapsed_days"] = (
+                        date.fromisoformat(latest.snapshot_date) - date.fromisoformat(prev_date)
+                    ).days
+                else:
+                    summary["previous"] = None
+                    summary["delta"] = None
+                    summary["elapsed_days"] = None
+
+                # Top regions: the same region_stats semantics as the Regions
+                # tab, capped at 8 — a payload contract, not a UI decision.
+                curr_agg = store.region_aggregates(conn, latest.snapshot_date, ids)
+                prev_agg = store.region_aggregates(conn, prev_date, ids) if prev_date is not None else None
+                stats = region_stats_from_aggregates(curr_agg, prev_agg)
+                regions_top = [
+                    {
+                        "region": stat.region,
+                        "share": stat.share,
+                        "our_pop": stat.our_pop,
+                        "region_total_pop": stat.region_total_pop,
+                        "our_villages": stat.our_villages,
+                        "share_delta": stat.share_delta,
+                    }
+                    for stat in stats[:8]
+                ]
+
+                # Players: the top_players semantics, capped at 5.
+                gains = _player_gains(conn, prev_date, latest.snapshot_date, ids)
+                curr_players = store.player_aggregates(conn, latest.snapshot_date, ids)
+                prev_players = store.player_aggregates(conn, prev_date, ids) if prev_date is not None else None
+                rankings = player_stats_from_aggregates(curr_players, prev_players, gains, n=5)
+                players = {
+                    "population": [stat.model_dump() for stat in rankings["population"]],
+                    "growth": [stat.model_dump() for stat in rankings["growth"]],
+                    "vp": [stat.model_dump() for stat in rankings["vp"]],
+                }
+
+                gained_total, lost_total = _movement_totals(conn, prev_date, latest.snapshot_date, ids)
+                movement: dict[str, object] = {
+                    "from": prev_date,
+                    "to": latest.snapshot_date,
+                    "gained_total": gained_total,
+                    "lost_total": lost_total,
+                }
+
+                return {
+                    "dates": dates,
+                    "latest_date": latest.snapshot_date,
+                    "previous_date": prev_date,
+                    "freshness": compute_freshness(all_dates, datetime.now(UTC), cfg.fetch_tz),
+                    "summary": summary,
+                    "regions": {"top": regions_top, "count": len(stats)},
+                    "players": players,
+                    "movement": movement,
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_compare(
+        from_: Annotated[str | None, Query(alias="from")] = None,
+        to: str | None = None,
+        alliance: str | None = None,
+    ) -> dict[str, object]:
+        """Period comparison for two EXPLICIT snapshot dates.
+
+        Both parameters are required together; explicit unknown dates or a
+        reversed range → 422 listing the valid dates. With fewer than two
+        snapshots and no parameters → 200 with null/empty (never a fake
+        delta pair)."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                empty: dict[str, object] = {
+                    "from": None,
+                    "to": None,
+                    "elapsed_days": None,
+                    "summary": {"from": None, "to": None, "delta": None},
+                    "regions": [],
+                    "movement": {"gained_total": None, "lost_total": None},
+                }
+                if from_ is None and to is None:
+                    if len(all_dates) < 2:
+                        return empty
+                    from_date = all_dates[-2]
+                    to_date = all_dates[-1]
+                elif from_ is None or to is None:
+                    raise HTTPException(status_code=422, detail="'from' and 'to' must be provided together")
+                else:
+                    if from_ not in all_dates:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"unknown 'from' date {from_!r} — valid dates: {', '.join(all_dates)}",
+                        )
+                    if to not in all_dates:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"unknown 'to' date {to!r} — valid dates: {', '.join(all_dates)}",
+                        )
+                    if from_ >= to:
+                        raise HTTPException(status_code=422, detail="'from' must be earlier than 'to'")
+                    from_date = from_
+                    to_date = to
+                ids = _resolve_alliance_ids(conn, to_date, cfg, alliance)
+                curr = store.alliance_totals(conn, to_date, ids)
+                prev = store.alliance_totals(conn, from_date, ids)
+                delta = {
+                    "villages": curr[0] - prev[0],
+                    "population": curr[1] - prev[1],
+                    "players": curr[2] - prev[2],
+                    "vp": curr[3] - prev[3],
+                }
+                summary_from = {
+                    "villages": prev[0],
+                    "population": prev[1],
+                    "players": prev[2],
+                    "vp": prev[3],
+                }
+                summary_to = {
+                    "villages": curr[0],
+                    "population": curr[1],
+                    "players": curr[2],
+                    "vp": curr[3],
+                }
+                curr_agg = store.region_aggregates(conn, to_date, ids)
+                prev_agg = store.region_aggregates(conn, from_date, ids)
+                regions: list[dict[str, object]] = []
+                for stat in region_stats_from_aggregates(curr_agg, prev_agg):
+                    prev_region = prev_agg.get(stat.region)
+                    regions.append(
+                        {
+                            "region": stat.region,
+                            "from_share": (stat.share - stat.share_delta) if stat.share_delta is not None else None,
+                            "to_share": stat.share,
+                            "share_delta": stat.share_delta,
+                            "from_pop": (stat.our_pop - stat.delta) if stat.delta is not None else None,
+                            "to_pop": stat.our_pop,
+                            "pop_delta": stat.delta,
+                            "from_total_pop": prev_region.total_pop if prev_region is not None else 0,
+                            "to_total_pop": stat.region_total_pop,
+                        }
+                    )
+                gained_total, lost_total = _movement_totals(conn, from_date, to_date, ids)
+                return {
+                    "from": from_date,
+                    "to": to_date,
+                    "elapsed_days": (date.fromisoformat(to_date) - date.fromisoformat(from_date)).days,
+                    "summary": {"from": summary_from, "to": summary_to, "delta": delta},
+                    "regions": regions,
+                    "movement": {"gained_total": gained_total, "lost_total": lost_total},
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_player_history(
+        player_id: int,
+        days: Annotated[int, Query(ge=2, le=60)] = 60,
+    ) -> dict[str, object]:
+        """Per-snapshot aggregates for one stable player (rankings drill-down).
+
+        Unknown player → 404; a player that only exists in history comes back
+        with ``present_in_latest=false``."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                history = store.player_history(conn, player_id, days)
+                if not history:
+                    raise HTTPException(status_code=404, detail=f"unknown player {player_id}")
+                all_dates = store.list_dates(conn)
+                latest_date = all_dates[-1] if all_dates else None
+                return {
+                    "player_id": player_id,
+                    "days": days,
+                    "present_in_latest": history[-1].snapshot_date == latest_date,
+                    "history": [point.model_dump() for point in history],
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
+    async def analysis_region_villages(
+        region: str,
+        date: str | None = None,
+        alliance: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 200,
+    ) -> dict[str, object]:
+        """Villages of one region on one snapshot date (Region drill-down).
+
+        ``date`` defaults to the latest snapshot; unknown dates → 422 with
+        the valid list. ``alliance`` scopes the rows like the analysis filter
+        (a tag → only that alliance's villages, all ``side=tracked``;
+        combined/absent → the whole region with per-row ``side``). An
+        unknown/empty region is a 200 with an empty list."""
+
+        def read() -> dict[str, object]:
+            conn = store.connect(db_path)
+            try:
+                cfg = deps.get_config()
+                all_dates = store.list_dates(conn)
+                if not all_dates:
+                    return {"snapshot_date": None, "region": region, "total": 0, "limit": limit, "results": []}
+                snapshot_date = date if date is not None else all_dates[-1]
+                if snapshot_date not in all_dates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown date {snapshot_date!r} — valid dates: {', '.join(all_dates)}",
+                    )
+                if alliance is None or alliance == "combined":
+                    side_ids = _resolve_alliance_ids(conn, snapshot_date, cfg, "combined")
+                    filter_ids = None
+                else:
+                    ids = _resolve_alliance_ids(conn, snapshot_date, cfg, alliance)
+                    side_ids = ids
+                    filter_ids = ids
+                rows = store.villages_in_region(
+                    conn, snapshot_date, region, limit, side_ids=side_ids, filter_ids=filter_ids
+                )
+                results = [
+                    {
+                        "village_id": row.village_id,
+                        "name": row.name,
+                        "x": row.x,
+                        "y": row.y,
+                        "region": row.region,
+                        "population": row.population,
+                        "player_name": row.player_name,
+                        "alliance_tag": row.alliance_tag,
+                        "is_capital": row.is_capital,
+                        "is_city": row.is_city,
+                        "is_harbor": row.is_harbor,
+                        "side": side,
+                    }
+                    for row, side in rows
+                ]
+                return {
+                    "snapshot_date": snapshot_date,
+                    "region": region,
+                    "total": len(results),
+                    "limit": limit,
+                    "results": results,
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(read)
+
     async def analysis_players(alliance: str | None = None) -> dict[str, object]:
         """Latest-pair top players: population / growth / new villages / VP (10 each).
 
@@ -1416,9 +1804,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
                 dates = store.list_dates(conn)
                 prev_date = dates[-2] if len(dates) >= 2 else None
                 ids = _resolve_alliance_ids(conn, latest.snapshot_date, cfg, alliance)
-                curr_rows = store.load_villages(conn, latest.snapshot_date)
-                prev_rows = store.load_villages(conn, prev_date) if prev_date is not None else None
-                rankings = top_players(curr_rows, prev_rows, ids, n=10)
+                gains = _player_gains(conn, prev_date, latest.snapshot_date, ids)
+                curr_players = store.player_aggregates(conn, latest.snapshot_date, ids)
+                prev_players = store.player_aggregates(conn, prev_date, ids) if prev_date is not None else None
+                rankings = player_stats_from_aggregates(curr_players, prev_players, gains, n=10)
                 return {
                     "population": [stat.model_dump() for stat in rankings["population"]],
                     "growth": [stat.model_dump() for stat in rankings["growth"]],
@@ -1546,6 +1935,10 @@ def create_app(deps: DashboardDeps) -> FastAPI:
     _ = app.get("/api/analysis/wars")(analysis_wars)
     _ = app.get("/api/analysis/deltas")(analysis_deltas)
     _ = app.get("/api/analysis/players")(analysis_players)
+    _ = app.get("/api/analysis/players/{player_id}/history")(analysis_player_history)
+    _ = app.get("/api/analysis/regions/{region}/villages")(analysis_region_villages)
+    _ = app.get("/api/analysis/overview")(analysis_overview)
+    _ = app.get("/api/analysis/compare")(analysis_compare)
     _ = app.get("/api/analysis/villages")(analysis_villages)
     _ = app.get("/api/analysis/villages/{village_id}/history")(analysis_village_history)
     return app
